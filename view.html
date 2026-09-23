@@ -1,0 +1,344 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sprint Board</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  body {
+    font-family: ui-monospace, Menlo, "SF Mono", monospace;
+    font-size: 11px; line-height: 1.5; color: #39ff14;
+    -webkit-user-select: none; user-select: none; cursor: default;
+  }
+
+  #card {
+    position: relative; margin: 0; padding: 14px 16px 12px;
+    background: linear-gradient(180deg, rgba(13,11,26,.96), rgba(9,8,18,.96));
+    border: 1px solid rgba(57,255,20,.35); border-radius: 10px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.55), inset 0 0 60px rgba(57,255,20,.04);
+    overflow: hidden;
+  }
+  /* CRT scanline */
+  #card::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(180deg, rgba(255,255,255,.035) 0 1px, transparent 1px 3px);
+  }
+
+  @keyframes sbBlink { 0%,100% { opacity: 1 } 50% { opacity: .28 } }
+  @keyframes sbPulse {
+    0%,100% { border-color:#ff3b3b; box-shadow:0 0 0 rgba(255,59,59,0); background:rgba(255,59,59,.06) }
+    50%     { border-color:#ff9c9c; box-shadow:0 0 16px rgba(255,59,59,.5); background:rgba(255,59,59,.14) }
+  }
+
+  /* Başlık sürükleme tutamağı — Swift tarafı bu bölgeyi pencere taşımak için kullanır */
+  .hdr { display:flex; justify-content:space-between; align-items:baseline;
+         letter-spacing:.06em; text-shadow:0 0 8px rgba(57,255,20,.45);
+         cursor: grab; }   /* sürükleme Swift tarafında: üst 34px */
+  .hdr:active { cursor: grabbing; }
+  .hdr .name { font-weight:700 }
+  .hdr .right { color:#9bffb0; font-size:10px; opacity:.85 }
+  .hdr .rf { cursor:pointer; margin-left:9px; color:#7CFFAE; font-size:12px }
+  .hdr .rf:hover { color:#fff; text-shadow:0 0 8px rgba(57,255,20,.8) }
+  /* fetch.mjs ~13 sn suruyor; donmeyen ⟳ "tiklamadi" gibi hissettiriyordu */
+  .hdr .rf.spin { display:inline-block; color:#fff; animation:sbSpin 1s linear infinite }
+  @keyframes sbSpin { to { transform:rotate(360deg) } }
+  @media (prefers-reduced-motion: reduce) {
+    .hdr .rf.spin { animation:none; opacity:.45 }
+  }
+
+  .siege { margin:6px 0 10px; color:#7CFFAE; font-size:10px; letter-spacing:.1em;
+           display:flex; justify-content:space-between; align-items:baseline }
+  .siege .legend { color:#44607d; letter-spacing:0 }
+
+  .boss { border:1px solid #ff3b3b; border-radius:7px; padding:8px 10px; margin-bottom:10px;
+          background:rgba(255,59,59,.07); animation:sbPulse 1.2s ease-in-out infinite; cursor:pointer }
+  .boss .tag { color:#ff6b6b; letter-spacing:.22em; font-weight:700; font-size:10px }
+  .boss .ghost { color:#b98bff; letter-spacing:.06em }
+  .boss .key { color:#fff; font-weight:700 }
+  .boss .sum { color:#ffb3b3; font-size:10px; opacity:.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  .boss .hp { color:#ff3b3b; letter-spacing:.06em; margin-top:3px }
+
+  .clean { border:1px solid rgba(57,255,20,.3); border-radius:7px; padding:8px 10px;
+           margin-bottom:10px; background:rgba(57,255,20,.05); color:#7CFFAE }
+
+  .row { display:flex; gap:7px; align-items:baseline; padding:2px 0; cursor:pointer; border-radius:3px }
+  .row:hover { background:rgba(57,255,20,.07) }
+  .row .k { color:#cfe9ff; width:92px; flex:none; white-space:nowrap }
+  .row .s { flex:1; color:#8fa9c9; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .row .qa { flex:none; width:62px; color:#5fb3c4; overflow:hidden; white-space:nowrap }
+  .row .carry { flex:none; width:26px; text-align:right; color:#b98bff }
+  .row .pr { flex:none; width:34px; text-align:right; color:#55708c }
+  .row .pr.bad { color:#ff6b6b } .row .pr.wait { color:#ffb000 } .row .pr.good { color:#4a8f6a }
+  .row .d { flex:none; color:#6f8aa8 }
+  .row .age { flex:none; width:30px; text-align:right; color:#44607d }
+  .row.done { opacity:.5 }
+  .row.done .k { color:#7ea88a }
+  .row.done .s { color:#5d7a68 }
+  /* Üstü çizili = iş bitti. Jira'nın "done" kategorisi bunu tek başına söylemiyor:
+     15 statünün bir kısmı "prod'a çıkmayı bekliyor" demek. */
+  .row.done.finished .k, .row.done.cancelled .k { text-decoration:line-through }
+  /* Release bekleyen hâlâ takipte — daha az soluk, yeşil kalsın. */
+  .row.done.pending { opacity:.78 }
+  .row.done.pending .k { color:#7CFFAE; text-decoration:none }
+  .row.done.pending .s { color:#6f9d81 }
+  .row.warn .d, .row.warn .k { color:#ffb000 }
+  .row.critical .d, .row.critical .k { color:#ff6b6b }
+  .row.warn .d, .row.critical .d { animation:sbBlink 1.6s ease-in-out infinite }
+
+  .band { margin-top:9px; border-top:1px dashed rgba(255,59,59,.4); padding-top:6px }
+
+  /* Guncelleme satiri: dikkat cekmeli ama BOSS kadar degil — acil bir sey degil. */
+  .upd { margin-top:9px; padding:5px 8px; border-radius:6px; cursor:pointer;
+         font-size:10px; letter-spacing:.04em; color:#ffd34d;
+         background:rgba(255,211,77,.08); border:1px solid rgba(255,211,77,.35) }
+  .upd:hover { background:rgba(255,211,77,.16) }
+  .band .bhdr { color:#ff6b6b; font-size:10px; letter-spacing:.12em; margin-bottom:3px }
+  .band .brow { color:#ffa3a3; font-size:10px; display:flex; gap:8px; cursor:pointer; border-radius:3px }
+  .band .brow:hover { background:rgba(255,255,255,.06) }
+  .band .brow .brepo { flex:none }
+  .band .brow .bchecks { margin-left:auto; color:#c98a8a; max-width:58%;
+                         overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .band.rel { border-top-color:rgba(124,255,174,.35) }
+  .band.rel .bhdr { color:#7CFFAE }
+  .band.rel .brow { color:#a8e6c0 }
+  .band.rel .brow .bchecks { color:#6f9d81 }
+  .band.waiting { border-top-color:rgba(255,176,0,.4) }
+  .band.waiting .bhdr { color:#ffb000 } .band.waiting .brow { color:#ffd88a }
+  .band.waiting .brow .bchecks { color:#c9a86a }
+  .band.review { border-top-color:rgba(120,170,255,.45) }
+  .band.review .bhdr { color:#7fb0ff } .band.review .brow { color:#bcd6ff }
+  .band.review .brow .bchecks { color:#7f97bd }
+  .band.review .brow.stale { color:#ffb0b0 }
+
+  .notes { margin-top:9px; padding-top:7px; border-top:1px solid rgba(57,255,20,.18) }
+  .notes .nhdr { color:#44607d; font-size:9px; letter-spacing:.16em; margin-bottom:3px }
+  .notes .nrow { display:flex; gap:6px; align-items:baseline; font-size:10px; color:#cfe9d8; padding:1px 0 }
+  .notes .ntext { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .notes .ndel { flex:none; color:#4d6b5a; cursor:pointer }
+  .notes .ndel:hover { color:#ff6b6b }
+  .notes .ninput { width:100%; margin-top:4px; background:rgba(57,255,20,.05);
+                   border:1px solid rgba(57,255,20,.2); border-radius:4px; color:#9bffb0;
+                   font-family:inherit; font-size:10px; padding:3px 6px; outline:none;
+                   -webkit-user-select:text; user-select:text }
+  .notes .ninput::placeholder { color:#3f6b52 }
+  .notes .ninput:focus { border-color:rgba(57,255,20,.5); background:rgba(57,255,20,.09) }
+
+  .stale { margin-bottom:8px; padding:5px 8px; border-radius:6px; font-size:9px;
+           line-height:1.5; letter-spacing:0; color:#ffd88a;
+           background:rgba(255,176,0,.10); border:1px solid rgba(255,176,0,.35) }
+  .stale b { color:#ffb000 }
+
+  .err .hint { margin-top:6px; color:#8a7fb8; font-size:9px; line-height:1.5;
+               letter-spacing:0; text-transform:none }
+
+  .err { color:#ff6b6b; font-size:10px; white-space:pre-wrap }
+
+  @media (prefers-reduced-motion: reduce) {
+    .boss, .row.warn .d, .row.critical .d { animation:none !important }
+  }
+</style>
+
+<div id="card"><div class="err">⏳ veri çekiliyor…</div></div>
+
+<script>
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+  const bar = (f, w = 10) => {
+    const n = Math.max(0, Math.min(w, Math.round((f || 0) * w)));
+    return "█".repeat(n) + "░".repeat(w - n);
+  };
+  const clip = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
+  const DONE_ICON = { finished: "✅", cancelled: "✖", pending: "🟢" };
+  const icon = (t) => t.done ? (DONE_ICON[t.release] || "🟢")
+    : t.alert ? "🔥" : t.carriedOver ? "👻" : t.statusCategory === "new" ? "🛡" : "🗡";
+  const PR_MARK = { FAILURE:"✗", ERROR:"✗", PENDING:"●", EXPECTED:"●", SUCCESS:"✓" };
+  const prMark = (s) => PR_MARK[s] || "·";
+  // Durum bilinmiyorsa (draft PR, ya da CI sorgusu düşmüşse) SINIF VERME: .row .pr
+  // taban rengi zaten nötr. Eskiden buradaki "good" yüzünden durumsuz PR yeşil
+  // çiziliyordu — "geçti" demek oluyordu, oysa hiçbir şey bilinmiyor.
+  const prClass = (s) => (s === "FAILURE" || s === "ERROR") ? "bad"
+    : (s === "PENDING" || s === "EXPECTED") ? "wait" : s ? "good" : "";
+  const hhmm = (iso) => { try { const d = new Date(iso);
+    return String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0");
+  } catch { return "—"; } };
+
+  // Link açma Swift tarafına devrediliyor (WKWebView kendi başına açamaz).
+  const openUrl = (u) => { if (u && u !== "#") window.webkit?.messageHandlers?.sb?.postMessage({ open: u }); };
+  const refresh = () => window.webkit?.messageHandlers?.sb?.postMessage({ refresh: true });
+
+  const band = (cls, title, rows, mark) => rows.length ? `
+    <div class="band ${cls}">
+      <div class="bhdr">${title} (${rows.length})</div>
+      ${rows.map((p) => `
+        <div class="brow ${cls === "review" && p.days >= 2 ? "stale" : ""}"
+             data-url="${esc(p.url)}" title="${esc(p.key || p.title || "")}">
+          <span class="brepo">${cls === "review" ? (p.days >= 2 ? "⏰" : "·") : mark} ${esc(p.repo)}#${p.number}</span>
+          <span class="bchecks">${cls === "review"
+            ? esc(p.author) + " · " + p.days + "g"
+            : esc((p.checks || []).join(", ") || "?")}</span>
+        </div>`).join("")}
+    </div>` : "";
+
+  // Geçmiş sprintte kalmış ama canlıya çıkmamış işler. Ana listede yoklar —
+  // sprint kapanınca ana sorgu onları hiç getirmiyor.
+  const relBand = (rows) => rows.length ? `
+    <div class="band rel">
+      <div class="bhdr">🚚 CANLIYA ÇIKMAYI BEKLEYEN (${rows.length})</div>
+      ${rows.map((r) => `
+        <div class="brow" data-url="${esc(r.url)}"
+             title="${esc(r.summary)}&#10;${esc(r.status)} · ${r.days} iş günü">
+          <span class="brepo">🟢 ${esc(r.key)}</span>
+          <span class="bchecks">${esc(clip(r.status, 16))}${r.sprint
+            ? " · " + esc(clip(r.sprint.replace(/^.*Sprint/i, "Sprint"), 12)) : ""} · ${r.days}g</span>
+        </div>`).join("")}
+    </div>` : "";
+
+  let NOTES = [];
+  let LAST = null;
+
+  // Swift notları dosyadan gönderir; draw() innerHTML'i ezdiği için burada saklıyoruz.
+  window.sbNotes = (n) => { NOTES = Array.isArray(n) ? n : []; if (LAST) draw(LAST); };
+
+  const notesHtml = () => `
+    <div class="notes">
+      <div class="nhdr">${NOTES.length ? "NOTLAR " + NOTES.length + "/6" : "NOTLAR"}</div>
+      ${NOTES.map((n) => `
+        <div class="nrow">
+          <span class="ntext" title="${esc(n.text)}">${esc(n.text)}</span>
+          <span class="ndel" data-del="${esc(n.id)}" title="sil">✕</span>
+        </div>`).join("")}
+      <input class="ninput" type="text" placeholder="${NOTES.length >= 6
+        ? "liste dolu — en eski düşer" : "+ not… (Enter)"}">
+    </div>`;
+
+  let keepInput = "";
+
+  let LAST_OK = null;    // son BAŞARILI veri — geçici hatada kart silinmesin
+  let staleNote = null;
+
+  function draw(d) {
+    // Tek bir ağ kesintisi tüm kartı hata ekranına çeviriyordu ve bir sonraki
+    // deneme 30 dk sonraydı. Elimizde iyi veri varsa onu göstermeye devam et,
+    // üstüne "yenilenemedi" şeridi koy.
+    if (d && d.ok === false && LAST_OK) {
+      staleNote = { error: d.error || "bilinmeyen hata", at: LAST_OK.generatedAt };
+      d = LAST_OK;
+    } else if (d && d.ok) {
+      LAST_OK = d;
+      staleNote = null;
+    }
+    LAST = d;
+    const prevInput = document.querySelector(".ninput");
+    const hadFocus = !!prevInput && document.activeElement === prevInput;
+    if (prevInput) keepInput = prevInput.value;
+    const card = document.getElementById("card");
+    if (!d || !d.ok) {
+      card.innerHTML = `<div class="err">⚠ ${esc(d && d.error || "veri yok")}</div>`;
+      return;
+    }
+    const { sprint = {}, boss, tasks = [] } = d;
+    const broken = d.brokenPrs || [], waiting = d.waitingPrs || [], reviews = d.reviewRequests || [];
+
+    card.innerHTML = `
+      <div class="hdr">
+        <span class="name">⚔ ${esc(clip(sprint.name, 30))}</span>
+        <span class="right">${sprint.daysLeft == null ? "—" : "bitişe " + sprint.daysLeft + "g"}
+          · ${hhmm(d.generatedAt)}<span class="rf" id="rf" title="şimdi yenile">⟳</span></span>
+      </div>
+
+      ${staleNote ? `<div class="stale">⚠ Yenilenemedi: <b>${esc(staleNote.error)}</b><br>
+        Gösterilen veri ${hhmm(staleNote.at)} itibarıyla. Birazdan tekrar denenecek;
+        beklemek istemezsen ⟳'ye bas.</div>` : ""}
+
+      <div class="siege">
+        <span>${bar(d.total ? d.cleared / d.total : 0, 12)} ${d.cleared}/${d.total} cleared</span>
+        <span class="legend">statü/yaş</span>
+      </div>
+
+      ${boss ? `
+        <div class="boss" data-url="${esc(boss.url)}">
+          <div class="tag">💀 B O S S ${"⚡".repeat(boss.bolts)}
+            ${boss.carriedOver ? `<span class="ghost"> 👻 ×${boss.sprintCount}</span>` : ""}</div>
+          <div class="key">${esc(boss.key)}</div>
+          <div class="sum">${esc(clip(boss.summary, 46))}</div>
+          <div class="hp">HP ${bar(Math.max(.15, Math.min(1, (boss.ratio - 1) / 2)))}
+            ${esc(boss.status)} · ${boss.daysInStatus}g / eşik ${boss.threshold}g</div>
+        </div>` : `<div class="clean">⚔ No boss — sprint temiz</div>`}
+
+      ${tasks.map((t) => `
+        <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}" data-url="${esc(t.url)}"
+             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} iş günü (eşik ${t.threshold}g) · yaş ${t.ageDays}g">
+          <span class="k">${icon(t)} ${esc(t.key)}</span>
+          <span class="s">${esc(clip(t.status, 14))}</span>
+          <span class="qa">${t.qaShort ? "🧪" + esc(t.qaShort) : ""}</span>
+          <span class="carry">${t.carriedOver ? "×" + t.sprintCount : ""}</span>
+          <span class="pr ${t.pr ? prClass(t.pr.state) : ""}">${t.pr ? "⚙" + t.pr.count + prMark(t.pr.state) : ""}</span>
+          <span class="d">${t.daysInStatus}g</span>
+          <span class="age">/${t.ageDays}</span>
+        </div>`).join("")}
+
+      ${relBand(d.pendingRelease || [])}
+
+      ${band("", "⚠ MERGE ENGELLİ", broken, "✗")}
+      ${band("waiting", "⏳ BEKLEYEN", waiting, "●")}
+      ${band("review", "👀 SENDEN REVIEW BEKLİYOR", reviews, "·")}
+
+      ${d.update ? `<div class="upd" data-url="${esc(d.update.url || "")}">
+        ⬆ <b>v${esc(d.update.version)}</b> çıktı — indirmek için tıkla</div>` : ""}
+
+      ${notesHtml()}
+    `;
+
+    card.querySelectorAll("[data-url]").forEach((el) =>
+      el.addEventListener("click", () => openUrl(el.getAttribute("data-url"))));
+    card.querySelectorAll("[data-del]").forEach((el) =>
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        window.webkit?.messageHandlers?.sb?.postMessage({ noteDel: el.getAttribute("data-del") });
+      }));
+    const inp = card.querySelector(".ninput");
+    if (inp) {
+      inp.value = keepInput;            // yenileme sırasında yazdığın metin kaybolmasın
+      inp.addEventListener("input", () => { keepInput = inp.value; });
+      inp.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key !== "Enter") return;
+        const v = inp.value;
+        inp.value = ""; keepInput = "";
+        window.webkit?.messageHandlers?.sb?.postMessage({ noteAdd: v });
+      });
+      if (hadFocus) inp.focus();
+    }
+    const rf = document.getElementById("rf");
+    if (rf) rf.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (rf.classList.contains("spin")) return;   // 13 sn boyunca cift tetiklemeyi engelle
+      rf.classList.add("spin");
+      refresh();
+    });
+
+    // Swift'e gerçek içerik yüksekliğini bildir ki pencere tam otursun
+    window.webkit?.messageHandlers?.sb?.postMessage({ height: card.offsetHeight });
+  }
+
+  // fetch.mjs normalde ~13 sn; yeniden derlemeden sonraki ILK acilista macOS
+  // keychain iznini yeniden sorduğu için 80 sn'ye çıkabiliyor. Sayaç olmayınca
+  // bu "takıldı" gibi görünüyordu.
+  const T0 = Date.now();
+  let waitTimer = setInterval(() => {
+    const el = document.getElementById("card");
+    if (!el || LAST) return;
+    const sec = Math.round((Date.now() - T0) / 1000);
+    el.innerHTML = `<div class="err">⏳ veri çekiliyor… ${sec}s` +
+      (sec > 25
+        ? `<div class="hint">İlk açılışta macOS keychain izni sorulabiliyor.
+             Ekranda izin penceresi çıktıysa <b>Her Zaman İzin Ver</b>'i seç;
+             bu tek seferlik, sonraki açılışlar ~13 sn.</div>`
+        : "") + `</div>`;
+  }, 1000);
+
+  window.sbRender = (d) => {
+    if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
+    draw(d);
+  };
+</script>

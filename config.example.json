@@ -1,0 +1,37 @@
+{
+  "host": "sirketin.atlassian.net",
+  "email": "sen@sirket.com",
+  "keychainService": "sprint-board-jira",
+  "githubOrg": "",
+  "updateRepo": "mustafauyysl/sprint-board",
+  "defaultThresholdDays": 5,
+  "thresholds": {
+    "To Do": 7,
+    "Open": 7,
+    "Backlog": 7,
+    "In Progress": 5,
+    "In Review": 2,
+    "In Code Review": 2,
+    "Ready To Test": 3,
+    "IN TESTING": 3,
+    "IN AUTO TESTING": 3,
+    "UAT": 3,
+    "In Security Check": 5
+  },
+  "sound": {
+    "enabled": true,
+    "boss": "/System/Library/Sounds/Sosumi.aiff",
+    "ci": "/System/Library/Sounds/Funk.aiff",
+    "review": "/System/Library/Sounds/Blow.aiff"
+  },
+  "nameOverrides": {
+    "Jira'daki Ad Soyad": "kısa ad"
+  },
+  "pendingReleaseStatuses": [
+    "Ready For Release",
+    "Awaiting Release",
+    "Pending for Release",
+    "Waiting for Release",
+    "Waiting for SDK Release"
+  ]
+}

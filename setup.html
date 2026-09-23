@@ -1,0 +1,94 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sprint Board — Kurulum</title>
+<style>
+  * { box-sizing: border-box }
+  body {
+    margin: 0; padding: 16px 18px; font: 11px/1.5 ui-monospace, Menlo, monospace;
+    color: #cfe9d8; background: rgba(6, 18, 10, .96);
+    border: 1px solid rgba(57,255,20,.35); border-radius: 10px;
+    -webkit-user-select: none; user-select: none;
+  }
+  h1 { margin: 0 0 3px; font-size: 12px; letter-spacing: .18em; color: #39ff14; font-weight: 700 }
+  .sub { margin: 0 0 14px; color: #5f8a70; font-size: 9px; line-height: 1.6 }
+  label { display: block; margin-top: 10px; color: #7CFFAE; font-size: 9px; letter-spacing: .1em }
+  label .opt { color: #4d6b5a; letter-spacing: 0 }
+  input {
+    width: 100%; margin-top: 3px; padding: 5px 7px; font: inherit; color: #9bffb0;
+    background: rgba(57,255,20,.05); border: 1px solid rgba(57,255,20,.2);
+    border-radius: 4px; outline: none; -webkit-user-select: text; user-select: text;
+  }
+  input:focus { border-color: rgba(57,255,20,.5); background: rgba(57,255,20,.09) }
+  a { color: #7fb0ff; text-decoration: none }
+  a:hover { text-decoration: underline }
+  .hint { margin-top: 2px; color: #4d6b5a; font-size: 9px }
+  button {
+    margin-top: 16px; width: 100%; padding: 7px; font: inherit; font-weight: 700;
+    letter-spacing: .12em; color: #06120a; background: #39ff14; border: 0;
+    border-radius: 5px; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default }
+  .err {
+    margin-top: 12px; padding: 6px 8px; border-radius: 5px; font-size: 9px; line-height: 1.6;
+    color: #ffb0b0; background: rgba(255,0,0,.08); border: 1px solid rgba(255,80,80,.35);
+  }
+  .err ul { margin: 0; padding-left: 14px }
+</style>
+
+<h1>⚔ SPRINT BOARD</h1>
+<p class="sub">İlk kurulum. Token'lar hiçbir dosyaya yazılmaz — macOS keychain'ine gider.</p>
+
+<label>JIRA ADRESİ</label>
+<input id="host" placeholder="sirketin.atlassian.net" autofocus>
+
+<label>E-POSTA</label>
+<input id="email" placeholder="ad.soyad@sirket.com">
+
+<label>JIRA API TOKEN</label>
+<input id="jiraToken" type="password" placeholder="ATATT...">
+<div class="hint"><a href="#" data-url="https://id.atlassian.com/manage-profile/security/api-tokens">id.atlassian.com → API tokens</a> adresinden üret</div>
+
+<label>GITHUB ORG <span class="opt">(boş bırakılabilir)</span></label>
+<input id="githubOrg" placeholder="sirket-org-adi">
+
+<label>GITHUB TOKEN <span class="opt">(boş bırakılırsa PR/CI bandı kapalı kalır)</span></label>
+<input id="githubToken" type="password" placeholder="ghp_...">
+<div class="hint"><a href="#" data-url="https://github.com/settings/tokens">github.com → tokens</a> · gereken izinler: <b>repo</b>, <b>read:org</b></div>
+
+<button id="go">KUR</button>
+<div id="err" class="err" style="display:none"></div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const post = (m) => window.webkit?.messageHandlers?.sb?.postMessage(m);
+
+  // Linkler varsayılan tarayıcıda açılmalı; WKWebView içinde açılırsa kurulum
+  // ekranının yerini alır ve kullanıcı geri dönemez.
+  document.querySelectorAll("[data-url]").forEach((a) =>
+    a.addEventListener("click", (e) => { e.preventDefault(); post({ open: a.dataset.url }); }));
+
+  function submit() {
+    $("go").disabled = true;
+    $("err").style.display = "none";
+    post({ setupSave: {
+      host: $("host").value, email: $("email").value,
+      jiraToken: $("jiraToken").value, githubOrg: $("githubOrg").value,
+      githubToken: $("githubToken").value,
+    }});
+  }
+  $("go").addEventListener("click", submit);
+  document.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+
+  // Swift doğrulama sonucunu buraya geri veriyor.
+  window.sbSetupResult = (res) => {
+    $("go").disabled = false;
+    const errs = (res && res.errors) || ["bilinmeyen hata"];
+    $("err").innerHTML = "<ul>" + errs.map((e) =>
+      "<li>" + String(e).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</li>"
+    ).join("") + "</ul>";
+    $("err").style.display = "block";
+  };
+
+  // Pencere yüksekliğini içeriğe göre ayarla (view.html ile aynı köprü).
+  requestAnimationFrame(() => post({ height: document.body.scrollHeight + 32 }));
+</script>

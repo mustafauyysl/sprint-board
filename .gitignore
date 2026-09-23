@@ -1,0 +1,11 @@
+# derlenmis binary — build-app.sh ile her an yeniden uretilir
+sprint-board
+.DS_Store
+
+# yerel arac ciktilari — baska bir gelistiricinin `git add -A`'si bunlari
+# kazara repoya sokmasin
+.claude/
+.orbit-output/
+
+# dagitim ciktisi — derlemeyle yeniden uretilir
+dist/
