@@ -48,6 +48,45 @@ Swift değişirse `./build-app.sh`.
 - **`lib.mjs` saf kalmalı.** I/O yok, `Date.now()` yok — `now` hep parametre.
   Yeni mantık buraya + testi `test.mjs`'e. I/O `fetch.mjs`'te.
 
+## Jira kimlik doğrulaması — neden Worker var
+
+Hedef: kullanıcı hiçbir şey yazmasın, "Atlassian ile giriş yap"a bassın.
+
+**Atlassian public client DESTEKLEMİYOR.** Kimlik sunucusu
+`token_endpoint_auth_methods_supported` olarak yalnızca `client_secret_basic`
+ve `client_secret_post` ilan ediyor — `none` yok. PKCE destekleniyor ama
+secret'ın YERİNE değil YANINDA. Ölçüldü: secret'sız token isteği
+`401 access_denied` döner. Takip: ECO-283, "Gathering Interest".
+
+Secret dağıtılan .app'e konamaz — zip'in içindeki .mjs dosyaları düz metin ve
+repo public. Bu yüzden `worker/` var: tek işi secret'ı ekleyip isteği
+Atlassian'a iletmek. Durum tutmaz, loglamaz.
+
+- Worker: `https://sprint-board-auth.mustafa-uysal.workers.dev`
+  (`/token`, `/refresh`, `/health`)
+- Client ID kodda/`wrangler.toml`'da durur — sır değil.
+- **Client secret YALNIZCA Cloudflare'de** (`wrangler secret put`). Repoya ASLA.
+- Deploy: `cd worker && npx wrangler deploy`
+
+**Token ömrü:** access 1 saat (arka planda sessizce yenilenir, tarayıcı
+açılmaz), refresh rotating ve 90 gün hareketsizlikte dolar — her yenileme
+90 günü sıfırlar. Yani uygulama açıldığı sürece giriş kalıcı.
+**Rotating token tuzağı:** yeni refresh token KULLANILMADAN ÖNCE kaydedilmeli;
+sıra bozulursa zincir kopar ve kullanıcı yeniden giriş yapmak zorunda kalır.
+
+**API token yolu neden yeterli değil:** Atlassian Aralık 2024'ten beri API
+token'lara en fazla 1 yıl ömür veriyor, süresiz seçenek yok. Yani o yolda
+her kullanıcı yılda bir token'ı elle yenilemek zorunda.
+
+Uçtan uca doğrulandı (2026-09-23): Worker'dan token HTTP 200 · siteler
+`accessible-resources`'tan geliyor · e-posta `/me`'den geliyor ·
+`api.atlassian.com/ex/jira/{cloudId}/rest/api/3/...` ile gerçek sprint
+sorgusu HTTP 200 · yenileme tarayıcı açılmadan HTTP 200.
+
+**Henüz YAPILMADI:** Swift tarafı (giriş ekranı düğmeleri, yerel callback
+dinleyicisi, token saklama) ve `fetch.mjs`'in Jira katmanının Bearer +
+cloudId adresine taşınması. Mevcut Basic-auth yolu çalışmaya devam ediyor.
+
 ## Mimari
 
 | Dosya | Rol |

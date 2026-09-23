@@ -1,0 +1,10 @@
+name = "sprint-board-auth"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# ATLASSIAN_CLIENT_SECRET burada TANIMLI DEGIL ve olmamali.
+# `npx wrangler secret put ATLASSIAN_CLIENT_SECRET` ile ayrica giriliyor,
+# boylece secret ne repoya ne de bu dosyaya duser.
+
+[vars]
+ATLASSIAN_CLIENT_ID = "D2jLovDh1jR4h0xezwElLSyWs3QpUe0w"
