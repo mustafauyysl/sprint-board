@@ -11,7 +11,7 @@ import {
   businessDaysBetween, evaluate, pickBoss, bolts,
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
-  validateSetup, updateInfo,
+  validateSetup, updateInfo, jiraRequest,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -50,10 +50,16 @@ function getToken(service, account) {
  * Terminalden elle calistirildiginda stdin bir tty'dir; o zaman asagidaki
  * `security` yoluna dusuluyor (eski, elle kurulmus kayitlar da boyle calisiyor).
  */
-function pipedTokens() {
+async function pipedTokens() {
   if (process.stdin.isTTY) return {};
+  // readFileSync(0) KULLANILMAZ: boru henuz bossa EAGAIN atiyor ve token
+  // yokmus gibi devam ediliyordu (olculdu — OAuth modunda uygulama tarafi
+  // payload'u hazirlarken ag istegi yaptigi icin boru bir an bos kaliyor).
+  // Burada EOF'a kadar okuyoruz; yazan taraf yazip kapatiyor.
   try {
-    const raw = readFileSync(0, "utf8").trim();
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    const raw = Buffer.concat(chunks).toString("utf8").trim();
     return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
@@ -64,9 +70,8 @@ let apiCalls = 0;
 
 async function api(cfg, auth, path) {
   apiCalls++;
-  const res = await fetch(`https://${cfg.host}${path}`, {
-    headers: { Authorization: `Basic ${auth}`, Accept: "application/json" },
-  });
+  const { url, headers } = jiraRequest(auth, cfg.host, path);
+  const res = await fetch(url, { headers });
   return { status: res.status, ok: res.ok, body: res.ok ? await res.json() : await res.text() };
 }
 
@@ -530,19 +535,28 @@ async function main() {
   if (!cfg) throw new Error(`config okunamadı: ${CONFIG_PATH}`);
   if (process.argv.includes("--demo")) return demoPayload(cfg);
 
-  const piped = pipedTokens();
-  const token = piped.jiraToken || getToken(cfg.keychainService || JIRA_KEYCHAIN, cfg.email);
-  if (!token) {
+  const piped = await pipedTokens();
+
+  // İki kimlik yolu. OAuth'ta access token'ı Swift tarafı veriyor (süresi
+  // dolmuşsa Worker üzerinden yenileyip öyle veriyor), site `cloudId` ile
+  // seçiliyor. Yoksa eski API token yoluna düşülüyor — mevcut kurulumlar
+  // tek satır değişmeden çalışmaya devam etsin diye.
+  const auth = piped.jiraAccessToken && cfg.cloudId
+    ? { mode: "oauth", token: piped.jiraAccessToken, cloudId: cfg.cloudId }
+    : null;
+
+  const token = auth ? null : (piped.jiraToken || getToken(cfg.keychainService || JIRA_KEYCHAIN, cfg.email));
+  if (!auth && !token) {
     throw new Error(
       `keychain'de token yok — 'security add-generic-password -s ${cfg.keychainService} -a ${cfg.email} -w <TOKEN>' çalıştır`
     );
   }
-  const auth = Buffer.from(`${cfg.email}:${token}`).toString("base64");
+  const jiraAuth = auth || { mode: "basic", token: Buffer.from(`${cfg.email}:${token}`).toString("base64") };
 
   let sprintField = cfg.sprintFieldId;
   let qaField = cfg.qaFieldId;
   if (!sprintField || qaField === undefined) {
-    const found = await discoverFields(cfg, auth, ["Sprint", "QA Tester"]);
+    const found = await discoverFields(cfg, jiraAuth, ["Sprint", "QA Tester"]);
     sprintField = sprintField || found["Sprint"];
     if (!sprintField) throw new Error("Jira'da 'Sprint' alanı bulunamadı");
     qaField = qaField === undefined ? found["QA Tester"] : qaField;
@@ -550,7 +564,7 @@ async function main() {
   }
 
   const issues = await searchIssues(
-    cfg, auth,
+    cfg, jiraAuth,
     "assignee = currentUser() AND sprint in openSprints() ORDER BY updated DESC",
     `summary,status,priority,issuetype,created,${sprintField}${qaField ? "," + qaField : ""}`
   );
@@ -561,7 +575,7 @@ async function main() {
   // yanlis token giren kullanici hata degil bombos bir widget goruyordu.
   // Kimligi SADECE sonuc bosken dogruluyoruz — dolu panoda ek istek yok.
   if (issues.length === 0) {
-    const me = await api(cfg, auth, "/rest/api/3/myself");
+    const me = await api(cfg, jiraAuth, "/rest/api/3/myself");
     if (!me.ok) {
       throw new Error(
         me.status === 401
@@ -574,13 +588,13 @@ async function main() {
   const now = new Date();
   // Opsiyonel katman, ana yükü BEKLETMEMELİ: burada sadece başlatılıyor, sonucu
   // task döngüsünden sonra toplanıyor.
-  const pendingReleaseP = fetchPendingRelease(cfg, auth, sprintField, now);
+  const pendingReleaseP = fetchPendingRelease(cfg, jiraAuth, sprintField, now);
   const tasks = [];
   for (const issue of issues) {
     const f = issue.fields;
     const status = f.status?.name ?? "Unknown";
     const done = f.status?.statusCategory?.key === "done";
-    const enteredAt = await statusEnteredAt(cfg, auth, issue);
+    const enteredAt = await statusEnteredAt(cfg, jiraAuth, issue);
     const daysInStatus = businessDaysBetween(enteredAt, now);
     // Statüde geçen süre darboğazı, yaş ise toplam gecikmeyi gösterir — ikisi farklı sinyal.
     const ageDays = businessDaysBetween(new Date(f.created), now);

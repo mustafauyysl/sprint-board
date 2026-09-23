@@ -9,6 +9,8 @@
 import Cocoa
 import WebKit
 import Security
+import CommonCrypto
+import Network
 
 /// Homebrew Apple Silicon'da /opt/homebrew, Intel Mac'te /usr/local altında kurulu.
 /// Finder'dan açılan bir GUI uygulaması shell PATH'ini GÖRMEZ (/usr/bin:/bin ile
@@ -70,6 +72,10 @@ func needsSetup() -> Bool {
           let email = cfg["email"] as? String, !email.isEmpty,
           email != "sen@sirket.com"           // ornekten kopyalanmis, doldurulmamis
     else { return true }
+    // OAuth kurulumunda aranacak sey API token'i degil refresh token.
+    if (cfg["authMode"] as? String) == "oauth" {
+        return keychainGet(service: JIRA_OAUTH_KEYCHAIN, account: email) == nil
+    }
     let service = (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
     return keychainGet(service: service, account: email) == nil
 }
@@ -100,6 +106,144 @@ func keychainSet(service: String, account: String, value: String) -> Bool {
     var add = base
     add[kSecValueData as String] = Data(value.utf8)
     return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+}
+
+// --- Atlassian OAuth ----------------------------------------------------
+// Neden Worker: Atlassian token ucu `client_secret` ZORUNLU tutuyor (kimlik
+// sunucusu `none` kimlik yontemini ilan etmiyor), yani PKCE secret'in YERINE
+// gecmiyor. Secret dagitilan .app'e konamayacagi icin degisim Worker'dan
+// geciyor. Ayrintili gerekce: CLAUDE.md.
+let WORKER_URL = "https://sprint-board-auth.mustafa-uysal.workers.dev"
+let ATLASSIAN_CLIENT_ID = "D2jLovDh1jR4h0xezwElLSyWs3QpUe0w"
+let OAUTH_PORT: UInt16 = 53682
+let OAUTH_SCOPES = "read:jira-work read:jira-user read:me offline_access"
+/// Refresh token burada. Access token bellekte tutuluyor — 1 saatlik, diske
+/// yazmanin anlami yok.
+let JIRA_OAUTH_KEYCHAIN = "sprint-board-jira-oauth"
+
+/// Dosyaya teshis. VARSAYILAN OLARAK KAPALI: yalnizca /tmp/sb-debug.log
+/// ONCEDEN VARSA yazar, yani `touch /tmp/sb-debug.log` ile aciliyor.
+///
+/// Neden dosya: `open` ile acilan uygulamanin NSLog'u birlesik loga dusmuyor
+/// (README'deki tuzak). Terminalden calistirmak da farkli bir ortam oldugu
+/// icin sorunu maskeleyebiliyor.
+func dbg(_ s: String) {
+    let path = "/tmp/sb-debug.log"
+    guard let h = FileHandle(forWritingAtPath: path) else { return }
+    h.seekToEndOfFile()
+    h.write(Data("\(Date()) \(s)\n".utf8))
+    h.closeFile()
+}
+
+func b64url(_ d: Data) -> String {
+    d.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+}
+
+func randomB64url(_ bytes: Int) -> String {
+    var b = [UInt8](repeating: 0, count: bytes)
+    _ = SecRandomCopyBytes(kSecRandomDefault, bytes, &b)
+    return b64url(Data(b))
+}
+
+func sha256B64url(_ s: String) -> String {
+    var h = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    let d = Data(s.utf8)
+    d.withUnsafeBytes { _ = CC_SHA256($0.baseAddress, CC_LONG(d.count), &h) }
+    return b64url(Data(h))
+}
+
+/// POST JSON, JSON al. Senkron — zaten arka plan kuyrugundan cagriliyor.
+func postJSON(_ urlString: String, _ body: [String: Any]) -> [String: Any]? {
+    guard let url = URL(string: urlString),
+          let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+    var req = URLRequest(url: url)
+    req.httpMethod = "POST"
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.httpBody = data
+    req.timeoutInterval = 25
+    var out: [String: Any]?
+    let sem = DispatchSemaphore(value: 0)
+    URLSession.shared.dataTask(with: req) { d, _, _ in
+        if let d, let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] { out = j }
+        sem.signal()
+    }.resume()
+    _ = sem.wait(timeout: .now() + 30)
+    return out
+}
+
+func getJSON(_ urlString: String, bearer: String) -> Any? {
+    guard let url = URL(string: urlString) else { return nil }
+    var req = URLRequest(url: url)
+    req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+    req.setValue("application/json", forHTTPHeaderField: "Accept")
+    req.timeoutInterval = 25
+    var out: Any?
+    let sem = DispatchSemaphore(value: 0)
+    URLSession.shared.dataTask(with: req) { d, _, _ in
+        if let d { out = try? JSONSerialization.jsonObject(with: d) }
+        sem.signal()
+    }.resume()
+    _ = sem.wait(timeout: .now() + 30)
+    return out
+}
+
+/// Tarayicinin dondugu tek istegi yakalayan asgari HTTP dinleyicisi.
+///
+/// Neden ham soket: tek bir GET yakalayip kapanacak bir sey icin sunucu
+/// cercevesi tasimak anlamsiz. Yalnizca 127.0.0.1'e baglaniyor.
+final class CallbackListener {
+    private var listener: NWListener?
+
+    /// `onCode` query parametrelerini verir; dinleyici ilk istekten sonra kapanir.
+    func start(port: UInt16, onCode: @escaping ([String: String]) -> Void) -> Bool {
+        guard let l = try? NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!) else { return false }
+        listener = l
+        l.newConnectionHandler = { [weak self] conn in
+            conn.start(queue: .global())
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
+                defer { conn.cancel(); self?.stop() }
+                guard let data, let req = String(data: data, encoding: .utf8),
+                      let line = req.split(separator: "\r\n").first,
+                      let path = line.split(separator: " ").dropFirst().first
+                else { return }
+
+                var params: [String: String] = [:]
+                if let q = path.split(separator: "?").dropFirst().first {
+                    for pair in q.split(separator: "&") {
+                        let kv = pair.split(separator: "=", maxSplits: 1)
+                        if kv.count == 2 {
+                            params[String(kv[0])] = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+                        }
+                    }
+                }
+
+                let html = """
+                <!doctype html><meta charset="utf-8">
+                <body style="font-family:system-ui;background:#06120a;color:#9bffb0;
+                             display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+                <div style="text-align:center">
+                  <h2 style="letter-spacing:.18em;color:#39ff14">\u{2694} SPRINT BOARD</h2>
+                  <p>Giri\u{15F} al\u{131}nd\u{131}. Bu sekmeyi kapatabilirsin.</p>
+                </div>
+                """
+                let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n" +
+                           "Content-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n" + html
+                conn.send(content: Data(resp.utf8), completion: .contentProcessed { _ in
+                    onCode(params)
+                })
+            }
+        }
+        l.start(queue: .global())
+        return true
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+    }
 }
 
 let APP_DIR = resolveAppDir()
@@ -193,6 +337,12 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     // MARK: pencere
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // SIGPIPE'i YOKSAY. fetch.mjs'e token'lari stdin'den veriyoruz; alt
+        // surec bir hatayla ERKEN CIKARSA borunun okuma ucu kapaniyor ve
+        // yazma islemi uygulamayi olduruyor (olculdu: exit 141 = 128+13).
+        // Yoksayinca yazma sessizce EPIPE ile basarisiz oluyor, surec yasiyor.
+        signal(SIGPIPE, SIG_IGN)
+
         let cfg = WKWebViewConfiguration()
         cfg.userContentController.add(self, name: "sb")
         // Şeffaf zemin: kartın kendi arka planı görünsün, pencere dikdörtgeni değil.
@@ -399,6 +549,133 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
     }
 
+    // MARK: Atlassian OAuth
+
+    /// Access token 1 saatlik; diske yazmıyoruz, süreç boyunca bellekte.
+    var jiraAccessToken: String?
+    var jiraAccessExpiry: Date?
+    var oauthListener: CallbackListener?
+
+    /// "Atlassian ile giriş yap" — PKCE üret, dinlemeye başla, tarayıcıyı aç.
+    func startAtlassianLogin() {
+        let verifier = randomB64url(32)
+        let state = randomB64url(12)
+        let redirect = "http://127.0.0.1:\(OAUTH_PORT)/callback"
+
+        let listener = CallbackListener()
+        oauthListener = listener
+        let started = listener.start(port: OAUTH_PORT) { [weak self] params in
+            guard let self else { return }
+            // state kontrolü CSRF için: dönen isteğin bizim başlattığımız akışa
+            // ait olduğunu doğrulayan tek şey.
+            guard params["state"] == state, let code = params["code"] else {
+                self.setupFailed(["Giriş doğrulanamadı (state uyuşmadı)"]); return
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.finishAtlassianLogin(code: code, verifier: verifier, redirect: redirect)
+            }
+        }
+        guard started else {
+            setupFailed(["Port \(OAUTH_PORT) dinlenemedi — başka bir uygulama kullanıyor olabilir"])
+            return
+        }
+
+        var c = URLComponents(string: "https://auth.atlassian.com/authorize")!
+        c.queryItems = [
+            .init(name: "audience", value: "api.atlassian.com"),
+            .init(name: "client_id", value: ATLASSIAN_CLIENT_ID),
+            .init(name: "scope", value: OAUTH_SCOPES),
+            .init(name: "redirect_uri", value: redirect),
+            .init(name: "state", value: state),
+            .init(name: "response_type", value: "code"),
+            .init(name: "prompt", value: "consent"),
+            .init(name: "code_challenge", value: sha256B64url(verifier)),
+            .init(name: "code_challenge_method", value: "S256"),
+        ]
+        if let url = c.url { NSWorkspace.shared.open(url) }
+    }
+
+    /// Kod geldi: Worker'dan token al, siteyi ve kimliği keşfet, config'i yaz.
+    func finishAtlassianLogin(code: String, verifier: String, redirect: String) {
+        guard let tok = postJSON(WORKER_URL + "/token",
+                ["code": code, "code_verifier": verifier, "redirect_uri": redirect]),
+              let access = tok["access_token"] as? String,
+              let refresh = tok["refresh_token"] as? String else {
+            setupFailed(["Atlassian token alınamadı"]); return
+        }
+
+        // Kullanıcıya adresi ve e-postayı sormamamızı sağlayan iki çağrı.
+        guard let sites = getJSON("https://api.atlassian.com/oauth/token/accessible-resources", bearer: access) as? [[String: Any]],
+              let site = sites.first,
+              let cloudId = site["id"] as? String,
+              let siteURL = site["url"] as? String,
+              let host = URL(string: siteURL)?.host else {
+            setupFailed(["Jira siteniz bulunamadı"]); return
+        }
+        let me = getJSON("https://api.atlassian.com/me", bearer: access) as? [String: Any]
+        let email = (me?["email"] as? String) ?? ""
+
+        guard keychainSet(service: JIRA_OAUTH_KEYCHAIN, account: email.isEmpty ? host : email, value: refresh) else {
+            setupFailed(["Giriş keychain'e yazılamadı"]); return
+        }
+
+        // Eşikler/sesler gibi varsayılanlar örnekten; kimlik bilgileri girişten.
+        var cfg = (try? JSONSerialization.jsonObject(with: Data(contentsOf:
+                    URL(fileURLWithPath: "\(APP_DIR)/config.example.json")))) as? [String: Any] ?? [:]
+        if let existing = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
+           let old = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] {
+            cfg = old                       // mevcut ayarları koru, sadece kimliği güncelle
+        }
+        cfg["host"] = host
+        cfg["email"] = email
+        cfg["cloudId"] = cloudId
+        cfg["authMode"] = "oauth"
+        cfg["tokensOwnedByApp"] = true
+        if let data = try? JSONSerialization.data(withJSONObject: cfg, options: .prettyPrinted) {
+            try? FileManager.default.createDirectory(
+                atPath: (CONFIG_PATH as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true)
+            try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))
+        }
+
+        jiraAccessToken = access
+        jiraAccessExpiry = Date().addingTimeInterval(TimeInterval((tok["expires_in"] as? Int) ?? 3600))
+
+        DispatchQueue.main.async {
+            self.onSetupScreen = false
+            self.loadPage("view.html")
+            self.reload()
+        }
+    }
+
+    /// Geçerli access token; dolmuşsa Worker üzerinden sessizce yeniler.
+    /// Tarayıcı AÇILMAZ — yenileme tamamen sunucu-sunucu.
+    func currentJiraAccessToken(email: String) -> String? {
+        if let t = jiraAccessToken, let e = jiraAccessExpiry, e > Date().addingTimeInterval(60) {
+            dbg("token: bellekten"); return t
+        }
+        guard let refresh = keychainGet(service: JIRA_OAUTH_KEYCHAIN, account: email) else {
+            dbg("token: keychain'de refresh YOK (account=\(email))"); return nil
+        }
+        guard let tok = postJSON(WORKER_URL + "/refresh", ["refresh_token": refresh]) else {
+            dbg("token: Worker /refresh CEVAP VERMEDI"); return nil
+        }
+        guard let access = tok["access_token"] as? String else {
+            dbg("token: /refresh access_token dondurmedi -> \(tok.keys.sorted())"); return nil
+        }
+        dbg("token: refresh ile yenilendi")
+
+        // SIRA KRİTİK: Atlassian refresh token'ları DÖNÜYOR. Yenisini
+        // KULLANMADAN ÖNCE kaydetmezsek ve arada bir şey olursa zincir kopar,
+        // kullanıcı yeniden giriş yapmak zorunda kalır.
+        if let newRefresh = tok["refresh_token"] as? String {
+            keychainSet(service: JIRA_OAUTH_KEYCHAIN, account: email, value: newRefresh)
+        }
+        jiraAccessToken = access
+        jiraAccessExpiry = Date().addingTimeInterval(TimeInterval((tok["expires_in"] as? Int) ?? 3600))
+        return access
+    }
+
     /// Token'ları keychain'den okuyup fetch.mjs'e verilecek JSON'u hazırlar.
     ///
     /// Okumayı UYGULAMA yapıyor, `security` alt süreci değil: kurulum ekranının
@@ -406,6 +683,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// ayrı bir binary olduğundan onun okuması diyalog açtırıyordu.
     func tokenPayload() -> Data {
         var out: [String: String] = [:]
+        dbg("tokenPayload cagrildi")
         if let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
            let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
            // SADECE kurulum ekranının yazdığı kayıtlar. Elle `security` ile
@@ -414,8 +692,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
            // fetch.mjs eski `security` yoluna düşüyor.
            cfg["tokensOwnedByApp"] as? Bool == true,
            let email = cfg["email"] as? String, !email.isEmpty {
-            let jiraSvc = (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
-            if let t = keychainGet(service: jiraSvc, account: email) { out["jiraToken"] = t }
+            if (cfg["authMode"] as? String) == "oauth" {
+                // Suresi dolmussa burada sessizce yenileniyor; tarayici acilmaz.
+                if let at = currentJiraAccessToken(email: email) { out["jiraAccessToken"] = at }
+                else { dbg("tokenPayload: OAuth ama access token ALINAMADI") }
+            } else {
+                let jiraSvc = (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
+                if let t = keychainGet(service: jiraSvc, account: email) { out["jiraToken"] = t }
+            }
             let ghSvc = (cfg["githubKeychainService"] as? String) ?? "sprint-board-github"
             if let g = keychainGet(service: ghSvc, account: email) { out["githubToken"] = g }
         }
@@ -438,6 +722,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
                 self.push(#"{"ok":false,"error":"node bulunamadı — /opt/homebrew/bin, /usr/local/bin ve /usr/bin altında aradım"}"#)
                 return
             }
+            // Payload'u alt sureci BASLATMADAN ONCE hazirla. OAuth modunda
+            // burada bir ag istegi (token yenileme) olabiliyor; sonra
+            // hazirlansaydi fetch.mjs bos boruyu okuyup token'siz devam ederdi.
+            let payload = self.tokenPayload()
+
             let p = Process()
             p.executableURL = URL(fileURLWithPath: node)
             p.arguments = ["\(APP_DIR)/fetch.mjs"]
@@ -453,11 +742,15 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
                 return
             }
             // Token'lar argv'ye DEĞİL stdin'e: argv `ps` çıktısında görünürdü.
-            inPipe.fileHandleForWriting.write(self.tokenPayload())
-            inPipe.fileHandleForWriting.closeFile()
+            // Alt süreç çoktan ölmüşse yazma EPIPE verir; SIGPIPE yoksayıldığı
+            // için süreç yaşar, hatayı burada yutuyoruz.
+            let handle = inPipe.fileHandleForWriting
+            do { try handle.write(contentsOf: payload) } catch { }
+            try? handle.close()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
             let out = String(data: data, encoding: .utf8) ?? ""
+            dbg("fetch cikti (\(out.count) bayt): \(out.prefix(240))")
             self.push(out.isEmpty ? #"{"ok":false,"error":"fetch.mjs boş çıktı verdi"}"# : out)
         }
     }
@@ -561,6 +854,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             NSWorkspace.shared.open(url)
         }
         if body["refresh"] != nil { reload() }
+        if body["atlassianLogin"] != nil {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.startAtlassianLogin() }
+        }
         if let v = body["setupSave"] as? [String: Any] {
             // Alt süreç + ağ işi: ana thread'i kilitleme.
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.saveSetup(v) }

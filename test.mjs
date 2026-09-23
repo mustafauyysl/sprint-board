@@ -17,6 +17,7 @@ import {
   validateSetup,
   compareVersions,
   updateInfo,
+  jiraRequest,
   BIN_DIRS,
   addNote,
   removeNote,
@@ -738,4 +739,32 @@ test("updateInfo: sürüm gömülü değilse (geliştirme derlemesi) hiç uyarma
 test("updateInfo: release alınamadıysa sessiz kalır", () => {
   assert.equal(updateInfo("1.0.0", null), null);
   assert.equal(updateInfo("1.0.0", {}), null, "tag_name yoksa uyarma");
+});
+
+// --- jiraRequest: OAuth ve API token yolları yan yana ---
+
+test("jiraRequest: OAuth isteği ağ geçidine gider, siteye değil", () => {
+  const r = jiraRequest({ mode: "oauth", token: "AT", cloudId: "cid-1" }, "sirket.atlassian.net", "/rest/api/3/myself");
+  assert.equal(r.url, "https://api.atlassian.com/ex/jira/cid-1/rest/api/3/myself");
+  assert.equal(r.headers.Authorization, "Bearer AT");
+});
+
+test("jiraRequest: Basic isteği doğrudan siteye gider", () => {
+  const r = jiraRequest({ mode: "basic", token: "B64" }, "sirket.atlassian.net", "/rest/api/3/myself");
+  assert.equal(r.url, "https://sirket.atlassian.net/rest/api/3/myself");
+  assert.equal(r.headers.Authorization, "Basic B64");
+});
+
+test("jiraRequest: OAuth'ta cloudId yoksa SESSİZCE yanlış adrese gitmez, patlar", () => {
+  assert.throws(() => jiraRequest({ mode: "oauth", token: "AT" }, "s.atlassian.net", "/x"), /cloudId/);
+});
+
+test("jiraRequest: Basic'te host yoksa patlar", () => {
+  assert.throws(() => jiraRequest({ mode: "basic", token: "B" }, "", "/x"), /host/);
+});
+
+test("jiraRequest: mod verilmezse Basic kabul edilir (eski kurulumlar)", () => {
+  const r = jiraRequest({ token: "B64" }, "eski.atlassian.net", "/rest/api/3/field");
+  assert.equal(r.url, "https://eski.atlassian.net/rest/api/3/field");
+  assert.ok(r.headers.Authorization.startsWith("Basic "));
 });

@@ -28,6 +28,10 @@
     border-radius: 5px; cursor: pointer;
   }
   button:disabled { opacity: .5; cursor: default }
+  details { margin-top: 18px; border-top: 1px solid rgba(57,255,20,.15); padding-top: 10px }
+  summary { color: #4d6b5a; font-size: 9px; letter-spacing: .1em; cursor: pointer; outline: none }
+  summary:hover { color: #7CFFAE }
+  details button { margin-top: 12px }
   .err {
     margin-top: 12px; padding: 6px 8px; border-radius: 5px; font-size: 9px; line-height: 1.6;
     color: #ffb0b0; background: rgba(255,0,0,.08); border: 1px solid rgba(255,80,80,.35);
@@ -36,26 +40,29 @@
 </style>
 
 <h1>⚔ SPRINT BOARD</h1>
-<p class="sub">İlk kurulum. Token'lar hiçbir dosyaya yazılmaz — macOS keychain'ine gider.</p>
+<p class="sub">Giriş yap, gerisi kendiliğinden gelir — Jira adresin, e-postan ve
+izinlerin hesabından okunur. Hiçbir şey dosyaya yazılmaz, keychain'e gider.</p>
 
-<label>JIRA ADRESİ</label>
-<input id="host" placeholder="sirketin.atlassian.net" autofocus>
+<button id="atlassian">ATLASSIAN İLE GİRİŞ YAP</button>
+<div class="hint">Tarayıcı açılır, onaylarsın, kapanır. Salt okunur izin:
+  görüntüleme dışında Jira'da hiçbir şey değiştirilmez.</div>
 
-<label>E-POSTA</label>
-<input id="email" placeholder="ad.soyad@sirket.com">
+<details id="manual">
+  <summary>Bunun yerine API token kullan</summary>
+  <label>JIRA ADRESİ</label>
+  <input id="host" placeholder="sirketin.atlassian.net">
+  <label>E-POSTA</label>
+  <input id="email" placeholder="ad.soyad@sirket.com">
+  <label>JIRA API TOKEN</label>
+  <input id="jiraToken" type="password" placeholder="ATATT...">
+  <div class="hint"><a href="#" data-url="https://id.atlassian.com/manage-profile/security/api-tokens">id.atlassian.com → API tokens</a> adresinden üret.
+    <b>Not:</b> API token'ların ömrü en fazla 1 yıl, sonra yenilemen gerekir.</div>
+  <label>GITHUB TOKEN <span class="opt">(boş bırakılırsa PR/CI bandı kapalı kalır)</span></label>
+  <input id="githubToken" type="password" placeholder="ghp_...">
+  <div class="hint"><a href="#" data-url="https://github.com/settings/tokens">github.com → tokens</a> · gereken izinler: <b>repo</b>, <b>read:org</b></div>
+  <button id="go">KUR</button>
+</details>
 
-<label>JIRA API TOKEN</label>
-<input id="jiraToken" type="password" placeholder="ATATT...">
-<div class="hint"><a href="#" data-url="https://id.atlassian.com/manage-profile/security/api-tokens">id.atlassian.com → API tokens</a> adresinden üret</div>
-
-<label>GITHUB ORG <span class="opt">(boş bırakılabilir)</span></label>
-<input id="githubOrg" placeholder="sirket-org-adi">
-
-<label>GITHUB TOKEN <span class="opt">(boş bırakılırsa PR/CI bandı kapalı kalır)</span></label>
-<input id="githubToken" type="password" placeholder="ghp_...">
-<div class="hint"><a href="#" data-url="https://github.com/settings/tokens">github.com → tokens</a> · gereken izinler: <b>repo</b>, <b>read:org</b></div>
-
-<button id="go">KUR</button>
 <div id="err" class="err" style="display:none"></div>
 
 <script>
@@ -67,13 +74,19 @@
   document.querySelectorAll("[data-url]").forEach((a) =>
     a.addEventListener("click", (e) => { e.preventDefault(); post({ open: a.dataset.url }); }));
 
+  $("atlassian").addEventListener("click", () => {
+    $("atlassian").disabled = true;
+    $("atlassian").textContent = "TARAYICI AÇILDI, ONAYINI BEKLİYOR…";
+    $("err").style.display = "none";
+    post({ atlassianLogin: true });
+  });
+
   function submit() {
     $("go").disabled = true;
     $("err").style.display = "none";
     post({ setupSave: {
       host: $("host").value, email: $("email").value,
-      jiraToken: $("jiraToken").value, githubOrg: $("githubOrg").value,
-      githubToken: $("githubToken").value,
+      jiraToken: $("jiraToken").value, githubToken: $("githubToken").value,
     }});
   }
   $("go").addEventListener("click", submit);
@@ -82,6 +95,8 @@
   // Swift doğrulama sonucunu buraya geri veriyor.
   window.sbSetupResult = (res) => {
     $("go").disabled = false;
+    $("atlassian").disabled = false;
+    $("atlassian").textContent = "ATLASSIAN İLE GİRİŞ YAP";
     const errs = (res && res.errors) || ["bilinmeyen hata"];
     $("err").innerHTML = "<ul>" + errs.map((e) =>
       "<li>" + String(e).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</li>"

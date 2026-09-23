@@ -103,6 +103,21 @@ Config `~/.config/sprint-widget/config.json`, state `~/.local/state/sprint-widge
 
 ## Sık yapılan hatalar
 
+- **SIGPIPE uygulamayı ÖLDÜRÜR.** Token'lar fetch.mjs'e stdin'den veriliyor;
+  alt süreç bir hatayla erken çıkarsa borunun okuma ucu kapanır ve yazma
+  işlemi süreci öldürür (ölçüldü: `exit 141` = 128+13). `signal(SIGPIPE, SIG_IGN)`
+  açılışta çağrılıyor — kaldırma. Belirtisi sinsi: widget önce bir hata
+  gösterir, sonra sessizce kaybolur.
+- **Alt sürece gidecek veriyi `p.run()`'DAN ÖNCE hazırla.** OAuth modunda
+  `tokenPayload()` ağ isteği yapabiliyor; sonra hazırlanırsa fetch.mjs bu arada
+  boş boruyu okuyup token'sız devam ediyor.
+- **`readFileSync(0)` boru için güvenilir değil** — boru henüz boşsa EAGAIN
+  atıyor ve "veri yok" gibi görünüyor. stdin EOF'a kadar akış olarak okunmalı.
+- **Sahte `HOME` ile test etme.** Config dosyaları için işe yarıyor ama macOS
+  login keychain'ini `$HOME/Library/Keychains/` altında aradığı için
+  "Keychain Not Found" diyaloğu çıkıyor. Keychain'e dokunan testler gerçek
+  HOME ile yapılmalı (önce config'i yedekle).
+
 - `view.html`/`setup.html` ES module import edemez (`file://` origin). Düz JS yaz.
 - `set -o pipefail` açık: `$(git ... | sed ...)` tag yokken 128 dönüp script'i
   sessizce öldürür. Böyle yerlerde `|| true` kullan.

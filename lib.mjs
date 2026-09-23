@@ -442,3 +442,28 @@ export function updateInfo(current, release) {
     url: release.html_url || null,
   };
 }
+
+// --- Jira istek hedefi --------------------------------------------------
+// İki kimlik yolu bir arada: OAuth (yeni) ve API token (mevcut kurulumlar).
+// OAuth'ta istek siteye DEĞİL Atlassian'ın ağ geçidine gidiyor ve site
+// `cloudId` ile seçiliyor; Basic'te doğrudan siteye gidiyor. Bu fark tek bir
+// yerde toplanmazsa her çağrı yerinde tekrar etmek zorunda kalırdı.
+
+/**
+ * Bir Jira REST yolu için gidilecek URL ve gönderilecek başlıklar.
+ * `auth`: { mode: "oauth", token, cloudId } | { mode: "basic", token }
+ */
+export function jiraRequest(auth, host, path) {
+  if (auth?.mode === "oauth") {
+    if (!auth.cloudId) throw new Error("OAuth modunda cloudId gerekli");
+    return {
+      url: `https://api.atlassian.com/ex/jira/${auth.cloudId}${path}`,
+      headers: { Authorization: `Bearer ${auth.token}`, Accept: "application/json" },
+    };
+  }
+  if (!host) throw new Error("Basic modunda host gerekli");
+  return {
+    url: `https://${host}${path}`,
+    headers: { Authorization: `Basic ${auth?.token ?? ""}`, Accept: "application/json" },
+  };
+}
