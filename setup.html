@@ -57,9 +57,10 @@ izinlerin hesabından okunur. Hiçbir şey dosyaya yazılmaz, keychain'e gider.<
   <input id="jiraToken" type="password" placeholder="ATATT...">
   <div class="hint"><a href="#" data-url="https://id.atlassian.com/manage-profile/security/api-tokens">id.atlassian.com → API tokens</a> adresinden üret.
     <b>Not:</b> API token'ların ömrü en fazla 1 yıl, sonra yenilemen gerekir.</div>
-  <label>GITHUB TOKEN <span class="opt">(boş bırakılırsa PR/CI bandı kapalı kalır)</span></label>
+  <label>GITHUB TOKEN <span class="opt">(gh kuruluysa gerekmez)</span></label>
   <input id="githubToken" type="password" placeholder="ghp_...">
-  <div class="hint"><a href="#" data-url="https://github.com/settings/tokens">github.com → tokens</a> · gereken izinler: <b>repo</b>, <b>read:org</b></div>
+  <div class="hint">Makinende <b>gh</b> CLI kuruluysa token oradan alınır, burayı boş bırakabilirsin.
+    Değilse <a href="#" data-url="https://github.com/settings/tokens">github.com → tokens</a> · izinler: <b>repo</b>, <b>read:org</b></div>
   <button id="go">KUR</button>
 </details>
 

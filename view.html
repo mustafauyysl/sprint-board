@@ -87,6 +87,12 @@
 
   .band { margin-top:9px; border-top:1px dashed rgba(255,59,59,.4); padding-top:6px }
 
+  /* PR katmani kapaliyken sessiz kalmak en kotusu: kullanici bandin neden
+     olmadigini anlamiyor. Sonuk ama gorunur bir satir. */
+  .off { margin-top:9px; padding:4px 8px; border-radius:6px; font-size:9px;
+         line-height:1.5; color:#8a7fb8; background:rgba(138,127,184,.10);
+         border:1px solid rgba(138,127,184,.28) }
+
   /* Guncelleme satiri: dikkat cekmeli ama BOSS kadar degil — acil bir sey degil. */
   .upd { margin-top:9px; padding:5px 8px; border-radius:6px; cursor:pointer;
          font-size:10px; letter-spacing:.04em; color:#ffd34d;
@@ -282,6 +288,10 @@
       ${band("", "⚠ MERGE ENGELLİ", broken, "✗")}
       ${band("waiting", "⏳ BEKLEYEN", waiting, "●")}
       ${band("review", "👀 SENDEN REVIEW BEKLİYOR", reviews, "·")}
+
+      ${d.prsAvailable === false ? `<div class="off">
+        PR/CI bandı kapalı — GitHub'a erişilemedi.
+        <b>gh auth login</b> çalıştır ya da ⚔ → Ayarlar'dan bir GitHub token'ı gir.</div>` : ""}
 
       ${d.update ? `<div class="upd" data-url="${esc(d.update.url || "")}">
         ⬆ <b>v${esc(d.update.version)}</b> çıktı — indirmek için tıkla</div>` : ""}
