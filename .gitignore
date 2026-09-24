@@ -9,3 +9,6 @@ sprint-board
 
 # dagitim ciktisi — derlemeyle yeniden uretilir
 dist/
+
+# wrangler onbellegi — hesap adi/ID iceriyor, repoya girmemeli
+worker/.wrangler/
