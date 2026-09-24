@@ -11,14 +11,6 @@
   }
   h1 { margin: 0 0 3px; font-size: 12px; letter-spacing: .18em; color: #39ff14; font-weight: 700 }
   .sub { margin: 0 0 14px; color: #5f8a70; font-size: 9px; line-height: 1.6 }
-  label { display: block; margin-top: 10px; color: #7CFFAE; font-size: 9px; letter-spacing: .1em }
-  label .opt { color: #4d6b5a; letter-spacing: 0 }
-  input {
-    width: 100%; margin-top: 3px; padding: 5px 7px; font: inherit; color: #9bffb0;
-    background: rgba(57,255,20,.05); border: 1px solid rgba(57,255,20,.2);
-    border-radius: 4px; outline: none; -webkit-user-select: text; user-select: text;
-  }
-  input:focus { border-color: rgba(57,255,20,.5); background: rgba(57,255,20,.09) }
   a { color: #7fb0ff; text-decoration: none }
   a:hover { text-decoration: underline }
   .hint { margin-top: 2px; color: #4d6b5a; font-size: 9px }
@@ -28,10 +20,6 @@
     border-radius: 5px; cursor: pointer;
   }
   button:disabled { opacity: .5; cursor: default }
-  details { margin-top: 18px; border-top: 1px solid rgba(57,255,20,.15); padding-top: 10px }
-  summary { color: #4d6b5a; font-size: 9px; letter-spacing: .1em; cursor: pointer; outline: none }
-  summary:hover { color: #7CFFAE }
-  details button { margin-top: 12px }
   .err {
     margin-top: 12px; padding: 6px 8px; border-radius: 5px; font-size: 9px; line-height: 1.6;
     color: #ffb0b0; background: rgba(255,0,0,.08); border: 1px solid rgba(255,80,80,.35);
@@ -47,22 +35,7 @@ izinlerin hesabından okunur. Hiçbir şey dosyaya yazılmaz, keychain'e gider.<
 <div class="hint">Tarayıcı açılır, onaylarsın, kapanır. Salt okunur izin:
   görüntüleme dışında Jira'da hiçbir şey değiştirilmez.</div>
 
-<details id="manual">
-  <summary>Bunun yerine API token kullan</summary>
-  <label>JIRA ADRESİ</label>
-  <input id="host" placeholder="sirketin.atlassian.net">
-  <label>E-POSTA</label>
-  <input id="email" placeholder="ad.soyad@sirket.com">
-  <label>JIRA API TOKEN</label>
-  <input id="jiraToken" type="password" placeholder="ATATT...">
-  <div class="hint"><a href="#" data-url="https://id.atlassian.com/manage-profile/security/api-tokens">id.atlassian.com → API tokens</a> adresinden üret.
-    <b>Not:</b> API token'ların ömrü en fazla 1 yıl, sonra yenilemen gerekir.</div>
-  <label>GITHUB TOKEN <span class="opt">(gh kuruluysa gerekmez)</span></label>
-  <input id="githubToken" type="password" placeholder="ghp_...">
-  <div class="hint">Makinende <b>gh</b> CLI kuruluysa token oradan alınır, burayı boş bırakabilirsin.
-    Değilse <a href="#" data-url="https://github.com/settings/tokens">github.com → tokens</a> · izinler: <b>repo</b>, <b>read:org</b></div>
-  <button id="go">KUR</button>
-</details>
+
 
 <div id="err" class="err" style="display:none"></div>
 
@@ -82,20 +55,9 @@ izinlerin hesabından okunur. Hiçbir şey dosyaya yazılmaz, keychain'e gider.<
     post({ atlassianLogin: true });
   });
 
-  function submit() {
-    $("go").disabled = true;
-    $("err").style.display = "none";
-    post({ setupSave: {
-      host: $("host").value, email: $("email").value,
-      jiraToken: $("jiraToken").value, githubToken: $("githubToken").value,
-    }});
-  }
-  $("go").addEventListener("click", submit);
-  document.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
 
   // Swift doğrulama sonucunu buraya geri veriyor.
   window.sbSetupResult = (res) => {
-    $("go").disabled = false;
     $("atlassian").disabled = false;
     $("atlassian").textContent = "ATLASSIAN İLE GİRİŞ YAP";
     const errs = (res && res.errors) || ["bilinmeyen hata"];

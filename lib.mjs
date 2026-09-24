@@ -383,34 +383,6 @@ export function resolveExecutable(name, exists, dirs = BIN_DIRS) {
   return null;
 }
 
-// --- İlk açılış kurulumu ------------------------------------------------
-// Uygulama indirilip çift tıklandığında config dosyası YOK. Kurulum ekranı bu
-// doğrulamadan geçen değerlerle config'i yazıyor. Token'lar buraya HİÇ girmiyor
-// (keychain'e Swift tarafı yazıyor), o yüzden burada saf metin doğrulaması var.
-
-/**
- * Kurulum formunu doğrular ve değerleri normalize eder.
- * Dönen `values` doğrudan config'e yazılabilir haldedir.
- */
-export function validateSetup(input) {
-  const errors = [];
-  const str = (v) => String(v ?? "").trim();
-
-  // "https://x.atlassian.net/" -> "x.atlassian.net": kullanıcı adres çubuğundan
-  // kopyalayıp yapıştırdığında şema ve sondaki eğik çizgi geliyor.
-  const host = str(input?.host).replace(/^https?:\/\//i, "").replace(/\/+$/, "");
-  if (!host) errors.push("Jira adresi gerekli");
-  else if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(host)) errors.push("Jira adresi geçerli değil");
-
-  const email = str(input?.email);
-  if (!email) errors.push("E-posta gerekli");
-  else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) errors.push("E-posta geçerli değil");
-
-  const githubOrg = str(input?.githubOrg);
-
-  return { ok: errors.length === 0, errors, values: { host, email, githubOrg } };
-}
-
 // --- Güncelleme kontrolü ------------------------------------------------
 // İmzalanmış bir bundle'ın içi DEĞİŞTİRİLEMEZ (tek dosya bile imzayı bozar ve
 // macOS uygulamayı SIGKILL'ler). Yani uygulama kendini güncelleyemez; yapacağı

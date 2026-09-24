@@ -14,7 +14,6 @@ import {
   reviewWaitInfo,
   detectAlerts,
   resolveExecutable,
-  validateSetup,
   compareVersions,
   updateInfo,
   jiraRequest,
@@ -670,41 +669,6 @@ test("resolveExecutable: aday dizinleri dışarıdan verilebilir", () => {
   const exists = (p) => p === "/opt/custom/bin/gh";
   assert.equal(resolveExecutable("gh", exists, ["/opt/custom/bin"]), "/opt/custom/bin/gh");
   assert.equal(resolveExecutable("gh", exists, BIN_DIRS), null, "varsayılan dizinlerde yok");
-});
-
-// --- validateSetup: indirilen app'in ilk acilis ekrani ---
-
-test("validateSetup: gecerli girdi temiz gecer", () => {
-  const r = validateSetup({ host: "example.atlassian.net", email: "a@b.com", githubOrg: "acme" });
-  assert.equal(r.ok, true);
-  assert.deepEqual(r.errors, []);
-  assert.deepEqual(r.values, { host: "example.atlassian.net", email: "a@b.com", githubOrg: "acme" });
-});
-
-test("validateSetup: adres çubuğundan yapıştırılan URL temizlenir (asıl vaka)", () => {
-  const r = validateSetup({ host: "https://example.atlassian.net/", email: "a@b.com" });
-  assert.equal(r.values.host, "example.atlassian.net", "şema ve sondaki / düşmeli");
-  assert.equal(r.ok, true);
-});
-
-test("validateSetup: boş alanlar tek tek raporlanır", () => {
-  const r = validateSetup({});
-  assert.equal(r.ok, false);
-  assert.ok(r.errors.some((e) => e.includes("Jira adresi")));
-  assert.ok(r.errors.some((e) => e.includes("E-posta")));
-});
-
-test("validateSetup: bozuk host ve e-posta yakalanır", () => {
-  assert.equal(validateSetup({ host: "sirket", email: "a@b.com" }).ok, false, "nokta yoksa host değil");
-  assert.equal(validateSetup({ host: "a.b", email: "duz-metin" }).ok, false, "@ yoksa e-posta değil");
-});
-
-test("validateSetup: boşluklar kırpılır, githubOrg opsiyonel", () => {
-  const r = validateSetup({ host: "  a.b  ", email: "  x@y.co  " });
-  assert.equal(r.ok, true);
-  assert.equal(r.values.host, "a.b");
-  assert.equal(r.values.email, "x@y.co");
-  assert.equal(r.values.githubOrg, "", "verilmezse boş kalır, fetch tarafı varsayılana düşer");
 });
 
 // --- Güncelleme kontrolü ---

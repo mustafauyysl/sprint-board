@@ -156,22 +156,35 @@ func sha256B64url(_ s: String) -> String {
 }
 
 /// POST JSON, JSON al. Senkron — zaten arka plan kuyrugundan cagriliyor.
-func postJSON(_ urlString: String, _ body: [String: Any]) -> [String: Any]? {
+/// HTTP durumu da doner: "ag yok" ile "sunucu reddetti" ayirt edilebilsin diye.
+/// status == nil ise istek hic tamamlanamadi (ag sorunu).
+func postJSON(_ urlString: String, _ body: [String: Any]) -> (status: Int?, json: [String: Any]?) {
     guard let url = URL(string: urlString),
-          let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+          let data = try? JSONSerialization.data(withJSONObject: body) else { return (nil, nil) }
     var req = URLRequest(url: url)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
     req.httpBody = data
     req.timeoutInterval = 25
+    var status: Int?
     var out: [String: Any]?
     let sem = DispatchSemaphore(value: 0)
-    URLSession.shared.dataTask(with: req) { d, _, _ in
+    URLSession.shared.dataTask(with: req) { d, resp, _ in
+        status = (resp as? HTTPURLResponse)?.statusCode
         if let d, let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] { out = j }
         sem.signal()
     }.resume()
     _ = sem.wait(timeout: .now() + 30)
-    return out
+    return (status, out)
+}
+
+/// Token alma sonucu. `temporary` ile `needsLogin` ayrimi KRITIK: ag yokken
+/// kullaniciyi giris ekranina atmak, gecerli bir oturumu bozmak demek
+/// (yasandi — internet kesikken giris ekranina dusuyordu).
+enum TokenResult {
+    case ok(String)
+    case needsLogin
+    case temporary
 }
 
 func getJSON(_ urlString: String, bearer: String) -> Any? {
@@ -475,70 +488,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         web.loadFileURL(url, allowingReadAccessTo: URL(fileURLWithPath: APP_DIR))
     }
 
-    /// Kurulum ekranından gelen değerler.
-    ///
-    /// İş bölümü: config'i `fetch.mjs --setup` yazıyor (doğrulama lib.mjs'te,
-    /// testli), token'ları BU taraf doğrudan keychain'e koyuyor. Böylece hiçbir
-    /// sır alt sürecin argv'sine ya da stdin'ine düşmüyor.
-    func saveSetup(_ v: [String: Any]) {
-        let str = { (k: String) -> String in
-            (v[k] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        let jiraToken = str("jiraToken")
-        if jiraToken.isEmpty { setupFailed(["Jira token gerekli"]); return }
-
-        guard let node = NODE else {
-            setupFailed(["node bulunamadı"]); return
-        }
-
-        let payload: [String: String] = [
-            "host": str("host"), "email": str("email"), "githubOrg": str("githubOrg"),
-        ]
-        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
-            setupFailed(["kurulum verisi hazırlanamadı"]); return
-        }
-
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: node)
-        p.arguments = ["\(APP_DIR)/fetch.mjs", "--setup"]
-        p.currentDirectoryURL = URL(fileURLWithPath: APP_DIR)
-        p.environment = childEnvironment()
-        let inPipe = Pipe(), outPipe = Pipe()
-        p.standardInput = inPipe
-        p.standardOutput = outPipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch {
-            setupFailed(["kurulum çalıştırılamadı: \(error)"]); return
-        }
-        inPipe.fileHandleForWriting.write(body)
-        inPipe.fileHandleForWriting.closeFile()
-        let out = outPipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-
-        guard let res = try? JSONSerialization.jsonObject(with: out) as? [String: Any],
-              res["ok"] as? Bool == true else {
-            let errs = (try? JSONSerialization.jsonObject(with: out) as? [String: Any])
-                .flatMap { $0?["errors"] as? [String] } ?? ["config yazılamadı"]
-            setupFailed(errs); return
-        }
-
-        // Config yazıldı; token'lar şimdi keychain'e.
-        let email = str("email")
-        if !keychainSet(service: JIRA_KEYCHAIN, account: email, value: jiraToken) {
-            setupFailed(["Jira token keychain'e yazılamadı"]); return
-        }
-        let ghToken = str("githubToken")
-        if !ghToken.isEmpty {
-            keychainSet(service: "sprint-board-github", account: email, value: ghToken)
-        }
-
-        DispatchQueue.main.async {
-            self.onSetupScreen = false
-            self.loadPage("view.html")
-            self.reload()
-        }
-    }
-
     func setupFailed(_ errors: [String]) {
         let json = (try? JSONSerialization.data(withJSONObject: ["errors": errors]))
             .flatMap { String(data: $0, encoding: .utf8) } ?? #"{"errors":["bilinmeyen hata"]}"#
@@ -555,6 +504,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var jiraAccessToken: String?
     var jiraAccessExpiry: Date?
     var oauthListener: CallbackListener?
+    /// Kurulum ekranı yüklenmeden önce oluşan hata; sayfa hazır olunca basılır.
+    var pendingSetupError: String?
 
     /// "Atlassian ile giriş yap" — PKCE üret, dinlemeye başla, tarayıcıyı aç.
     func startAtlassianLogin() {
@@ -597,11 +548,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     /// Kod geldi: Worker'dan token al, siteyi ve kimliği keşfet, config'i yaz.
     func finishAtlassianLogin(code: String, verifier: String, redirect: String) {
-        guard let tok = postJSON(WORKER_URL + "/token",
-                ["code": code, "code_verifier": verifier, "redirect_uri": redirect]),
+        let r = postJSON(WORKER_URL + "/token",
+                         ["code": code, "code_verifier": verifier, "redirect_uri": redirect])
+        guard let tok = r.json,
               let access = tok["access_token"] as? String,
               let refresh = tok["refresh_token"] as? String else {
-            setupFailed(["Atlassian token alınamadı"]); return
+            setupFailed([r.status == nil
+                ? "Atlassian'a ulaşılamadı — bağlantını kontrol edip tekrar dene"
+                : "Atlassian token alınamadı (HTTP \(r.status!))"]); return
         }
 
         // Kullanıcıya adresi ve e-postayı sormamamızı sağlayan iki çağrı.
@@ -650,18 +604,22 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     /// Geçerli access token; dolmuşsa Worker üzerinden sessizce yeniler.
     /// Tarayıcı AÇILMAZ — yenileme tamamen sunucu-sunucu.
-    func currentJiraAccessToken(email: String) -> String? {
+    func currentJiraAccessToken(email: String) -> TokenResult {
         if let t = jiraAccessToken, let e = jiraAccessExpiry, e > Date().addingTimeInterval(60) {
-            dbg("token: bellekten"); return t
+            dbg("token: bellekten"); return .ok(t)
         }
         guard let refresh = keychainGet(service: JIRA_OAUTH_KEYCHAIN, account: email) else {
-            dbg("token: keychain'de refresh YOK (account=\(email))"); return nil
+            dbg("token: keychain'de refresh YOK"); return .needsLogin
         }
-        guard let tok = postJSON(WORKER_URL + "/refresh", ["refresh_token": refresh]) else {
-            dbg("token: Worker /refresh CEVAP VERMEDI"); return nil
+        let r = postJSON(WORKER_URL + "/refresh", ["refresh_token": refresh])
+        guard let status = r.status else {
+            // Istek hic tamamlanmadi: ag yok. Oturum GECERLI olabilir.
+            dbg("token: /refresh'e ulasilamadi (ag?) -> gecici"); return .temporary
         }
-        guard let access = tok["access_token"] as? String else {
-            dbg("token: /refresh access_token dondurmedi -> \(tok.keys.sorted())"); return nil
+        guard let tok = r.json, let access = tok["access_token"] as? String else {
+            // 4xx = sunucu reddetti, oturum gercekten olmus. 5xx = gecici.
+            dbg("token: /refresh HTTP \(status)")
+            return (400...499).contains(status) ? .needsLogin : .temporary
         }
         dbg("token: refresh ile yenilendi")
 
@@ -673,7 +631,19 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
         jiraAccessToken = access
         jiraAccessExpiry = Date().addingTimeInterval(TimeInterval((tok["expires_in"] as? Int) ?? 3600))
-        return access
+        return .ok(access)
+    }
+
+    func authModeIsOAuth() -> Bool {
+        guard let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
+              let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
+        else { return false }
+        return (cfg["authMode"] as? String) == "oauth"
+    }
+
+    func authState(_ d: Data) -> String? {
+        guard let j = try? JSONSerialization.jsonObject(with: d) as? [String: String] else { return nil }
+        return j["jiraAuthState"]
     }
 
     /// Token'ları keychain'den okuyup fetch.mjs'e verilecek JSON'u hazırlar.
@@ -694,8 +664,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
            let email = cfg["email"] as? String, !email.isEmpty {
             if (cfg["authMode"] as? String) == "oauth" {
                 // Suresi dolmussa burada sessizce yenileniyor; tarayici acilmaz.
-                if let at = currentJiraAccessToken(email: email) { out["jiraAccessToken"] = at }
-                else { dbg("tokenPayload: OAuth ama access token ALINAMADI") }
+                switch currentJiraAccessToken(email: email) {
+                case .ok(let at):   out["jiraAccessToken"] = at
+                case .needsLogin:   out["jiraAuthState"] = "needsLogin"
+                case .temporary:    out["jiraAuthState"] = "temporary"
+                }
             } else {
                 let jiraSvc = (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
                 if let t = keychainGet(service: jiraSvc, account: email) { out["jiraToken"] = t }
@@ -714,6 +687,19 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     }
 
     /// fetch.mjs'i arka planda çalıştırıp JSON'u web tarafına verir.
+    /// Giriş geçersiz kaldığında (refresh token dolmuş ya da iptal edilmiş)
+    /// kullanıcıyı kurulum ekranına döndürür — yapacağı tek şey tekrar giriş.
+    func requireLogin(_ reason: String) {
+        DispatchQueue.main.async {
+            guard !self.onSetupScreen else { return }
+            self.onSetupScreen = true
+            self.pendingSetupError = reason
+            self.loadPage("setup.html")
+            NSApp.activate(ignoringOtherApps: true)
+            self.window.makeKeyAndOrderFront(nil)
+        }
+    }
+
     func reload() {
         if onSetupScreen { return }
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -726,6 +712,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             // burada bir ag istegi (token yenileme) olabiliyor; sonra
             // hazirlansaydi fetch.mjs bos boruyu okuyup token'siz devam ederdi.
             let payload = self.tokenPayload()
+            // Oturum GERCEKTEN olduyse girise don. Ag hatasinda DONME:
+            // internet kesikken kullaniciyi giris ekranina atmak, gecerli bir
+            // oturumu bozmak demek (yasandi). O durumda asagidaki normal akis
+            // calisir ve mevcut "yenilenemedi" uyarisi devreye girer.
+            if self.authState(payload) == "needsLogin" {
+                self.requireLogin("Atlassian girişin sona ermiş — tekrar giriş yap.")
+                return
+            }
 
             let p = Process()
             p.executableURL = URL(fileURLWithPath: node)
@@ -791,6 +785,12 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     }
 
     func webView(_ w: WKWebView, didFinish nav: WKNavigation!) {
+        if let msg = pendingSetupError {
+            pendingSetupError = nil
+            let json = (try? JSONSerialization.data(withJSONObject: ["errors": [msg]]))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            w.evaluateJavaScript("window.sbSetupResult && window.sbSetupResult(\(json))")
+        }
         ready = true
         if let j = pendingJSON { pendingJSON = nil; push(j) }
         pushNotes()
@@ -856,10 +856,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         if body["refresh"] != nil { reload() }
         if body["atlassianLogin"] != nil {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.startAtlassianLogin() }
-        }
-        if let v = body["setupSave"] as? [String: Any] {
-            // Alt süreç + ağ işi: ana thread'i kilitleme.
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.saveSetup(v) }
         }
         if let t = body["noteAdd"] as? String { addNote(t) }
         if let i = body["noteDel"] as? String { removeNote(i) }

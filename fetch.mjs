@@ -11,7 +11,7 @@ import {
   businessDaysBetween, evaluate, pickBoss, bolts,
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
-  validateSetup, updateInfo, jiraRequest,
+  updateInfo, jiraRequest,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -491,46 +491,7 @@ function demoPayload(cfg) {
   };
 }
 
-/**
- * İlk açılış kurulumu: stdin'den JSON alır, doğrular, config'i yazar.
- *
- * TOKEN BURAYA GİRMEZ. Swift tarafı onları Security framework ile doğrudan
- * keychain'e yazıyor; böylece hiçbir sır alt sürecin argv'sine ya da
- * stdin'ine düşmüyor.
- */
-function runSetup() {
-  let input;
-  try {
-    input = JSON.parse(readFileSync(0, "utf8"));
-  } catch {
-    return { ok: false, errors: ["kurulum girdisi okunamadı"] };
-  }
-
-  const v = validateSetup(input);
-  if (!v.ok) return { ok: false, errors: v.errors };
-
-  // Eşikler, sesler, pendingReleaseStatuses gibi varsayılanlar örnekten geliyor —
-  // kullanıcıya bunları ilk açılışta sormanın anlamı yok, sonradan düzenlenebilir.
-  const example = readJson(join(APP_ROOT, "config.example.json"), {});
-  const cfg = {
-    ...example,
-    host: v.values.host,
-    email: v.values.email,
-    githubOrg: v.values.githubOrg || example.githubOrg || "",
-    nameOverrides: {},          // örnekteki yer tutucu satır taşınmasın
-    // Kurulum ekranından geçen kayıtları UYGULAMA yazdı, dolayısıyla onları
-    // izin penceresi çıkmadan kendisi okuyabilir. Elle `security` ile
-    // kurulmuş eski kayıtlarda bu bayrak YOK ve uygulama keychain'e hiç
-    // dokunmuyor — aksi halde her okumada macOS izin sorardı.
-    tokensOwnedByApp: true,
-  };
-  writeJson(CONFIG_PATH, cfg);
-  return { ok: true, errors: [], configPath: CONFIG_PATH };
-}
-
 async function main() {
-  if (process.argv.includes("--setup")) return runSetup();
-
   const cfg = readJson(CONFIG_PATH, null);
   if (!cfg) throw new Error(`config okunamadı: ${CONFIG_PATH}`);
   if (process.argv.includes("--demo")) return demoPayload(cfg);
@@ -547,8 +508,12 @@ async function main() {
 
   const token = auth ? null : (piped.jiraToken || getToken(cfg.keychainService || JIRA_KEYCHAIN, cfg.email));
   if (!auth && !token) {
+    // Uygulama tarafı ağ hatasıyla oturum bitişini ayırıyor; burada da aynı
+    // ayrımı koruyoruz ki geçici bir kesinti "giriş yap" gibi görünmesin.
     throw new Error(
-      `keychain'de token yok — 'security add-generic-password -s ${cfg.keychainService} -a ${cfg.email} -w <TOKEN>' çalıştır`
+      piped.jiraAuthState === "temporary"
+        ? "Atlassian'a ulaşılamadı — bağlantı gelince kendiliğinden denenecek"
+        : "Jira girişi yok ya da süresi dolmuş — menü çubuğundaki ⚔ > Ayarlar'dan tekrar giriş yap"
     );
   }
   const jiraAuth = auth || { mode: "basic", token: Buffer.from(`${cfg.email}:${token}`).toString("base64") };
