@@ -1,10 +1,11 @@
-// Sprint Board — masaüstü penceresi.
+// Sprint Board — the desktop window.
 //
-// Übersicht'ten buraya taşındı: Übersicht 1.6.82 macOS 26'da widget'a hiç mouse
-// olayı geçirmiyordu (minimal test widget'ıyla kanıtlandı), bu yüzden tıklama,
-// sürükleme ve link açma imkânsızdı. Kendi NSWindow'umuzda üçü de çalışıyor.
+// Moved here from Übersicht: Übersicht 1.6.82 on macOS 26 delivered no mouse
+// events to the widget at all (proven with a minimal test widget), which made
+// clicking, dragging and opening links impossible. In our own NSWindow all three
+// work.
 //
-// Veri katmanı değişmedi: fetch.mjs + lib.mjs aynen kullanılıyor.
+// The data layer is unchanged: fetch.mjs + lib.mjs are used as-is.
 
 import Cocoa
 import WebKit
@@ -12,9 +13,9 @@ import Security
 import CommonCrypto
 import Network
 
-/// Homebrew Apple Silicon'da /opt/homebrew, Intel Mac'te /usr/local altında kurulu.
-/// Finder'dan açılan bir GUI uygulaması shell PATH'ini GÖRMEZ (/usr/bin:/bin ile
-/// sınırlı kalır), o yüzden "node PATH'tedir" varsayamıyoruz — adayları yokluyoruz.
+/// Homebrew installs under /opt/homebrew on Apple Silicon and /usr/local on Intel.
+/// A GUI app launched from Finder does NOT see the shell PATH (it is limited to
+/// /usr/bin:/bin), so we cannot assume "node is on PATH" — we probe the candidates.
 let BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
 let JIRA_KEYCHAIN = "sprint-board-jira"
 
@@ -26,14 +27,14 @@ func findExecutable(_ name: String) -> String? {
     return nil
 }
 
-/// Veri katmanının (fetch.mjs / lib.mjs / view.html) nerede olduğu.
+/// Where the data layer (fetch.mjs / lib.mjs / view.html) lives.
 ///
-/// Üç mod, bu sırayla:
-///  1. `appdir` dosyası — GELİŞTİRME derlemesi. build-app.sh repo yolunu yazar,
-///     böylece view.html'i düzenleyip sadece uygulamayı yeniden başlatmak yetiyor.
-///  2. Bundle'ın kendi Resources'ı — DAĞITIM derlemesi (--release). Dosyalar
-///     .app'in İÇİNDE, yani indiren kişinin repoyu klonlamasına gerek yok.
-///  3. Eski sabit yol — geriye dönük uyumluluk.
+/// Three modes, in this order:
+///  1. An `appdir` file — a DEVELOPMENT build. build-app.sh writes the repo path,
+///     so editing view.html only requires restarting the app.
+///  2. The bundle's own Resources — a DISTRIBUTION build (--release). The files
+///     are INSIDE the .app, so whoever downloads it never clones the repo.
+///  3. The old fixed path — backwards compatibility.
 func resolveAppDir() -> String {
     let fm = FileManager.default
 
@@ -50,9 +51,9 @@ func resolveAppDir() -> String {
     return ("~/.local/share/sprint-board" as NSString).expandingTildeInPath
 }
 
-/// Node: ÖNCE bundle'ın içindekini kullan. Dağıtım derlemesi node'u .app'in
-/// içine gömüyor, böylece indiren kişinin makinesinde node kurulu olmasına
-/// gerek kalmıyor. Bundle'da yoksa (geliştirme derlemesi) sistemde aranır.
+/// Node: prefer the one INSIDE the bundle. A distribution build embeds node in
+/// the .app so whoever downloads it does not need node installed. When it is not
+/// in the bundle (a development build) we look for it on the system.
 func resolveNode() -> String? {
     if let res = Bundle.main.resourcePath {
         let bundled = "\(res)/node"
@@ -63,16 +64,18 @@ func resolveNode() -> String? {
 
 let CONFIG_PATH = (("~/.config/sprint-widget/config.json") as NSString).expandingTildeInPath
 
-/// Kurulum gerekli mi: config dosyasi yoksa ya da Jira token'i keychain'de yoksa.
-/// Indirilen uygulama ilk acildiginda ikisi de yok — eskiden bu durumda widget
-/// sadece "config okunamadi" hata ekrani gosteriyordu.
+/// Is setup needed: no config file, or no Jira token in the keychain.
+/// On a downloaded app's first launch neither exists — the widget used to show
+/// nothing but a "could not read config" error screen in that case.
 func needsSetup() -> Bool {
     guard let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
           let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
           let email = cfg["email"] as? String, !email.isEmpty,
-          email != "sen@sirket.com"           // ornekten kopyalanmis, doldurulmamis
+          // Copied from the example and never filled in. Both spellings are checked:
+          // the placeholder used to be Turkish and older configs still carry it.
+          !["you@company.com", "sen@sirket.com"].contains(email)
     else { return true }
-    // OAuth kurulumunda aranacak sey API token'i degil refresh token.
+    // In an OAuth setup what we look for is the refresh token, not an API token.
     if (cfg["authMode"] as? String) == "oauth" {
         return keychainGet(service: JIRA_OAUTH_KEYCHAIN, account: email) == nil
     }
@@ -93,8 +96,8 @@ func keychainGet(service: String, account: String) -> String? {
     return String(data: d, encoding: .utf8)
 }
 
-/// Token'i DOGRUDAN keychain'e yazar. Bilerek `security add-generic-password`
-/// alt sureci KULLANILMIYOR: token argv'ye dusseydi ps ciktisinda gorunurdu.
+/// Writes the token DIRECTLY to the keychain. The `security add-generic-password`
+/// subprocess is deliberately NOT USED: a token in argv would show up in `ps` output.
 @discardableResult
 func keychainSet(service: String, account: String, value: String) -> Bool {
     let base: [String: Any] = [
@@ -102,31 +105,31 @@ func keychainSet(service: String, account: String, value: String) -> Bool {
         kSecAttrService as String: service,
         kSecAttrAccount as String: account,
     ]
-    SecItemDelete(base as CFDictionary)          // varsa uzerine yaz
+    SecItemDelete(base as CFDictionary)          // overwrite any existing item
     var add = base
     add[kSecValueData as String] = Data(value.utf8)
     return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
 }
 
 // --- Atlassian OAuth ----------------------------------------------------
-// Neden Worker: Atlassian token ucu `client_secret` ZORUNLU tutuyor (kimlik
-// sunucusu `none` kimlik yontemini ilan etmiyor), yani PKCE secret'in YERINE
-// gecmiyor. Secret dagitilan .app'e konamayacagi icin degisim Worker'dan
-// geciyor. Ayrintili gerekce: CLAUDE.md.
+// Why a Worker: Atlassian's token endpoint REQUIRES `client_secret` (its identity
+// server does not advertise the `none` auth method), so PKCE does not stand IN PLACE
+// OF the secret. The secret cannot ship inside a distributed .app, so the exchange
+// goes through the Worker. Full rationale: CLAUDE.md.
 let WORKER_URL = "https://sprint-board-auth.mustafa-uysal.workers.dev"
 let ATLASSIAN_CLIENT_ID = "D2jLovDh1jR4h0xezwElLSyWs3QpUe0w"
 let OAUTH_PORT: UInt16 = 53682
 let OAUTH_SCOPES = "read:jira-work read:jira-user read:me offline_access"
-/// Refresh token burada. Access token bellekte tutuluyor — 1 saatlik, diske
-/// yazmanin anlami yok.
+/// The refresh token lives here. The access token is kept in memory — it lasts an
+/// hour, so writing it to disk is pointless.
 let JIRA_OAUTH_KEYCHAIN = "sprint-board-jira-oauth"
 
-/// Dosyaya teshis. VARSAYILAN OLARAK KAPALI: yalnizca /tmp/sb-debug.log
-/// ONCEDEN VARSA yazar, yani `touch /tmp/sb-debug.log` ile aciliyor.
+/// Diagnostics to a file. OFF BY DEFAULT: it writes only if /tmp/sb-debug.log
+/// ALREADY EXISTS, so `touch /tmp/sb-debug.log` turns it on.
 ///
-/// Neden dosya: `open` ile acilan uygulamanin NSLog'u birlesik loga dusmuyor
-/// (README'deki tuzak). Terminalden calistirmak da farkli bir ortam oldugu
-/// icin sorunu maskeleyebiliyor.
+/// Why a file: an app launched with `open` does not reach the unified log with
+/// NSLog (the trap documented in the README). Running it from a terminal is a
+/// different environment and can mask the problem instead.
 func dbg(_ s: String) {
     let path = "/tmp/sb-debug.log"
     guard let h = FileHandle(forWritingAtPath: path) else { return }
@@ -155,9 +158,9 @@ func sha256B64url(_ s: String) -> String {
     return b64url(Data(h))
 }
 
-/// POST JSON, JSON al. Senkron — zaten arka plan kuyrugundan cagriliyor.
-/// HTTP durumu da doner: "ag yok" ile "sunucu reddetti" ayirt edilebilsin diye.
-/// status == nil ise istek hic tamamlanamadi (ag sorunu).
+/// POST JSON, get JSON back. Synchronous — it is called from a background queue anyway.
+/// It also returns the HTTP status, so "no network" can be told apart from
+/// "the server refused". status == nil means the request never completed at all.
 func postJSON(_ urlString: String, _ body: [String: Any]) -> (status: Int?, json: [String: Any]?) {
     guard let url = URL(string: urlString),
           let data = try? JSONSerialization.data(withJSONObject: body) else { return (nil, nil) }
@@ -178,9 +181,9 @@ func postJSON(_ urlString: String, _ body: [String: Any]) -> (status: Int?, json
     return (status, out)
 }
 
-/// Token alma sonucu. `temporary` ile `needsLogin` ayrimi KRITIK: ag yokken
-/// kullaniciyi giris ekranina atmak, gecerli bir oturumu bozmak demek
-/// (yasandi — internet kesikken giris ekranina dusuyordu).
+/// The result of getting a token. Telling `temporary` from `needsLogin` is CRITICAL:
+/// throwing the user to the sign-in screen while the network is down means destroying
+/// a valid session (this happened — it dropped to sign-in whenever the internet was cut).
 enum TokenResult {
     case ok(String)
     case needsLogin
@@ -203,14 +206,14 @@ func getJSON(_ urlString: String, bearer: String) -> Any? {
     return out
 }
 
-/// Tarayicinin dondugu tek istegi yakalayan asgari HTTP dinleyicisi.
+/// A minimal HTTP listener that catches the single request the browser sends back.
 ///
-/// Neden ham soket: tek bir GET yakalayip kapanacak bir sey icin sunucu
-/// cercevesi tasimak anlamsiz. Yalnizca 127.0.0.1'e baglaniyor.
+/// Why a raw socket: carrying a server framework for something that catches one
+/// GET and then shuts down makes no sense. It binds to 127.0.0.1 only.
 final class CallbackListener {
     private var listener: NWListener?
 
-    /// `onCode` query parametrelerini verir; dinleyici ilk istekten sonra kapanir.
+    /// `onCode` receives the query parameters; the listener shuts down after the first request.
     func start(port: UInt16, onCode: @escaping ([String: String]) -> Void) -> Bool {
         guard let l = try? NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!) else { return false }
         listener = l
@@ -239,7 +242,7 @@ final class CallbackListener {
                              display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
                 <div style="text-align:center">
                   <h2 style="letter-spacing:.18em;color:#39ff14">\u{2694} SPRINT BOARD</h2>
-                  <p>Giri\u{15F} al\u{131}nd\u{131}. Bu sekmeyi kapatabilirsin.</p>
+                  <p>Signed in. You can close this tab.</p>
                 </div>
                 """
                 let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n" +
@@ -261,20 +264,22 @@ final class CallbackListener {
 
 let APP_DIR = resolveAppDir()
 let NODE = resolveNode()
-/// Cloudflare WARP TLS'i dinliyor; Node macOS keychain'ini okumadığı için
-/// WARP'ın kök sertifikası olmadan her fetch "fetch failed" ile düşüyor.
+/// Cloudflare WARP intercepts TLS, and because Node does not read the macOS
+/// keychain every fetch fails with "fetch failed" without WARP's root certificate.
 let WARP_CA = "/usr/local/etc/cloudflare-zt/allCAbundle.pem"
 let REFRESH_SECONDS: TimeInterval = 30 * 60
 let NOTES_PATH = ("~/.local/state/sprint-widget/notes.json" as NSString).expandingTildeInPath
 let MAX_NOTES = 6
 let NOTE_LIMIT = 140
 
-/// Üst şeritten tutunca pencereyi taşır; gerisi normal tıklama olarak WebView'e gider.
-/// (CSS'teki -webkit-app-region Electron'a özgü, WKWebView'de çalışmıyor —
-///  isMovableByWindowBackground da WebView olayları tükettiği için yetmiyor.)
-// Menü çubuğu ikonu — sürükleme sınıfının işi değil, üst seviyede duruyor.
-/// Menü çubuğu için kılıç. Template olduğu için siyah çizilir; renklendirmeyi
-/// macOS yapar. Font'a bağlı değil — ⚔ glifi Apple Color Emoji'ye düşebiliyor.
+/// Dragging the top strip moves the window; everything else reaches the WebView
+/// as a normal click. (CSS -webkit-app-region is Electron-specific and does
+/// nothing in WKWebView — and isMovableByWindowBackground is not enough either,
+/// because the WebView consumes the events.)
+// Menu bar icon — not the drag class's job, it lives at the top level.
+/// The sword for the menu bar. Being a template image it is drawn black and macOS
+/// handles the tinting. Font-independent — the ⚔ glyph can fall back to Apple
+/// Color Emoji.
 func swordIcon(_ side: CGFloat) -> NSImage {
     let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
         func p(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
@@ -300,7 +305,7 @@ func swordIcon(_ side: CGFloat) -> NSImage {
         for path in [blade, guardBar, grip, pommel] { path.fill() }
         return true
     }
-    img.isTemplate = true          // açık/koyu menü çubuğuna kendi uyum sağlar
+    img.isTemplate = true          // adapts itself to a light/dark menu bar
     return img
 }
 
@@ -309,17 +314,17 @@ final class DragWebView: WKWebView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        // WKWebView isFlipped=TRUE: y YUKARIDAN sayılır (ölçüldü: başlığa tıklayınca y=23).
-        // Ters varsayım yüzünden performDrag hiç çağrılmıyordu.
+        // WKWebView isFlipped=TRUE: y is measured FROM THE TOP (measured: y=23 on the title).
+        // The opposite assumption meant performDrag was never called.
         guard p.y < DragWebView.handleHeight else {
             super.mouseDown(with: event)
             return
         }
 
-        // Şeritte KOŞULSUZ performDrag çağırmak, başlıktaki ⟳ yenileme düğmesini
-        // tıklanamaz yapıyordu: olay sürüklemeye gidip sayfaya hiç ulaşmıyordu.
-        // Bir sonraki olaya bakıp ayırt ediyoruz — sürükleme mi, düz tıklama mı.
-        // dequeue:false => olay kuyrukta kalır, normal işleyiş bozulmaz.
+        // Calling performDrag UNCONDITIONALLY on the strip made the ⟳ refresh button
+        // unclickable: the event went to the drag and never reached the page. We
+        // inspect the next event to tell them apart — drag or plain click.
+        // dequeue:false => the event stays queued, normal handling is unaffected.
         let next = NSApp.nextEvent(matching: [.leftMouseUp, .leftMouseDragged],
                                    until: .distantFuture,
                                    inMode: .eventTracking,
@@ -327,7 +332,7 @@ final class DragWebView: WKWebView {
         if next?.type == .leftMouseDragged {
             window?.performDrag(with: event)
         } else {
-            super.mouseDown(with: event)   // tıklama: sayfaya geçsin
+            super.mouseDown(with: event)   // a click: let it through to the page
         }
     }
 }
@@ -347,18 +352,18 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var ready = false
     var pendingJSON: String?
 
-    // MARK: pencere
+    // MARK: window
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        // SIGPIPE'i YOKSAY. fetch.mjs'e token'lari stdin'den veriyoruz; alt
-        // surec bir hatayla ERKEN CIKARSA borunun okuma ucu kapaniyor ve
-        // yazma islemi uygulamayi olduruyor (olculdu: exit 141 = 128+13).
-        // Yoksayinca yazma sessizce EPIPE ile basarisiz oluyor, surec yasiyor.
+        // IGNORE SIGPIPE. We hand tokens to fetch.mjs over stdin; if the child
+        // EXITS EARLY with an error, the read end of the pipe closes and the write
+        // kills the app (measured: exit 141 = 128+13). Ignored, the write fails
+        // silently with EPIPE instead and the process survives.
         signal(SIGPIPE, SIG_IGN)
 
         let cfg = WKWebViewConfiguration()
         cfg.userContentController.add(self, name: "sb")
-        // Şeffaf zemin: kartın kendi arka planı görünsün, pencere dikdörtgeni değil.
+        // Transparent backing: show the card's own background, not a window rectangle.
         cfg.setValue(false, forKey: "drawsBackground")
 
         let frame = savedFrame()
@@ -368,11 +373,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.backgroundColor = .clear
         window.hasShadow = false
         window.isMovableByWindowBackground = true
-        // NOT: masaüstü seviyesi (desktopIcon) denendi — pencere mouse olayı almıyordu.
-        // Normal seviye: diğer pencerelerle aynı düzlemde, tıklama/sürükleme çalışır.
+        // NOTE: the desktop level (desktopIcon) was tried — the window received no mouse
+        // events. Normal level: same plane as other windows, clicks/drags work.
         window.level = .normal
-        // .canJoinAllSpaces DENENDI ve KALDIRILDI: widget her Space'te göründüğü için
-        // tam ekran uygulamaların üstüne çıkıyordu. Masaüstü Space'inde kalsın.
+        // .canJoinAllSpaces WAS TRIED AND REMOVED: appearing on every Space put the
+        // widget on top of full-screen apps. Keep it on the desktop Space.
         window.collectionBehavior = [.stationary, .ignoresCycle, .fullScreenNone]
 
         web = DragWebView(frame: window.contentView!.bounds, configuration: cfg)
@@ -388,22 +393,21 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             loadPage("view.html")
         }
 
-        // Menü çubuğu simgesi: Dock ikonu olmadığı için (LSUIElement) uygulamayı
-        // kapatmanın TEK arayüz yolu bu. Olmazsa terminalden pkill gerekirdi.
+        // Menu bar item: with no Dock icon (LSUIElement) this is the ONLY UI route to
+        // quitting the app. Without it you would need pkill from a terminal.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // METİN DEĞİL, template NSImage: `button.title = "⚔"` menü çubuğunda ikon
-        // gibi değil küçücük bir yazı karakteri gibi görünüyordu ve menü fontuna
-        // bağlı kalıyordu. Template image menü yüksekliğine oturur ve açık/koyu
-        // menü çubuğunda rengini kendisi ayarlar.
+        // A template NSImage, NOT TEXT: `button.title = "⚔"` looked like a tiny character
+        // rather than an icon and depended on the menu font. A template image fits the
+        // menu height and tints itself for a light/dark menu bar.
         statusItem.button?.image = swordIcon(18)
         statusItem.button?.toolTip = "Sprint Board"
         let menu = NSMenu()
-        let mRefresh = NSMenuItem(title: "Şimdi yenile", action: #selector(menuRefresh), keyEquivalent: "r")
-        let mFront = NSMenuItem(title: "Widget'ı öne getir", action: #selector(menuFront), keyEquivalent: "")
-        let mSetup = NSMenuItem(title: "Ayarlar…", action: #selector(menuSetup), keyEquivalent: "")
+        let mRefresh = NSMenuItem(title: "Refresh now", action: #selector(menuRefresh), keyEquivalent: "r")
+        let mFront = NSMenuItem(title: "Bring widget to front", action: #selector(menuFront), keyEquivalent: "")
+        let mSetup = NSMenuItem(title: "Settings…", action: #selector(menuSetup), keyEquivalent: "")
         for m in [mRefresh, mFront, mSetup] { m.target = self; menu.addItem(m) }
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Sprint Board'dan çık", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit Sprint Board", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
 
         window.orderFront(nil)
@@ -415,16 +419,16 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         timer = Timer.scheduledTimer(withTimeInterval: REFRESH_SECONDS, repeats: true) { [weak self] _ in
             self?.reload()
         }
-        // Uykudan uyanınca hemen tazele: Timer uyku boyunca ilerlemiyor, uyanışta
-        // veri saatlerce bayat kalabiliyordu.
+        // Refresh right after waking: the Timer does not advance while asleep, so on
+        // wake the data could sit hours stale.
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.reload() }
         reload()
     }
 
-    /// Kurulum ekranını yeniden açar — token süresi dolduğunda ya da hesap
-    /// değiştiğinde config'i elle düzenlemek gerekmesin diye.
+    /// Reopens the setup screen — so an expired token or a changed account never
+    /// requires editing config by hand.
     @objc func menuSetup() {
         onSetupScreen = true
         loadPage("setup.html")
@@ -434,7 +438,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     @objc func menuRefresh() { reload() }
 
-    /// Pencere başka pencerelerin altında kaldıysa geri çağırır.
+    /// Brings the window back when it has ended up behind other windows.
     @objc func menuFront() {
         window.orderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -448,7 +452,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         guard let screen = NSScreen.main else {
             return NSRect(x: 40, y: 40, width: 430, height: h)
         }
-        // Varsayılan: sol üst köşe (macOS'ta y aşağıdan yukarı sayılır).
+        // Default: top-left corner (on macOS y is measured from the bottom up).
         let vf = screen.visibleFrame
         return NSRect(x: x ?? (vf.minX + 40),
                       y: y ?? (vf.maxY - h - 40),
@@ -463,11 +467,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         d.set(Double(f.height), forKey: "sbH")
     }
 
-    // MARK: veri
+    // MARK: data
 
-    /// Finder'dan açılan bir GUI uygulaması shell profilini görmez: NODE_EXTRA_CA_CERTS
-    /// gelmez, PATH da /usr/bin:/bin ile sınırlı kalır. Node'a WARP kök sertifikasını
-    /// elle veriyoruz, yoksa fetch.mjs terminalde çalışıp widget'ta çalışmıyor.
+    /// A GUI app launched from Finder does not see the shell profile: NODE_EXTRA_CA_CERTS
+    /// never arrives and PATH stays limited to /usr/bin:/bin. We hand Node the WARP root
+    /// certificate explicitly, otherwise fetch.mjs works in a terminal but not in the widget.
     func childEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         if env["NODE_EXTRA_CA_CERTS"] == nil,
@@ -477,12 +481,12 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         return env
     }
 
-    /// Kurulum ekranı açıkken veri katmanı çalıştırılmamalı: setup.html'de
-    /// sbRender yok, push oraya gidince "A JavaScript exception occurred" ile
-    /// düşüyordu — üstelik config henüz yazılmadığı için fetch zaten hata döner.
+    /// The data layer must not run while the setup screen is open: setup.html has no
+    /// sbRender, so pushing data there fails with "A JavaScript exception occurred" —
+    /// and with no config written yet, fetch would fail anyway.
     var onSetupScreen = false
 
-    /// Bundle/repo içindeki bir HTML sayfasını yükler.
+    /// Loads an HTML page from the bundle/repo.
     func loadPage(_ name: String) {
         let url = URL(fileURLWithPath: "\(APP_DIR)/\(name)")
         web.loadFileURL(url, allowingReadAccessTo: URL(fileURLWithPath: APP_DIR))
@@ -490,7 +494,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     func setupFailed(_ errors: [String]) {
         let json = (try? JSONSerialization.data(withJSONObject: ["errors": errors]))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? #"{"errors":["bilinmeyen hata"]}"#
+            .flatMap { String(data: $0, encoding: .utf8) } ?? #"{"errors":["unknown error"]}"#
         DispatchQueue.main.async {
             self.web.evaluateJavaScript("window.sbSetupResult(\(json))") { _, err in
                 if let err { NSLog("sbSetupResult: \(err)") }
@@ -500,14 +504,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     // MARK: Atlassian OAuth
 
-    /// Access token 1 saatlik; diske yazmıyoruz, süreç boyunca bellekte.
+    /// The access token lasts an hour; never written to disk, only kept in memory.
     var jiraAccessToken: String?
     var jiraAccessExpiry: Date?
     var oauthListener: CallbackListener?
-    /// Kurulum ekranı yüklenmeden önce oluşan hata; sayfa hazır olunca basılır.
+    /// An error raised before the setup screen loaded; shown once the page is ready.
     var pendingSetupError: String?
 
-    /// "Atlassian ile giriş yap" — PKCE üret, dinlemeye başla, tarayıcıyı aç.
+    /// "Sign in with Atlassian" — generate PKCE, start listening, open the browser.
     func startAtlassianLogin() {
         let verifier = randomB64url(32)
         let state = randomB64url(12)
@@ -517,17 +521,17 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         oauthListener = listener
         let started = listener.start(port: OAUTH_PORT) { [weak self] params in
             guard let self else { return }
-            // state kontrolü CSRF için: dönen isteğin bizim başlattığımız akışa
-            // ait olduğunu doğrulayan tek şey.
+            // The state check is the CSRF guard: it is the only thing proving the
+            // returning request belongs to the flow we started.
             guard params["state"] == state, let code = params["code"] else {
-                self.setupFailed(["Giriş doğrulanamadı (state uyuşmadı)"]); return
+                self.setupFailed(["Sign-in could not be verified (state mismatch)"]); return
             }
             DispatchQueue.global(qos: .userInitiated).async {
                 self.finishAtlassianLogin(code: code, verifier: verifier, redirect: redirect)
             }
         }
         guard started else {
-            setupFailed(["Port \(OAUTH_PORT) dinlenemedi — başka bir uygulama kullanıyor olabilir"])
+            setupFailed(["Could not listen on port \(OAUTH_PORT) — another app may be using it"])
             return
         }
 
@@ -546,7 +550,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         if let url = c.url { NSWorkspace.shared.open(url) }
     }
 
-    /// Kod geldi: Worker'dan token al, siteyi ve kimliği keşfet, config'i yaz.
+    /// The code arrived: get a token from the Worker, discover site and identity, write config.
     func finishAtlassianLogin(code: String, verifier: String, redirect: String) {
         let r = postJSON(WORKER_URL + "/token",
                          ["code": code, "code_verifier": verifier, "redirect_uri": redirect])
@@ -554,31 +558,31 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
               let access = tok["access_token"] as? String,
               let refresh = tok["refresh_token"] as? String else {
             setupFailed([r.status == nil
-                ? "Atlassian'a ulaşılamadı — bağlantını kontrol edip tekrar dene"
-                : "Atlassian token alınamadı (HTTP \(r.status!))"]); return
+                ? "Could not reach Atlassian — check your connection and try again"
+                : "Could not obtain an Atlassian token (HTTP \(r.status!))"]); return
         }
 
-        // Kullanıcıya adresi ve e-postayı sormamamızı sağlayan iki çağrı.
+        // The two calls that spare the user from typing the site and the email.
         guard let sites = getJSON("https://api.atlassian.com/oauth/token/accessible-resources", bearer: access) as? [[String: Any]],
               let site = sites.first,
               let cloudId = site["id"] as? String,
               let siteURL = site["url"] as? String,
               let host = URL(string: siteURL)?.host else {
-            setupFailed(["Jira siteniz bulunamadı"]); return
+            setupFailed(["Could not find your Jira site"]); return
         }
         let me = getJSON("https://api.atlassian.com/me", bearer: access) as? [String: Any]
         let email = (me?["email"] as? String) ?? ""
 
         guard keychainSet(service: JIRA_OAUTH_KEYCHAIN, account: email.isEmpty ? host : email, value: refresh) else {
-            setupFailed(["Giriş keychain'e yazılamadı"]); return
+            setupFailed(["Could not write the sign-in to the keychain"]); return
         }
 
-        // Eşikler/sesler gibi varsayılanlar örnekten; kimlik bilgileri girişten.
+        // Defaults like thresholds/sounds come from the example; identity comes from sign-in.
         var cfg = (try? JSONSerialization.jsonObject(with: Data(contentsOf:
                     URL(fileURLWithPath: "\(APP_DIR)/config.example.json")))) as? [String: Any] ?? [:]
         if let existing = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
            let old = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] {
-            cfg = old                       // mevcut ayarları koru, sadece kimliği güncelle
+            cfg = old                       // keep existing settings, only refresh identity
         }
         cfg["host"] = host
         cfg["email"] = email
@@ -602,30 +606,30 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
     }
 
-    /// Geçerli access token; dolmuşsa Worker üzerinden sessizce yeniler.
-    /// Tarayıcı AÇILMAZ — yenileme tamamen sunucu-sunucu.
+    /// A valid access token; when expired it is refreshed silently via the Worker.
+    /// The browser is NEVER opened — refreshing is purely server-to-server.
     func currentJiraAccessToken(email: String) -> TokenResult {
         if let t = jiraAccessToken, let e = jiraAccessExpiry, e > Date().addingTimeInterval(60) {
-            dbg("token: bellekten"); return .ok(t)
+            dbg("token: from memory"); return .ok(t)
         }
         guard let refresh = keychainGet(service: JIRA_OAUTH_KEYCHAIN, account: email) else {
-            dbg("token: keychain'de refresh YOK"); return .needsLogin
+            dbg("token: NO refresh in keychain"); return .needsLogin
         }
         let r = postJSON(WORKER_URL + "/refresh", ["refresh_token": refresh])
         guard let status = r.status else {
-            // Istek hic tamamlanmadi: ag yok. Oturum GECERLI olabilir.
-            dbg("token: /refresh'e ulasilamadi (ag?) -> gecici"); return .temporary
+            // The request never completed: no network. The session may still be VALID.
+            dbg("token: /refresh unreachable (network?) -> temporary"); return .temporary
         }
         guard let tok = r.json, let access = tok["access_token"] as? String else {
-            // 4xx = sunucu reddetti, oturum gercekten olmus. 5xx = gecici.
+            // 4xx = the server refused, the session really is dead. 5xx = temporary.
             dbg("token: /refresh HTTP \(status)")
             return (400...499).contains(status) ? .needsLogin : .temporary
         }
-        dbg("token: refresh ile yenilendi")
+        dbg("token: renewed via refresh")
 
-        // SIRA KRİTİK: Atlassian refresh token'ları DÖNÜYOR. Yenisini
-        // KULLANMADAN ÖNCE kaydetmezsek ve arada bir şey olursa zincir kopar,
-        // kullanıcı yeniden giriş yapmak zorunda kalır.
+        // ORDER IS CRITICAL: Atlassian ROTATES refresh tokens. If we do not persist the
+        // new one BEFORE using it and something goes wrong in between, the chain breaks
+        // and the user has to sign in again.
         if let newRefresh = tok["refresh_token"] as? String {
             keychainSet(service: JIRA_OAUTH_KEYCHAIN, account: email, value: newRefresh)
         }
@@ -646,24 +650,24 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         return j["jiraAuthState"]
     }
 
-    /// Token'ları keychain'den okuyup fetch.mjs'e verilecek JSON'u hazırlar.
+    /// Reads the tokens from the keychain and builds the JSON handed to fetch.mjs.
     ///
-    /// Okumayı UYGULAMA yapıyor, `security` alt süreci değil: kurulum ekranının
-    /// yazdığı kaydı yazan uygulama okuduğu için macOS izin sormuyor. `security`
-    /// ayrı bir binary olduğundan onun okuması diyalog açtırıyordu.
+    /// The APP does the reading, not a `security` subprocess: because the app that
+    /// wrote the entry is the one reading it, macOS asks for no permission. `security`
+    /// is a separate binary, so reading through it popped a dialog.
     func tokenPayload() -> Data {
         var out: [String: String] = [:]
-        dbg("tokenPayload cagrildi")
+        dbg("tokenPayload called")
         if let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
            let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
-           // SADECE kurulum ekranının yazdığı kayıtlar. Elle `security` ile
-           // oluşturulmuş eski bir kaydı uygulama okumaya kalkarsa macOS izin
-           // penceresi açar (yaşandı); o durumda keychain'e hiç dokunmuyoruz ve
-           // fetch.mjs eski `security` yoluna düşüyor.
+           // ONLY entries written by the setup screen. If the app tries to read an older
+           // entry created by hand with `security`, macOS opens a permission dialog
+           // (this happened); in that case we do not touch the keychain at all and
+           // fetch.mjs falls back to the old `security` path.
            cfg["tokensOwnedByApp"] as? Bool == true,
            let email = cfg["email"] as? String, !email.isEmpty {
             if (cfg["authMode"] as? String) == "oauth" {
-                // Suresi dolmussa burada sessizce yenileniyor; tarayici acilmaz.
+                // If it has expired it is renewed silently here; no browser opens.
                 switch currentJiraAccessToken(email: email) {
                 case .ok(let at):   out["jiraAccessToken"] = at
                 case .needsLogin:   out["jiraAuthState"] = "needsLogin"
@@ -676,9 +680,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             let ghSvc = (cfg["githubKeychainService"] as? String) ?? "sprint-board-github"
             if let g = keychainGet(service: ghSvc, account: email) { out["githubToken"] = g }
         }
-        // Sürümü YALNIZCA dağıtım derlemesinde bildiriyoruz. Geliştirme
-        // derlemesinde bundle'da `appdir` var; orada her yenilemede
-        // "yeni sürüm var" demesi sadece gürültü olurdu.
+        // We report the version ONLY in a distribution build. A development build
+        // carries `appdir` in the bundle; there, saying "a new version is
+        // available" on every refresh would just be noise.
         if Bundle.main.url(forResource: "appdir", withExtension: nil) == nil,
            let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
             out["appVersion"] = v
@@ -686,9 +690,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         return (try? JSONSerialization.data(withJSONObject: out)) ?? Data("{}".utf8)
     }
 
-    /// fetch.mjs'i arka planda çalıştırıp JSON'u web tarafına verir.
-    /// Giriş geçersiz kaldığında (refresh token dolmuş ya da iptal edilmiş)
-    /// kullanıcıyı kurulum ekranına döndürür — yapacağı tek şey tekrar giriş.
+    /// Runs fetch.mjs in the background and hands its JSON to the web side.
+    /// When the session is no longer valid (refresh token expired or revoked) this
+    /// returns the user to the setup screen — all they need to do is sign in again.
     func requireLogin(_ reason: String) {
         DispatchQueue.main.async {
             guard !self.onSetupScreen else { return }
@@ -705,19 +709,20 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             guard let node = NODE else {
-                self.push(#"{"ok":false,"error":"node bulunamadı — /opt/homebrew/bin, /usr/local/bin ve /usr/bin altında aradım"}"#)
+                self.push(#"{"ok":false,"error":"node not found — looked in /opt/homebrew/bin, /usr/local/bin and /usr/bin"}"#)
                 return
             }
-            // Payload'u alt sureci BASLATMADAN ONCE hazirla. OAuth modunda
-            // burada bir ag istegi (token yenileme) olabiliyor; sonra
-            // hazirlansaydi fetch.mjs bos boruyu okuyup token'siz devam ederdi.
+            // Build the payload BEFORE STARTING the child process. In OAuth mode this
+            // can make a network request (a token refresh); if it were built after,
+            // fetch.mjs would read the empty pipe and carry on without a token.
             let payload = self.tokenPayload()
-            // Oturum GERCEKTEN olduyse girise don. Ag hatasinda DONME:
-            // internet kesikken kullaniciyi giris ekranina atmak, gecerli bir
-            // oturumu bozmak demek (yasandi). O durumda asagidaki normal akis
-            // calisir ve mevcut "yenilenemedi" uyarisi devreye girer.
+            // Go back to sign-in only if the session is REALLY dead. DO NOT on a
+            // network error: throwing the user to the sign-in screen while the
+            // internet is down means destroying a valid session (this happened).
+            // In that case the normal flow below runs and the existing
+            // "could not refresh" notice takes over.
             if self.authState(payload) == "needsLogin" {
-                self.requireLogin("Atlassian girişin sona ermiş — tekrar giriş yap.")
+                self.requireLogin("Your Atlassian session has ended — please sign in again.")
                 return
             }
 
@@ -732,26 +737,26 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             p.standardOutput = pipe
             p.standardError = FileHandle.nullDevice
             do { try p.run() } catch {
-                self.push(#"{"ok":false,"error":"fetch.mjs çalıştırılamadı: \#(error)"}"#)
+                self.push(#"{"ok":false,"error":"could not run fetch.mjs: \#(error)"}"#)
                 return
             }
-            // Token'lar argv'ye DEĞİL stdin'e: argv `ps` çıktısında görünürdü.
-            // Alt süreç çoktan ölmüşse yazma EPIPE verir; SIGPIPE yoksayıldığı
-            // için süreç yaşar, hatayı burada yutuyoruz.
+            // Tokens go to stdin, NOT argv: argv would show up in `ps` output.
+            // If the child already died the write returns EPIPE; since SIGPIPE is
+            // ignored the process survives and we swallow the error here.
             let handle = inPipe.fileHandleForWriting
             do { try handle.write(contentsOf: payload) } catch { }
             try? handle.close()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
             let out = String(data: data, encoding: .utf8) ?? ""
-            dbg("fetch cikti (\(out.count) bayt): \(out.prefix(240))")
-            self.push(out.isEmpty ? #"{"ok":false,"error":"fetch.mjs boş çıktı verdi"}"# : out)
+            dbg("fetch output (\(out.count) bytes): \(out.prefix(240))")
+            self.push(out.isEmpty ? #"{"ok":false,"error":"fetch.mjs produced no output"}"# : out)
         }
     }
 
-    /// Başarısız yenilemeyi 30 dk beklemeden tekrar dener.
-    /// Tek bir ağ kesintisi (uyanış anında wifi gelmemiş olması gibi) yüzünden
-    /// widget yarım saat hata ekranında kalıyordu.
+    /// Retries a failed refresh without waiting the full 30 minutes.
+    /// A single network blip (wifi not up yet right after waking, say) used to leave
+    /// the widget on an error screen for half an hour.
     func scheduleRetry() {
         retryTimer?.invalidate()
         guard retryCount < 3 else { return }
@@ -775,9 +780,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
                 String(data: try! JSONSerialization.data(withJSONObject: [String(data: $0, encoding: .utf8)!],
                                                          options: [.fragmentsAllowed]), encoding: .utf8)
             } ?? "[\"{}\"]"
-            // escaped: ["<json metni>"] -> [0] ile geri alıp parse ediyoruz
-            // Hata YUTULMAZ: completionHandler nil iken sayfa "yükleniyor"da takılıp
-            // kalıyordu ve hiçbir iz bırakmıyordu. Artık log'a düşüyor.
+            // escaped: ["<json text>"] -> we take [0] back out and parse it.
+            // Errors are NOT swallowed: with completionHandler nil the page got stuck
+            // on "loading" leaving no trace whatsoever. Now it reaches the log.
             self.web.evaluateJavaScript("window.sbRender(JSON.parse(\(escaped)[0]))") { _, err in
                 if let err { NSLog("SB: sbRender hatasi: \(err.localizedDescription)") }
             }
@@ -804,7 +809,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         NSLog("SB: sayfa acilamadi: \(e.localizedDescription)")
     }
 
-    // MARK: notlar (dosyada; localStorage file:// origin'de güvenilir değil)
+    // MARK: notes (in a file; localStorage is unreliable on a file:// origin)
 
     func readNotes() -> [[String: Any]] {
         guard let d = FileManager.default.contents(atPath: NOTES_PATH),
@@ -844,7 +849,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         pushNotes()
     }
 
-    // MARK: web -> swift köprüsü
+    // MARK: web -> swift bridge
 
     func userContentController(_ c: WKUserContentController, didReceive msg: WKScriptMessage) {
         guard let body = msg.body as? [String: Any] else { return }
@@ -861,7 +866,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         if let i = body["noteDel"] as? String { removeNote(i) }
         if let h = body["height"] as? Double, h > 60 {
             var f = window.frame
-            let top = f.maxY                    // üst kenarı sabit tut, aşağı doğru büyü
+            let top = f.maxY                    // pin the top edge, grow downwards
             f.size.height = CGFloat(h)
             f.origin.y = top - CGFloat(h)
             window.setFrame(f, display: true)
@@ -875,5 +880,5 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 let app = NSApplication.shared
 let delegate = App()
 app.delegate = delegate
-app.setActivationPolicy(.accessory)   // Dock'ta ikon yok
+app.setActivationPolicy(.accessory)   // no Dock icon
 app.run()

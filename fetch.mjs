@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// I/O katmanı: Jira + keychain + state dosyası. Tüm karar mantığı lib.mjs'te.
-// Çıktı: tek satır JSON (Übersicht bunu parse eder). Hata olsa bile GEÇERLİ JSON basar.
+// I/O layer: Jira + keychain + the state file. All decision logic lives in lib.mjs.
+// Output: single-line JSON. Even on failure it prints VALID JSON.
 
 import { execFileSync, spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
@@ -11,7 +11,7 @@ import {
   businessDaysBetween, evaluate, pickBoss, bolts,
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
-  updateInfo, jiraRequest,
+  updateInfo, jiraRequest, ownershipStartedAt,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -30,7 +30,7 @@ const writeJson = (p, data) => {
 
 function getToken(service, account) {
   try {
-    // stderr yutuluyor: Übersicht stdout+stderr'i birleştirirse JSON parse patlar.
+    // stderr is swallowed: if it were merged into stdout, JSON parsing would break.
     return execFileSync("/usr/bin/security",
       ["find-generic-password", "-s", service, "-a", account, "-w"],
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
@@ -40,22 +40,23 @@ function getToken(service, account) {
 }
 
 /**
- * Token'lar Swift tarafindan stdin ile veriliyor.
+ * Tokens are handed over by the Swift side through stdin.
  *
- * NEDEN: keychain kaydini YAZAN uygulama OKUYAN da olmali. Kaydi uygulama
- * yazip `security` (ayri bir binary) okumaya kalkinca macOS izin penceresi
- * aciyor — olculdu, komut diyalog bekleyip asili kaldi. Uygulama kendi
- * yazdigini SecItemCopyMatching ile sessizce okuyor ve buraya aktariyor.
+ * WHY: whichever app WRITES a keychain item must also be the one that READS it.
+ * When the app writes the item and then `security` (a separate binary) tries to
+ * read it, macOS opens a permission dialog — measured: the command hung waiting
+ * on that dialog. So the app reads what it wrote itself, silently, via
+ * SecItemCopyMatching, and passes it in here.
  *
- * Terminalden elle calistirildiginda stdin bir tty'dir; o zaman asagidaki
- * `security` yoluna dusuluyor (eski, elle kurulmus kayitlar da boyle calisiyor).
+ * Run by hand from a terminal stdin is a tty; then we fall through to the
+ * `security` path below (which is also how older, hand-made items still work).
  */
 async function pipedTokens() {
   if (process.stdin.isTTY) return {};
-  // readFileSync(0) KULLANILMAZ: boru henuz bossa EAGAIN atiyor ve token
-  // yokmus gibi devam ediliyordu (olculdu — OAuth modunda uygulama tarafi
-  // payload'u hazirlarken ag istegi yaptigi icin boru bir an bos kaliyor).
-  // Burada EOF'a kadar okuyoruz; yazan taraf yazip kapatiyor.
+  // NEVER readFileSync(0): on a pipe that is still empty it throws EAGAIN and we
+  // carried on as if there were no token (measured — in OAuth mode the app side
+  // makes a network request while building the payload, so the pipe is briefly
+  // empty). Here we read to EOF; the writer writes and then closes.
   try {
     const chunks = [];
     for await (const c of process.stdin) chunks.push(c);
@@ -76,12 +77,12 @@ async function api(cfg, auth, path) {
 }
 
 /**
- * Custom field id'leri kuruluma göre değişir — runtime'da keşfedip config'e yazıyoruz.
- * (Alan id'leri kuruluma göre değişir; bu yüzden hiçbir yerde hard-code edilmiyor.)
+ * Custom field ids differ per installation — we discover them at runtime and
+ * write them into config, so they are never hard-coded anywhere.
  */
 async function discoverFields(cfg, auth, names) {
   const r = await api(cfg, auth, "/rest/api/3/field");
-  if (!r.ok) throw new Error(`field listesi alınamadı (HTTP ${r.status})`);
+  if (!r.ok) throw new Error(`could not fetch the field list (HTTP ${r.status})`);
   const out = {};
   for (const name of names) {
     const f = r.body.find((x) => x.name === name && String(x.id).startsWith("customfield_"));
@@ -90,7 +91,7 @@ async function discoverFields(cfg, auth, names) {
   return out;
 }
 
-/** Yeni /search/jql önce; emekliye ayrılmış /search'e yalnızca 404/410'da düşülür. */
+/** The new /search/jql first; the retired /search only on 404/410. */
 async function searchIssues(cfg, auth, jql, fields) {
   const qs = (base) =>
     `${base}?jql=${encodeURIComponent(jql)}&fields=${encodeURIComponent(fields)}` +
@@ -101,30 +102,30 @@ async function searchIssues(cfg, auth, jql, fields) {
     r = await api(cfg, auth, qs("/rest/api/3/search"));
   }
   if (!r.ok) {
-    const hint = r.status === 401 ? " — token geçersiz mi?" : "";
-    throw new Error(`Jira araması başarısız (HTTP ${r.status})${hint}`);
+    const hint = r.status === 401 ? " — is the token invalid?" : "";
+    throw new Error(`Jira search failed (HTTP ${r.status})${hint}`);
   }
   return r.body.issues ?? [];
 }
 
 /**
- * Geçmiş sprintlerde kalmış ama hâlâ canlıya çıkmamış işler.
+ * Work left behind in past sprints that still has not shipped.
  *
- * Ana sorgu `sprint in openSprints()` dediği için bunlar widget'ta HİÇ
- * görünmüyordu: sprint kapanınca iş gözden kayboluyor, prod'a çıkmamış olsa bile.
- * Bitmiş (Released on Prod / Done) ve iptal edilenler elenir — geriye yalnızca
- * gerçekten beklemede olanlar kalır.
+ * Because the main query says `sprint in openSprints()`, these never appeared in
+ * the widget at all: once a sprint closes the work vanishes from view, even when
+ * it never reached prod. Finished (Released on Prod / Done) and cancelled items
+ * are filtered out — only the genuinely pending ones remain.
  */
 async function fetchPendingRelease(cfg, auth, sprintField, now) {
   const wanted = pendingReleaseStatuses(cfg);
   if (wanted.length === 0) return [];
   try {
-    // Statü süzgeci JQL'e taşındı. Önce "statusCategory = Done" çekip istemcide
-    // eliyorduk; searchIssues maxResults=100'de kesiyor ve sayfalamıyor, üstelik
-    // sıralama `updated DESC` idi — yani EN UZUN bekleyen, yani bu bandın var
-    // olma sebebi olan kayıtlar pencerenin dışında kalıp sessizce düşüyordu.
-    // Süzgeç sunucuda olunca sonuç kümesi zaten küçük; `updated ASC` de en
-    // bayatları başa alarak kesilme ihtimalini büsbütün ortadan kaldırıyor.
+    // The status filter moved into the JQL. We used to fetch "statusCategory = Done"
+    // and filter client-side; searchIssues caps at maxResults=100 and does NOT
+    // paginate, and the sort was `updated DESC` — so the longest-waiting records,
+    // the very reason this band exists, fell outside the window and were silently
+    // dropped. Filtering server-side keeps the result set small, and `updated ASC`
+    // puts the stalest first, removing the truncation risk entirely.
     const issues = await searchIssues(
       cfg, auth,
       "assignee = currentUser() AND statusCategory = Done " +
@@ -152,16 +153,17 @@ async function fetchPendingRelease(cfg, auth, sprintField, now) {
     }
     return rows.sort((a, b) => b.days - a.days);
   } catch (err) {
-    // Opsiyonel katman: widget'ın geri kalanı çökmemeli. Ama SESSİZ de kalmamalı —
-    // yoksa "sorgu bozuldu" ile "bekleyen iş yok" ayırt edilemez, bant sessizce yok olur.
+    // Optional layer: the rest of the widget must not crash. But it must not stay
+    // SILENT either — otherwise "the query broke" and "nothing is pending" look
+    // identical and the band just disappears.
     pendingReleaseError = String(err && err.message ? err.message : err).slice(0, 200);
     return null;
   }
 }
 
-function latestStatusChange(issue) {
+function latestStatusChange(histories) {
   let latest = null;
-  for (const h of issue.changelog?.histories ?? []) {
+  for (const h of histories ?? []) {
     if (!(h.items ?? []).some((i) => i.field === "status" || i.fieldId === "status")) continue;
     const t = new Date(h.created);
     if (!latest || t > latest) latest = t;
@@ -170,29 +172,33 @@ function latestStatusChange(issue) {
 }
 
 /**
- * Statüye giriş anı. changelog eksik ya da kırpılmışsa (search 100 kayıtta kesiyor)
- * o issue için tekil changelog çekilir — yoksa süre sessizce yanlış çıkar.
+ * The issue's changelog entries. If the changelog is missing or truncated
+ * (search caps at 100 records) we fetch that issue's changelog on its own —
+ * otherwise every duration derived from it comes out silently wrong.
+ *
+ * One fetch serves both the status timestamp AND the ownership timestamp, so
+ * measuring the person's clock costs no extra request.
  */
-async function statusEnteredAt(cfg, auth, issue) {
+async function changelogOf(cfg, auth, issue) {
   const cl = issue.changelog;
   const truncated = cl && typeof cl.total === "number" && cl.total > (cl.histories?.length ?? 0);
-  if (cl && !truncated) return latestStatusChange(issue) ?? new Date(issue.fields.created);
+  if (cl && !truncated) return cl.histories ?? [];
 
   const r = await api(cfg, auth,
     `/rest/api/3/issue/${issue.key}?expand=changelog&fields=created`);
-  if (!r.ok) return latestStatusChange(issue) ?? new Date(issue.fields.created);
-  return latestStatusChange(r.body) ?? new Date(r.body.fields?.created ?? issue.fields.created);
+  if (!r.ok) return cl?.histories ?? [];
+  return r.body?.changelog?.histories ?? cl?.histories ?? [];
 }
 
 const GH_KEYCHAIN = "sprint-board-github";
-// Servis adı config'den geliyor; yazmıyorsa bu varsayılan kullanılıyor.
-// Eski kurulumlar kendi adını config'de zaten taşıdığı için kırılmıyor.
+// The service name comes from config; this default applies when it is absent.
+// Older installs carry their own name in config, so nothing breaks for them.
 const JIRA_KEYCHAIN = "sprint-board-jira";
 
 /**
- * GitHub token'ı. Önce keychain — uygulamanın `gh` KURULU OLMADAN da çalışması
- * için. gh varsa ve keychain boşsa oradan devralıyoruz, böylece mevcut
- * kurulumlar tek satır bile değiştirmeden çalışmaya devam ediyor.
+ * The GitHub token. Keychain first, so the app works WITHOUT `gh` installed.
+ * When gh is present and the keychain is empty we borrow its token, which keeps
+ * existing installs working without a single change.
  */
 function githubToken(cfg) {
   const stored = getToken(cfg.githubKeychainService || GH_KEYCHAIN, cfg.email);
@@ -207,8 +213,8 @@ function githubToken(cfg) {
   }
 }
 
-// org verilmezse filtre HİÇ eklenmiyor: kullanıcının tüm açık PR'ları gelir.
-// Eskiden org sabit gömülüydü ve başka bir kurulumda hiç sonuç dönmezdi.
+// With no org the filter is omitted entirely: all of the user's open PRs come back.
+// The org used to be hard-coded, which returned nothing on any other installation.
 const prQuery = (org) => `
 {
   search(query: "${org ? `org:${org} ` : ""}author:@me is:pr is:open", type: ISSUE, first: 50) {
@@ -221,7 +227,7 @@ const prQuery = (org) => `
   }
 }`;
 
-/** GitHub GraphQL — `gh` alt süreci değil, doğrudan HTTP (Jira ile aynı yol). */
+/** GitHub GraphQL — direct HTTP rather than a `gh` subprocess (same path as Jira). */
 async function ghGraphql(query, token) {
   apiCalls++;
   const res = await fetch("https://api.github.com/graphql", {
@@ -230,7 +236,7 @@ async function ghGraphql(query, token) {
       Authorization: `bearer ${token}`,
       Accept: "application/json",
       "Content-Type": "application/json",
-      // GitHub API User-Agent'sız isteği reddeder.
+      // The GitHub API rejects requests without a User-Agent.
       "User-Agent": "sprint-board",
     },
     body: JSON.stringify({ query }),
@@ -241,9 +247,9 @@ async function ghGraphql(query, token) {
 }
 
 /**
- * Açık PR'lar, TEK arama sorgusuyla (~6 sn).
- * Token yoksa / istek düşerse null döner — PR bilgisi opsiyonel,
- * widget'ın geri kalanı bu yüzden çökmemeli.
+ * Open PRs, via a SINGLE search query (~6s).
+ * Returns null when there is no token or the request fails — PR data is optional
+ * and the rest of the widget must not go down because of it.
  */
 async function fetchPrs(org, token) {
   if (!token) return null;
@@ -254,7 +260,7 @@ async function fetchPrs(org, token) {
       title: n.title,
       url: n.url,
       repo: n.repository?.name ?? "?",
-      // Sahip PR'ın KENDİSİNDEN geliyor; tek bir org varsayamayız.
+      // The owner comes from the PR ITSELF; we cannot assume a single org.
       owner: n.repository?.nameWithOwner?.split("/")[0] ?? null,
       isDraft: !!n.isDraft,
       reviewDecision: n.reviewDecision ?? null,
@@ -269,17 +275,17 @@ async function fetchPrs(org, token) {
 }
 
 /**
- * Her PR için SADECE required check'lerin durumu.
+ * The status of ONLY the required checks, per PR.
  *
- * Ayrı bir sorgu gerekiyor çünkü `isRequired` alanı argüman olarak PR numarasını
- * istiyor ve arama sorgusunda bu değer dinamik olamıyor — bu yüzden PR başına
- * alias üretip tek çağrıda topluyoruz.
+ * This needs its own query because the `isRequired` field takes the PR number as
+ * an argument and that value cannot be dynamic inside the search query — so we
+ * build one alias per PR and collect them in a single call.
  *
- * Bu filtre olmadan opsiyonel bir Jest/lint hatası "CI kırık" sanılıyordu:
- * Canlı ölçümde üç PR da "FAILURE" göründü ama required'ları geçmişti.
+ * Without this filter an optional Jest/lint failure read as "CI broken": measured
+ * live, three PRs all showed "FAILURE" while their required checks had passed.
  *
- * Sorgu başarısız olursa durum "bilinmiyor" (null) kalır — yanlış alarm vermektense
- * sessiz kalmak yeğdir.
+ * If the query fails the state stays "unknown" (null) — staying quiet beats
+ * raising a false alarm.
  */
 let requiredError = null;
 let pendingReleaseError = null;
@@ -303,8 +309,9 @@ async function attachRequiredChecks(prs, token) {
     prs.forEach((pr, i) => {
       const ctx = data[`p${i}`]?.pullRequest?.commits?.nodes?.[0]
         ?.commit?.statusCheckRollup?.contexts?.nodes ?? [];
-      // İkinci sorgu = oturmuş değer. İlk aramada UNKNOWN dönmüş olabilir;
-      // burada MERGEABLE/CONFLICTING'e dönüşmüş oluyor. UNKNOWN kalırsa dokunma.
+      // The second query = the settled value. The first search may have returned
+      // UNKNOWN; by now it has resolved to MERGEABLE/CONFLICTING. If it is still
+      // UNKNOWN, leave it alone.
       const settled = data[`p${i}`]?.pullRequest?.mergeable;
       if (settled && settled !== "UNKNOWN") pr.mergeable = settled;
 
@@ -338,8 +345,9 @@ const REVIEW_QUERY = `
 }`;
 
 /**
- * En son yayınlanan release. Taslakları ve ön sürümleri GitHub'ın kendisi eliyor.
- * Başarısız olursa null — güncelleme kontrolü opsiyonel, panoyu düşürmemeli.
+ * The most recent published release. GitHub itself filters out drafts and
+ * pre-releases. Returns null on failure — the update check is optional and must
+ * not take the board down.
  */
 async function fetchLatestRelease(repo, token) {
   if (!repo || !token) return null;
@@ -359,7 +367,7 @@ async function fetchLatestRelease(repo, token) {
   }
 }
 
-/** Senden review bekleyen PR'lar (github.com/pulls/reviews'un widget karşılığı). */
+/** PRs awaiting your review (the widget's equivalent of github.com/pulls/reviews). */
 async function fetchReviewRequests(now, token) {
   if (!token) return null;
   try {
@@ -384,8 +392,8 @@ async function fetchReviewRequests(now, token) {
 }
 
 /**
- * Kritik olayda tek bir sistem sesi çalar (boss > CI > review önceliği).
- * spawn+unref: ses widget'ın yenilemesini bloklamasın; hata olursa sessizce geçilir.
+ * Plays a single system sound on a critical event (priority boss > CI > review).
+ * spawn+unref so the sound never blocks the refresh; failures are ignored quietly.
  */
 function playAlert(cfg, alerts) {
   const snd = cfg.sound || {};
@@ -412,21 +420,21 @@ function activeSprint(issues, sprintField) {
 }
 
 /**
- * --demo: Jira'ya hiç gitmeden görsel durumların hepsini tek karede gösterir.
- * Girdi sahte ama mantık GERÇEK — evaluate/pickBoss/summarizePrs aynen çalışır,
- * yani burada gördüğün render gerçek veriyle de aynı çıkar.
+ * --demo: shows every visual state in one frame without touching Jira.
+ * The input is fake but the logic is REAL — evaluate/pickBoss/summarizePrs run
+ * exactly as they do live, so what you see here matches real data.
  */
 function demoPayload(cfg) {
   const now = new Date();
-  // TAMAMEN UYDURMA. Gerçek Jira kaydı, gerçek müşteri adı ve gerçek kişi adı
-  // buraya GİRMEMELİ — repo paylaşıldığında demo verisi de paylaşılmış olur.
+  // ENTIRELY FICTIONAL. No real Jira record, customer name or person's name may
+  // go here — sharing the repo shares the demo data with it.
   const seed = [
-    { key: "DEMO-101", summary: "Şablon motoru: dinamik etiket desteği", status: "Ready To Test", daysInStatus: 11, ageDays: 25, priority: "3 Medium", carriedOver: true, sprintCount: 3, qa: "Ada Yılmaz" },
-    { key: "DEMO-102", summary: "Yinelenen kayıt kimlikleri temizlensin", status: "In Code Review", daysInStatus: 5, ageDays: 12, priority: "2 High", carriedOver: false, sprintCount: 1, qa: "Konstantin Petrov" },
-    { key: "DEMO-103", summary: "Editörde sohbetle içerik üretimi", status: "UAT", daysInStatus: 4, ageDays: 15, priority: "4 Low", carriedOver: true, sprintCount: 2, qa: "Kerem Demir" },
-    { key: "DEMO-104", summary: "Hız sınırı alarmı yeniden bozuldu", status: "IN AUTO TESTING", daysInStatus: 2, ageDays: 6, priority: "2 High", carriedOver: false, sprintCount: 1, qa: "Kerem Demir" },
-    { key: "DEMO-105", summary: "Editör uç noktası 404 dönüyor", status: "To Do", daysInStatus: 0, ageDays: 3, priority: "2 High", carriedOver: false, sprintCount: 1 },
-    { key: "DEMO-106", summary: "Güvenlik açığı olan bağımlılıklar yükseltilsin", status: "Ready For Release", daysInStatus: 1, ageDays: 17, priority: "3 Medium", carriedOver: false, sprintCount: 1, qa: "Zeynep Aksu", done: true },
+    { key: "DEMO-101", summary: "Template engine: dynamic tag support", status: "Ready To Test", daysInStatus: 11, ageDays: 25, priority: "3 Medium", carriedOver: true, sprintCount: 3, qa: "Ada Yilmaz" },
+    { key: "DEMO-102", summary: "Clean up duplicate registration ids", status: "In Code Review", daysInStatus: 5, ageDays: 12, priority: "2 High", carriedOver: false, sprintCount: 1, qa: "Konstantin Petrov" },
+    { key: "DEMO-103", summary: "Generate content from chat in the editor", status: "UAT", daysInStatus: 4, ageDays: 15, priority: "4 Low", carriedOver: true, sprintCount: 2, qa: "Kerem Demir" },
+    { key: "DEMO-104", summary: "Rate limit alarm regressed again", status: "IN AUTO TESTING", daysInStatus: 2, ageDays: 6, priority: "2 High", carriedOver: false, sprintCount: 1, qa: "Kerem Demir" },
+    { key: "DEMO-105", summary: "Editor endpoint returns 404", status: "To Do", daysInStatus: 0, ageDays: 3, priority: "2 High", carriedOver: false, sprintCount: 1 },
+    { key: "DEMO-106", summary: "Upgrade vulnerable dependencies", status: "Ready For Release", daysInStatus: 1, ageDays: 17, priority: "3 Medium", carriedOver: false, sprintCount: 1, qa: "Zeynep Aksu", done: true },
   ];
 
   const tasks = seed.map((t) => {
@@ -446,13 +454,13 @@ function demoPayload(cfg) {
   });
 
   const demoPrs = [
-    { title: "DEMO-101 | Şablon kapısı", ciState: "FAILURE", failingRequired: ["LintChecker"], repo: "web-frontend", number: 4608, url: "#" },
-    { title: "DEMO-101 | Şablon arayüzü", ciState: "SUCCESS", repo: "editor-frontend", number: 327, url: "#" },
-    { title: "DEMO-101 | Şablon üreteci", ciState: "SUCCESS", repo: "template-generator", number: 243, url: "#" },
-    { title: "DEMO-102 | Paylaşılan kütüphane yükseltmesi", ciState: "PENDING", pendingRequired: ["AI Code Review"], repo: "backend-api", number: 1166, url: "#" },
-    { title: "DEMO-102 | Gönderim koruması", ciState: "SUCCESS", repo: "shared-lib", number: 97, url: "#" },
-    { title: "DEMO-106 | Bağımlılık yükseltmesi", ciState: "FAILURE", failingRequired: ["qa/smoke"], repo: "worker-jobs", number: 288, url: "#" },
-    { title: "DEMO-103 | Katalog servisi", ciState: "SUCCESS", reviewDecision: "REVIEW_REQUIRED", repo: "catalog-service", number: 33957, url: "#" },
+    { title: "DEMO-101 | Template gate", ciState: "FAILURE", failingRequired: ["LintChecker"], repo: "web-frontend", number: 4608, url: "#" },
+    { title: "DEMO-101 | Template UI", ciState: "SUCCESS", repo: "editor-frontend", number: 327, url: "#" },
+    { title: "DEMO-101 | Template generator", ciState: "SUCCESS", repo: "template-generator", number: 243, url: "#" },
+    { title: "DEMO-102 | Shared library upgrade", ciState: "PENDING", pendingRequired: ["AI Code Review"], repo: "backend-api", number: 1166, url: "#" },
+    { title: "DEMO-102 | Submit guard", ciState: "SUCCESS", repo: "shared-lib", number: 97, url: "#" },
+    { title: "DEMO-106 | Dependency upgrade", ciState: "FAILURE", failingRequired: ["qa/smoke"], repo: "worker-jobs", number: 288, url: "#" },
+    { title: "DEMO-103 | Catalog service search", ciState: "SUCCESS", reviewDecision: "REVIEW_REQUIRED", repo: "catalog-service", number: 33957, url: "#" },
   ];
   const { byKey: demoByKey, broken: demoBroken, waiting: demoWaiting } = summarizePrs(demoPrs);
   for (const t of tasks) {
@@ -464,7 +472,7 @@ function demoPayload(cfg) {
 
   return {
     ok: true, demo: true, generatedAt: now.toISOString(), apiCalls: 0,
-    sprint: { name: "Demo Takım - Sprint#4", endDate: null, daysLeft: 2 },
+    sprint: { name: "Demo Team - Sprint#4", endDate: null, daysLeft: 2 },
     cleared: 1, total: tasks.length,
     boss: boss && {
       key: boss.key, summary: boss.summary, status: boss.status,
@@ -474,15 +482,15 @@ function demoPayload(cfg) {
     },
     prsAvailable: true,
     pendingRelease: [
-      { key: "DEMO-107", summary: "Yazı tipi görüntüleme ayarı eksik", status: "Ready For Release",
-        url: "https://example.invalid/browse/DEMO-107", sprint: "Demo Takım - Sprint#2", days: 17 },
+      { key: "DEMO-107", summary: "Missing font-display setting", status: "Ready For Release",
+        url: "https://example.invalid/browse/DEMO-107", sprint: "Demo Team - Sprint#2", days: 17 },
     ],
     position: cfg.position || { top: 40, right: 40 },
     reviewRequests: [
       { repo: "catalog-service", number: 34101, author: "demo-reviewer", days: 3,
-        title: "DEMO-108 | hata düzeltmesi", url: "#" },
+        title: "DEMO-108 | bug fix", url: "#" },
       { repo: "backend-api", number: 331, author: "demo-author", days: 1,
-        title: "DEMO-109 | yeni özellik", url: "#" },
+        title: "DEMO-109 | new feature", url: "#" },
     ],
     brokenPrs: demoBroken,
     waitingPrs: demoWaiting,
@@ -493,27 +501,28 @@ function demoPayload(cfg) {
 
 async function main() {
   const cfg = readJson(CONFIG_PATH, null);
-  if (!cfg) throw new Error(`config okunamadı: ${CONFIG_PATH}`);
+  if (!cfg) throw new Error(`could not read config: ${CONFIG_PATH}`);
   if (process.argv.includes("--demo")) return demoPayload(cfg);
 
   const piped = await pipedTokens();
 
-  // İki kimlik yolu. OAuth'ta access token'ı Swift tarafı veriyor (süresi
-  // dolmuşsa Worker üzerinden yenileyip öyle veriyor), site `cloudId` ile
-  // seçiliyor. Yoksa eski API token yoluna düşülüyor — mevcut kurulumlar
-  // tek satır değişmeden çalışmaya devam etsin diye.
+  // Two auth paths. Under OAuth the Swift side supplies the access token
+  // (refreshing it through the Worker first when expired) and the site is chosen
+  // by `cloudId`. Otherwise we fall back to the old API-token path so existing
+  // installs keep working without a single change.
   const auth = piped.jiraAccessToken && cfg.cloudId
     ? { mode: "oauth", token: piped.jiraAccessToken, cloudId: cfg.cloudId }
     : null;
 
   const token = auth ? null : (piped.jiraToken || getToken(cfg.keychainService || JIRA_KEYCHAIN, cfg.email));
   if (!auth && !token) {
-    // Uygulama tarafı ağ hatasıyla oturum bitişini ayırıyor; burada da aynı
-    // ayrımı koruyoruz ki geçici bir kesinti "giriş yap" gibi görünmesin.
+    // The app side distinguishes a network failure from an expired session; we
+    // preserve that distinction here so a transient outage never reads as
+    // "sign in again".
     throw new Error(
       piped.jiraAuthState === "temporary"
-        ? "Atlassian'a ulaşılamadı — bağlantı gelince kendiliğinden denenecek"
-        : "Jira girişi yok ya da süresi dolmuş — menü çubuğundaki ⚔ > Ayarlar'dan tekrar giriş yap"
+        ? "Could not reach Atlassian — it will retry automatically once you are back online"
+        : "No Jira session, or it has expired — sign in again from ⚔ > Settings in the menu bar"
     );
   }
   const jiraAuth = auth || { mode: "basic", token: Buffer.from(`${cfg.email}:${token}`).toString("base64") };
@@ -523,7 +532,7 @@ async function main() {
   if (!sprintField || qaField === undefined) {
     const found = await discoverFields(cfg, jiraAuth, ["Sprint", "QA Tester"]);
     sprintField = sprintField || found["Sprint"];
-    if (!sprintField) throw new Error("Jira'da 'Sprint' alanı bulunamadı");
+    if (!sprintField) throw new Error("could not find the 'Sprint' field in Jira");
     qaField = qaField === undefined ? found["QA Tester"] : qaField;
     writeJson(CONFIG_PATH, { ...cfg, sprintFieldId: sprintField, qaFieldId: qaField });
   }
@@ -531,40 +540,56 @@ async function main() {
   const issues = await searchIssues(
     cfg, jiraAuth,
     "assignee = currentUser() AND sprint in openSprints() ORDER BY updated DESC",
-    `summary,status,priority,issuetype,created,${sprintField}${qaField ? "," + qaField : ""}`
+    `summary,status,priority,issuetype,created,assignee,${sprintField}${qaField ? "," + qaField : ""}`
   );
 
-  // Bos pano iki sebepten olabilir: gercekten is yok, YA DA token gecersiz.
-  // Jira gecersiz kimligi ANONIM sayip aramaya HTTP 200 + bos liste donuyor
-  // (olculdu: arama 200 {"issues":[]}, /myself ayni token'la 401). Bu yuzden
-  // yanlis token giren kullanici hata degil bombos bir widget goruyordu.
-  // Kimligi SADECE sonuc bosken dogruluyoruz — dolu panoda ek istek yok.
+  // An empty board has two causes: there really is no work, OR the token is
+  // invalid. Jira treats an invalid identity as ANONYMOUS and answers the search
+  // with HTTP 200 + an empty list (measured: search 200 {"issues":[]}, /myself
+  // 401 with the same token). So someone with a bad token saw a blank widget
+  // rather than an error. We verify the identity ONLY when the result is empty —
+  // a populated board costs no extra request.
   if (issues.length === 0) {
     const me = await api(cfg, jiraAuth, "/rest/api/3/myself");
     if (!me.ok) {
       throw new Error(
         me.status === 401
-          ? "Jira token gecersiz — menu cubugundaki ⚔ > Ayarlar'dan yenile"
-          : `Jira kimlik dogrulamasi basarisiz (HTTP ${me.status})`
+          ? "Jira token is invalid — refresh it from ⚔ > Settings in the menu bar"
+          : `Jira authentication failed (HTTP ${me.status})`
       );
     }
   }
 
   const now = new Date();
-  // Opsiyonel katman, ana yükü BEKLETMEMELİ: burada sadece başlatılıyor, sonucu
-  // task döngüsünden sonra toplanıyor.
+  // An optional layer must NOT hold up the main load: it is only started here,
+  // and its result is collected after the task loop.
   const pendingReleaseP = fetchPendingRelease(cfg, jiraAuth, sprintField, now);
+  // Resolved BEFORE the loop: each task's clock needs the current sprint's id.
+  const sprint = activeSprint(issues, sprintField);
   const tasks = [];
   for (const issue of issues) {
     const f = issue.fields;
     const status = f.status?.name ?? "Unknown";
     const done = f.status?.statusCategory?.key === "done";
-    const enteredAt = await statusEnteredAt(cfg, jiraAuth, issue);
+    const histories = await changelogOf(cfg, jiraAuth, issue);
+    const statusAt = latestStatusChange(histories) ?? new Date(f.created);
+    // The clock is the PERSON's, not the ticket's. A card that sat unassigned in
+    // To Do for 23 days and was handed over today is 1 day of THIS person's
+    // delay, not 23 — otherwise it lands on its new owner as an instant boss
+    // alert for a queue they never saw. Whichever came later wins: a status
+    // change after the handover is the real bottleneck again.
+    // Every issue here matched `assignee = currentUser()`, so f.assignee IS me.
+    const ownedAt = ownershipStartedAt(histories, {
+      accountId: f.assignee?.accountId,
+      sprintFieldId: sprintField,
+      sprintId: sprint?.id,
+    });
+    const enteredAt = ownedAt && ownedAt > statusAt ? ownedAt : statusAt;
     const daysInStatus = businessDaysBetween(enteredAt, now);
-    // Statüde geçen süre darboğazı, yaş ise toplam gecikmeyi gösterir — ikisi farklı sinyal.
+    // Time-in-status shows the bottleneck, age shows total delay — two different signals.
     const ageDays = businessDaysBetween(new Date(f.created), now);
     const { threshold, alert, ratio, tier } = evaluate(status, daysInStatus, cfg);
-    // Sprint dizisinde kapalı sprint varsa iş devretmiş demektir (ayrı sorgu gerekmiyor).
+    // A closed sprint in the array means the work was carried over (no extra query needed).
     const { carriedOver, sprintCount } = sprintHistory(f[sprintField]);
 
     tasks.push({
@@ -573,10 +598,11 @@ async function main() {
       status,
       statusCategory: f.status?.statusCategory?.key ?? "new",
       done,
-      // done kategorisi tek başına yetmiyor: "bitti" ile "çıkmayı bekliyor" ayrı.
-      // NOT: bu ayrım SADECE görsel. `cleared` sayacı hâlâ `done`'a bakıyor —
-      // geliştirme işi bittiğinde sprint açısından kapanmış sayılıyor, release'i
-      // beklemek sayacı geciktirmemeli. Uyumsuzluk değil, kasıtlı.
+      // The done category alone is not enough: "finished" and "waiting to ship"
+      // are different. NOTE: this distinction is VISUAL ONLY. The `cleared` counter
+      // still looks at `done` — once the development work is finished the sprint
+      // considers it closed, and waiting on a release must not hold the counter
+      // back. Not an inconsistency; deliberate.
       release: done ? releaseState(f.status?.name, cfg) : null,
       priority: f.priority?.name ?? null,
       daysInStatus,
@@ -593,7 +619,7 @@ async function main() {
     });
   }
 
-  // Org opsiyonel: verilmezse PR araması org filtresi olmadan çalışır.
+  // The org is optional: without it the PR search runs with no org filter.
   const githubOrg = cfg.githubOrg || "";
   const ghToken = piped.githubToken || githubToken(cfg);
   const prs = await fetchPrs(githubOrg, ghToken);
@@ -607,7 +633,7 @@ async function main() {
 
   const prevState = readJson(STATE_PATH, emptyState());
 
-  // Kritik olay tespiti: bir öncekiyle karşılaştır, sadece YENİ olanlar ses çıkarsın.
+  // Critical-event detection: compare against the previous run so only NEW items sound.
   const bossNow = pickBoss(tasks);
   const signals = {
     bossKey: bossNow ? bossNow.key : null,
@@ -616,26 +642,27 @@ async function main() {
   };
   const alerts = detectAlerts(prevState, signals);
   const played = playAlert(cfg, alerts);
-  // `initialized` ŞART: detectAlerts ilk çalıştırmayı buradan tanıyor. Yazılmazsa
-  // her açılış "ilk açılış" sayılır ve mevcut her boss/kırık CI yeniden ses çalar.
+  // `initialized` is REQUIRED: this is how detectAlerts recognises the first run.
+  // Without it every launch counts as "first launch" and every existing boss or
+  // broken CI plays a sound all over again.
   writeJson(STATE_PATH, { initialized: true, ...signals });
 
-  // Kapanmışlar listeden DÜŞMEZ, sadece sona iner: "Awaiting Release" gibi statüler
-  // Jira'da done kategorisinde ama iş henüz prod'a çıkmamış olabilir — gözden kaybolmamalı.
+  // Closed items are NOT dropped from the list, only sorted to the end: statuses
+  // like "Awaiting Release" sit in Jira's done category while the work may not have
+  // shipped yet — it must not disappear from view.
   const visible = [...tasks].sort((a, b) => {
     if (a.done !== b.done) return a.done ? 1 : -1;
     return b.ratio - a.ratio || b.daysInStatus - a.daysInStatus;
   });
 
-  // Sürüm yalnızca dağıtım derlemesinde gömülü; yoksa release sorgusunu HİÇ
-  // yapmıyoruz — geliştirirken ne gereksiz istek ne de gürültülü uyarı olsun.
+  // The version is only embedded in a distribution build; without it we skip the
+  // release query entirely — no wasted request and no noisy warning while developing.
   const update = piped.appVersion
     ? updateInfo(piped.appVersion,
         await fetchLatestRelease(cfg.updateRepo || "mustafauyysl/sprint-board", ghToken))
     : null;
 
   const boss = pickBoss(tasks);
-  const sprint = activeSprint(issues, sprintField);
   const daysLeft = sprint?.endDate
     ? Math.max(0, Math.ceil((new Date(sprint.endDate) - now) / 86400000))
     : null;
@@ -673,6 +700,6 @@ async function main() {
 main()
   .then((out) => process.stdout.write(JSON.stringify(out, null, DEBUG ? 2 : 0)))
   .catch((err) => {
-    // Sessizce boş widget en kötü senaryo — hata da geçerli JSON olarak çıkar.
+    // A silently empty widget is the worst outcome — errors are emitted as valid JSON too.
     process.stdout.write(JSON.stringify({ ok: false, error: String(err?.message ?? err) }));
   });

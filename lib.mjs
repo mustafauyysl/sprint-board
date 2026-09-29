@@ -1,15 +1,15 @@
-// Saf karar mantığı. Burada I/O yok, Date.now() yok — "now" her zaman parametre.
-// Böylece tamamı deterministik test edilebiliyor.
+// Pure decision logic. No I/O here, no Date.now() — "now" is always a parameter,
+// which is what makes all of it deterministically testable.
 
 const MS_PER_DAY = 86400000;
 
-/** Yerel takvim gününü tam sayıya çevirir (DST'den etkilenmez). */
+/** Local calendar day as an integer (unaffected by DST). */
 export function dayIndex(date) {
   const d = new Date(date);
   return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / MS_PER_DAY);
 }
 
-/** dayIndex -> haftanın günü (0=Pazar ... 6=Cumartesi). 1970-01-01 Perşembeydi. */
+/** dayIndex -> weekday (0=Sunday ... 6=Saturday). 1970-01-01 was a Thursday. */
 export function dowOf(dayIdx) {
   return (((dayIdx % 7) + 7) % 7 + 4) % 7;
 }
@@ -20,9 +20,9 @@ const isWeekend = (dayIdx) => {
 };
 
 /**
- * from'dan to'ya geçen tam iş günü sayısı (from hariç, to dahil).
- * Cuma akşam review'a giren iş Pazartesi sabahı 1 gündür bekliyor sayılır —
- * hafta sonu "takıldı" alarmını tetiklememeli.
+ * Whole business days between from and to (exclusive of from, inclusive of to).
+ * Work that entered review on Friday evening counts as 1 day old on Monday
+ * morning — a weekend must not trip the "stuck" alarm.
  */
 export function businessDaysBetween(from, to) {
   const a = dayIndex(from);
@@ -39,23 +39,67 @@ export function businessDaysBetween(from, to) {
 }
 
 /**
- * Statüde geçen süreyi eşiğe vurur.
- * Tam sınırda (days === threshold) HENÜZ yanmaz — eşik "bunu aşarsa sorun" demek.
+ * When the CURRENT owner's clock starts, or null when the changelog shows no
+ * such moment.
+ *
+ * A ticket that sat unassigned in To Do for 23 days and was pulled into this
+ * sprint today is NOT 23 days of this person's delay — it was nobody's. The
+ * clock must start at the later of "assigned to me" and "added to this sprint".
+ * Both events are already in the changelog we fetch for the status timestamp,
+ * so this costs no extra request.
+ *
+ * Returns null for the common case (created already assigned and in the sprint):
+ * the caller then keeps the plain status timestamp.
+ */
+export function ownershipStartedAt(histories, opts = {}) {
+  const { accountId, sprintFieldId, sprintId } = opts;
+  let latest = null;
+  const bump = (at) => {
+    const t = new Date(at);
+    if (!Number.isNaN(t.getTime()) && (!latest || t > latest)) latest = t;
+  };
+
+  // Jira writes sprint membership as a COMMA-SEPARATED id list, not one id: a
+  // ticket moved from sprint 4 to 5 reads from "4" to "5", and one added to a
+  // second board reads from "4" to "4,5". Only an id that is in `to` and NOT in
+  // `from` is an actual entry into that sprint.
+  const idSet = (raw) =>
+    new Set(String(raw ?? "").split(",").map((x) => x.trim()).filter(Boolean));
+
+  for (const h of histories ?? []) {
+    for (const item of h?.items ?? []) {
+      if (!item) continue;
+      const field = item.fieldId || item.field;
+      if (accountId && field === "assignee" && item.to === accountId) bump(h.created);
+      if (sprintId != null && (field === sprintFieldId || item.field === "Sprint")) {
+        const id = String(sprintId);
+        if (idSet(item.to).has(id) && !idSet(item.from).has(id)) bump(h.created);
+      }
+    }
+  }
+  return latest;
+}
+
+/**
+ * Measures time-in-status against the threshold.
+ * Exactly at the boundary (days === threshold) it does NOT fire yet — the
+ * threshold means "a problem once this is exceeded".
  */
 export function evaluate(status, daysInStatus, config) {
   const threshold = config.thresholds?.[status] ?? config.defaultThresholdDays;
   const alert = daysInStatus > threshold;
-  // Eşik 0 ("sıfır tolerans") geçerli bir ayar; paydayı 1'e sabitlemezsek
-  // oran 0 çıkar ve boss sıralaması ile critical kademesi sessizce çöker.
+  // A threshold of 0 ("zero tolerance") is a valid setting; without clamping the
+  // denominator to 1 the ratio would be 0 and both boss ranking and the critical
+  // tier would silently collapse.
   const ratio = daysInStatus / Math.max(threshold, 1);
   const tier = !alert ? "ok" : ratio >= 2 ? "critical" : "warn";
   return { threshold, alert, ratio, tier };
 }
 
 /**
- * Boss = eşiğini EN ÇOK ORANLA aşan task. Gün sayısı değil oran, çünkü
- * 4 gündür code review'da (eşik 2, oran 2.0) bekleyen bir iş,
- * 8 gündür To Do'da (eşik 7, oran 1.14) duran bir işten daha acil.
+ * Boss = the task exceeding its threshold by the largest RATIO, not by the most
+ * days: something sitting 4 days in code review (threshold 2, ratio 2.0) is more
+ * urgent than something sitting 8 days in To Do (threshold 7, ratio 1.14).
  */
 export function pickBoss(tasks) {
   const candidates = tasks.filter((t) => t.alert && !t.done);
@@ -67,10 +111,11 @@ export function pickBoss(tasks) {
 }
 
 /**
- * Issue'nun sprint geçmişi. Jira'nın sprint alanı DİZİ döner ve kapalı sprintler
- * listede kalır — devretmiş işi buradan anlıyoruz, ayrı bir sorguya gerek yok.
+ * An issue's sprint history. Jira's sprint field returns an ARRAY and closed
+ * sprints stay in it — that is how we detect carried-over work, no extra query.
  *
- * "future" sprintler sayılmaz: henüz başlamamış bir plana konmuş olmak devretme değil.
+ * "future" sprints do not count: being placed in a plan that has not started
+ * yet is not the same as carrying work over.
  */
 export function sprintHistory(sprints) {
   const list = Array.isArray(sprints) ? sprints : [];
@@ -83,43 +128,43 @@ export function sprintHistory(sprints) {
   };
 }
 
-/** Aşım katına göre şimşek sayısı (1–5). */
+/** Number of lightning bolts (1–5) based on how far past the threshold. */
 export function bolts(ratio) {
   return Math.max(1, Math.min(5, Math.floor(ratio)));
 }
 
-/** PR başlığından Jira anahtarını çıkarır ("DEMO-101 | Şablon kapısı" -> "DEMO-101"). */
+/** Extracts the Jira key from a PR title ("DEMO-101 | Template gate" -> "DEMO-101"). */
 export function extractIssueKey(title) {
   const m = String(title || "").match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
   return m ? m[1] : null;
 }
 
-// Kötü olan kazanır: bir taskın PR'larından biri kırıksa rozet kırık görünmeli.
+// Worst wins: if any of a task's PRs is broken, the badge must look broken.
 const CI_RANK = { FAILURE: 3, ERROR: 3, PENDING: 2, EXPECTED: 2, SUCCESS: 1 };
 
 const FAILED = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"]);
 const WAITING = new Set(["PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING"]);
 
 /**
- * Bir PR'ın SADECE required check'lerine bakarak durum özeti çıkarır.
+ * Summarises a PR's status from its REQUIRED checks only.
  *
- * GitHub'ın statusCheckRollup.state alanı opsiyonel check'leri de sayıyor; bu yüzden
- * merge'i hiç engellemeyen bir Jest/lint hatası "FAILURE" görünüyordu (3 PR'da doğrulandı).
- * Merge'i gerçekten bloke eden şey required check'ler, o yüzden filtre burada.
+ * GitHub's statusCheckRollup.state counts optional checks too, so a Jest/lint
+ * failure that never blocks the merge showed up as "FAILURE" (confirmed on three
+ * PRs). What actually blocks a merge is the required checks, hence this filter.
  */
 export function requiredRollup(contexts) {
   const required = (contexts || []).filter((c) => c && c.isRequired);
 
-  // Yeniden çalıştırılan check'lerde GitHub hem eski hem yeni run'ı listede tutuyor
-  // (Canlı ölçüm: aynı check bir kez CANCELLED, bir kez SUCCESS görünüyordu.)
-  // Sadece en son çalışan sayılmalı — yoksa iptal edilmiş eski run "kırık" sanılır.
+  // For re-run checks GitHub keeps BOTH the old and the new run in the list
+  // (measured live: the same check appeared once CANCELLED and once SUCCESS).
+  // Only the latest run counts — otherwise a cancelled old run looks "broken".
   const latest = new Map();
   for (const c of required) {
     const name = c.name || c.context || "?";
     const at = c.completedAt || c.startedAt || c.createdAt || null;
     const prev = latest.get(name);
     if (!prev) { latest.set(name, { c, at }); continue; }
-    // Zaman bilgisi varsa ona göre, yoksa listede sonra geleni güncel kabul et.
+    // Prefer timestamps when present; otherwise treat later-in-list as newer.
     if (!prev.at || (at && at >= prev.at)) latest.set(name, { c, at });
   }
 
@@ -141,35 +186,36 @@ export function requiredRollup(contexts) {
     }
   }
 
-  // Hiç required check yoksa durum bilinmiyor sayılır — uyarı üretmez.
+  // With no required checks at all the state is unknown — it raises no warning.
   const state = rank === 3 ? "FAILURE" : rank === 2 ? "PENDING" : rank === 1 ? "SUCCESS" : null;
   return { state, failing, pending, requiredCount: latest.size };
 }
 
 /**
- * Done kategorisinde OLUP hâlâ canlıya çıkmamış statüler — izin listesi.
+ * Statuses that ARE in the done category but have not shipped yet — an allow list.
  *
- * Neden izin listesi: tersi ("bitmişler" listesi) tanınmayan her statüyü sonsuza
- * dek "bekliyor" gösteriyordu. Bu Jira'nın done kategorisinde 15 statü var ve
- * altısı (Closed, Resolved, Problem Solved, Epic is Done, Question, Unresolved)
- * bu yüzden yanlış sınıflanıyordu. Tanınmayan statü artık "bitmiş"e düşer —
- * kalıcı gürültü üretmek yerine sessiz kalır.
+ * Why an allow list: the inverse (a list of "finished" statuses) left every
+ * unrecognised status showing as "pending" forever. This Jira has 15 statuses in
+ * the done category and six of them (Closed, Resolved, Problem Solved, Epic is
+ * Done, Question, Unresolved) were misclassified that way. An unrecognised status
+ * now falls through to "finished" — it stays quiet instead of producing permanent
+ * noise.
  */
 export const DEFAULT_PENDING_RELEASE_STATUSES = [
   "Ready For Release", "Awaiting Release", "Pending for Release",
   "Waiting for Release", "Waiting for SDK Release",
 ];
 
-/** config'teki liste bozuksa (dizi değilse) varsayılana döner — payload düşmesin. */
+/** Falls back to the default when the configured list is malformed (not an array). */
 export function pendingReleaseStatuses(config) {
   const c = config && config.pendingReleaseStatuses;
   return Array.isArray(c) ? c : DEFAULT_PENDING_RELEASE_STATUSES;
 }
 
 /**
- * Done kategorisindeki bir statüyü üçe ayırır: bitmiş / iptal / canlıya çıkmayı bekliyor.
+ * Splits a done-category status three ways: finished / cancelled / waiting to ship.
  *
- * Bilinmeyen statü "bitmiş" sayılır (fail-closed) — bkz. üstteki izin listesi.
+ * An unknown status counts as "finished" (fail-closed) — see the allow list above.
  */
 export function releaseState(status, config) {
   const raw = typeof status === "string" ? status.trim() : "";
@@ -181,22 +227,22 @@ export function releaseState(status, config) {
 }
 
 /**
- * Bir PR'ı merge'den alıkoyan her şey — CI *ve* code review birlikte.
+ * Everything keeping a PR from being merged — CI *and* code review together.
  *
- * Yalnız CI'ya bakmak yanıltıcıydı: required check'lerin hepsi geçse bile
- * review onayı beklenirken PR merge edilemiyor. rank 3 = aksiyon gerekiyor,
- * 2 = bekleniyor, 0 = engel yok.
+ * Looking at CI alone was misleading: even with every required check green, a PR
+ * awaiting review approval cannot be merged. rank 3 = action needed,
+ * 2 = waiting, 0 = nothing blocking.
  */
 export function prBlockers(pr) {
   const reasons = [];
   let rank = 0;
 
-  // Conflict merge'i kesin engeller — CI yeşil ve review onaylı olsa bile.
-  // SADECE "CONFLICTING" sayılır: GitHub mergeable'ı tembel hesaplıyor, ilk
-  // sorguda "UNKNOWN" dönüp ikincisinde "MERGEABLE" olabiliyor (canlı ölçüldü:
-  // 15 PR'ın 3'ü böyleydi). UNKNOWN'ı conflict saymak yanlış alarm olurdu.
+  // A conflict blocks the merge outright — even with green CI and an approval.
+  // ONLY "CONFLICTING" counts: GitHub computes mergeable lazily and can return
+  // "UNKNOWN" on the first query and "MERGEABLE" on the second (measured live:
+  // 3 of 15 PRs did this). Treating UNKNOWN as a conflict would be a false alarm.
   if (pr.mergeable === "CONFLICTING") {
-    reasons.push("conflict — rebase gerekiyor");
+    reasons.push("conflict — needs rebase");
     rank = 3;
   }
 
@@ -208,12 +254,12 @@ export function prBlockers(pr) {
     rank = Math.max(rank, 2);
   }
 
-  // reviewDecision yalnızca review ZORUNLUYSA dolu gelir; null "gerekmiyor" demek.
+  // reviewDecision is only populated when review is REQUIRED; null means "not needed".
   if (pr.reviewDecision === "CHANGES_REQUESTED") {
-    reasons.push("değişiklik istendi");
+    reasons.push("changes requested");
     rank = 3;
   } else if (pr.reviewDecision === "REVIEW_REQUIRED") {
-    reasons.push("review bekliyor");
+    reasons.push("awaiting review");
     rank = Math.max(rank, 2);
   }
 
@@ -221,11 +267,11 @@ export function prBlockers(pr) {
 }
 
 /**
- * Senden review istenen bir PR'ın ne zamandır beklediği.
+ * How long a PR has been waiting on YOUR review.
  *
- * PR'ın açılış tarihi değil, SANA review atandığı an sayılır — bir PR haftalarca
- * açık durup review'a dün atanmış olabilir. Takım üzerinden gelen istekte
- * requestedReviewer bir Team olur (login yok), o da sayılır.
+ * Counted from the moment review was assigned to you, not from when the PR was
+ * opened — a PR can sit open for weeks and only be assigned yesterday. For a
+ * team request requestedReviewer is a Team (no login); that counts too.
  */
 export function reviewWaitInfo(pr, login, now) {
   const events = (pr && pr.timelineItems && pr.timelineItems.nodes) || [];
@@ -233,7 +279,7 @@ export function reviewWaitInfo(pr, login, now) {
   for (const e of events) {
     if (!e || !e.createdAt) continue;
     const who = e.requestedReviewer ? e.requestedReviewer.login || null : null;
-    if (login && who && who !== login) continue; // başkasına yapılan istek
+    if (login && who && who !== login) continue; // request aimed at someone else
     if (!latest || e.createdAt > latest) latest = e.createdAt;
   }
   const at = latest || (pr && pr.createdAt) || null;
@@ -241,9 +287,9 @@ export function reviewWaitInfo(pr, login, now) {
 }
 
 /**
- * PR listesini task anahtarına göre özetler.
- * Jira dev-status boş döndüğü için PR'lar GitHub'dan geliyor ve başlıktaki
- * anahtarla eşleşiyor — başlığında anahtar olmayan PR sessizce atlanır.
+ * Summarises a PR list by task key.
+ * Jira's dev-status comes back empty here, so PRs come from GitHub and are
+ * matched by the key in the title — a PR without a key is silently skipped.
  */
 export function summarizePrs(prs) {
   const byKey = {};
@@ -256,20 +302,20 @@ export function summarizePrs(prs) {
     const entry = byKey[key] || (byKey[key] = { count: 0, rated: 0, state: null, rank: 0 });
     entry.count++;
 
-    // Draft PR henüz hazır değil: rozette SAYILIR (işe başlanmış), ama engel
-    // üretmez — ne banda girer ne CI sesi çalar. Canlı ölçümde açık PR'ların
-    // 7/8'i draft'tı ve 5'i REVIEW_REQUIRED olduğu için BEKLEYEN bandını tek
-    // başına dolduruyor, gerçek tek iş aralarında kayboluyordu.
+    // A draft PR is not ready yet: it COUNTS in the badge (work has started) but
+    // produces no blocker — it neither joins a band nor plays a CI sound. Measured
+    // live: 7 of 8 open PRs were drafts and 5 were REVIEW_REQUIRED, so drafts
+    // filled the WAITING band on their own and the one real item was lost in them.
     if (pr?.isDraft) continue;
 
     const { rank, reasons } = prBlockers(pr);
     entry.rated++;
-    // İLK PR'da mutlaka set et: rank 0 iken "rank > entry.rank" hiç sağlanmaz ve
-    // engelsiz PR'lar durumsuz (null) kalırdı. Sayaç count DEĞİL rated olmalı —
-    // aksi halde listedeki ilk PR draft olduğunda sonraki gerçek PR durumsuz kalır.
+    // Always set on the FIRST PR: while rank is 0, "rank > entry.rank" never holds
+    // and unblocked PRs would stay stateless (null). The counter must be rated, NOT
+    // count — otherwise a draft first in the list leaves the next real PR stateless.
     if (entry.rated === 1 || rank > entry.rank) {
       entry.rank = rank;
-      // Engel yoksa CI'ın kendi durumunu yansıt: bilinmiyorsa (null) yeşil gösterme.
+      // With nothing blocking, reflect CI's own state: if unknown (null), do not show green.
       entry.state = rank === 3 ? "FAILURE" : rank === 2 ? "PENDING" : pr.ciState || null;
     } else if (rank === entry.rank && !entry.state && pr.ciState) {
       entry.state = pr.ciState;
@@ -283,11 +329,12 @@ export function summarizePrs(prs) {
 }
 
 /**
- * "Ada Yılmaz" -> "Ada". Dar sütuna sığması için; tam ad tooltip'te kalır.
+ * "Ada Yilmaz" -> "Ada". Keeps the narrow column readable; the full name stays
+ * in the tooltip.
  *
- * overrides: Jira'daki tam ad -> ekranda görünecek ad. Kişinin takımda kullandığı
- * isim Jira kaydıyla uyuşmadığında (ör. "Kerem Demir" ama herkes "KD" diyor)
- * config'ten eşlenir; kod içine gömülmez.
+ * overrides: full name in Jira -> name to display. When the name someone goes by
+ * on the team does not match their Jira record (e.g. "Kerem Demir" but everyone
+ * says "KD") it is mapped from config, never hard-coded.
  */
 export function firstName(displayName, overrides) {
   if (!displayName) return "";
@@ -300,11 +347,11 @@ export function firstName(displayName, overrides) {
   return first.length > 9 ? first.slice(0, 8) + "…" : first;
 }
 
-// --- Hızlı notlar (tarayıcı tarafında localStorage'da yaşar; Jira'ya hiç gitmez) ---
+// --- Quick notes (live on the browser side; never sent to Jira) ---
 export const MAX_NOTES = 6;
 const NOTE_LIMIT = 140;
 
-/** Boş/whitespace not eklenmez; liste dolduğunda EN ESKİ düşer. */
+/** Empty/whitespace notes are not added; when the list is full the OLDEST drops. */
 export function addNote(notes, text, now) {
   const t = String(text ?? "").trim();
   if (!t) return Array.isArray(notes) ? notes : [];
@@ -324,11 +371,11 @@ export function removeNote(notes, id) {
 
 
 /**
- * Bir önceki çalıştırmaya göre YENİ ortaya çıkan kritik olaylar.
+ * Critical events that are NEW relative to the previous run.
  *
- * İlk çalıştırmada (prev.initialized !== true) hiçbir şey üretmez — yoksa widget
- * ilk açılışta mevcut her boss/kırık CI/review isteği için ses çalardı.
- * Zaten bilinen bir olay tekrar ses çıkarmaz; sadece yeni gelenler sayılır.
+ * On the first run (prev.initialized !== true) it produces nothing — otherwise
+ * the widget would play a sound for every existing boss/broken CI/review request
+ * on first launch. An already-known event stays silent; only new ones count.
  */
 export function detectAlerts(prev, now) {
   const alerts = [];
@@ -348,11 +395,12 @@ export function detectAlerts(prev, now) {
 }
 
 /**
- * Kalici durum artik TEK bir soruya hizmet ediyor: "bu olayi bir onceki
- * calistirmada gormus muyduk?" — yani ses tekrarini onlemek.
+ * Persisted state now serves ONE question: "did we already see this event on the
+ * previous run?" — i.e. preventing repeated sounds.
  *
- * `initialized` KRITIK: detectAlerts ilk calistirmada susmak icin buna bakiyor.
- * Yazilmazsa widget her acilista mevcut her boss/kirik CI icin ses calardi.
+ * `initialized` is CRITICAL: detectAlerts relies on it to stay quiet on the first
+ * run. Without it the widget would play a sound for every existing boss/broken CI
+ * on every launch.
  */
 export function emptyState() {
   return {
@@ -363,16 +411,16 @@ export function emptyState() {
   };
 }
 
-// --- Çalıştırılabilir dosya arama ---------------------------------------
-// Finder'dan açılan bir GUI uygulaması shell PATH'ini GÖRMEZ (/usr/bin:/bin ile
-// sınırlı kalır), o yüzden node/gh'yi "PATH'te bulunur" varsayamayız. Homebrew
-// Apple Silicon'da /opt/homebrew, Intel Mac'te /usr/local altında kurulu.
+// --- Executable lookup --------------------------------------------------
+// A GUI app launched from Finder does NOT see the shell PATH (it is limited to
+// /usr/bin:/bin), so we cannot assume node/gh are "on PATH". Homebrew installs
+// under /opt/homebrew on Apple Silicon and /usr/local on Intel Macs.
 
 export const BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 /**
- * Adayları sırayla deneyip ilk var olanın mutlak yolunu döndürür; hiçbiri yoksa null.
- * `exists` dışarıdan veriliyor — bu yüzden saf ve test edilebilir.
+ * Tries the candidates in order and returns the first existing absolute path,
+ * or null. `exists` is injected, which keeps this pure and testable.
  */
 export function resolveExecutable(name, exists, dirs = BIN_DIRS) {
   if (!name) return null;
@@ -383,28 +431,28 @@ export function resolveExecutable(name, exists, dirs = BIN_DIRS) {
   return null;
 }
 
-// --- Güncelleme kontrolü ------------------------------------------------
-// İmzalanmış bir bundle'ın içi DEĞİŞTİRİLEMEZ (tek dosya bile imzayı bozar ve
-// macOS uygulamayı SIGKILL'ler). Yani uygulama kendini güncelleyemez; yapacağı
-// şey "yeni sürüm var" deyip release sayfasını açmak.
+// --- Update check -------------------------------------------------------
+// A signed bundle's contents CANNOT be modified (a single file breaks the
+// signature and macOS SIGKILLs the app). So the app cannot update itself; all it
+// does is say "a new version exists" and open the release page.
 
-/** Sürümleri sayısal parçalara göre karşılaştırır. -1 / 0 / 1. "v" öneki tolere edilir. */
+/** Compares versions numerically, part by part. -1 / 0 / 1. A "v" prefix is tolerated. */
 export function compareVersions(a, b) {
   const parse = (v) =>
     String(v ?? "").trim().replace(/^v/i, "").split(/[.\-+]/)
       .map((n) => parseInt(n, 10)).filter(Number.isFinite);
   const A = parse(a), B = parse(b);
   for (let i = 0; i < Math.max(A.length, B.length); i++) {
-    const x = A[i] ?? 0, y = B[i] ?? 0;      // "1.2" ile "1.2.0" eşit sayılmalı
+    const x = A[i] ?? 0, y = B[i] ?? 0;      // "1.2" and "1.2.0" must compare equal
     if (x !== y) return x < y ? -1 : 1;
   }
   return 0;
 }
 
 /**
- * Release GitHub'dakinden yeniyse gösterilecek bilgi, değilse null.
- * `current` yoksa (geliştirme derlemesi, sürüm gömülü değil) hiç uyarmıyoruz —
- * her yenilemede "güncelle" demesi geliştirirken sadece gürültü olurdu.
+ * Details to show when the GitHub release is newer than what is running, else null.
+ * With no `current` (a development build, no version embedded) we never warn —
+ * saying "update available" on every refresh would just be noise while developing.
  */
 export function updateInfo(current, release) {
   if (!current || !release || !release.tag_name) return null;
@@ -415,25 +463,25 @@ export function updateInfo(current, release) {
   };
 }
 
-// --- Jira istek hedefi --------------------------------------------------
-// İki kimlik yolu bir arada: OAuth (yeni) ve API token (mevcut kurulumlar).
-// OAuth'ta istek siteye DEĞİL Atlassian'ın ağ geçidine gidiyor ve site
-// `cloudId` ile seçiliyor; Basic'te doğrudan siteye gidiyor. Bu fark tek bir
-// yerde toplanmazsa her çağrı yerinde tekrar etmek zorunda kalırdı.
+// --- Jira request target ------------------------------------------------
+// Two auth paths side by side: OAuth (new) and API token (existing installs).
+// Under OAuth the request goes to Atlassian's gateway rather than the site, and
+// the site is selected by `cloudId`; under Basic it goes straight to the site.
+// Without collecting that difference in one place every call site would repeat it.
 
 /**
- * Bir Jira REST yolu için gidilecek URL ve gönderilecek başlıklar.
+ * The URL and headers to use for a Jira REST path.
  * `auth`: { mode: "oauth", token, cloudId } | { mode: "basic", token }
  */
 export function jiraRequest(auth, host, path) {
   if (auth?.mode === "oauth") {
-    if (!auth.cloudId) throw new Error("OAuth modunda cloudId gerekli");
+    if (!auth.cloudId) throw new Error("cloudId is required in OAuth mode");
     return {
       url: `https://api.atlassian.com/ex/jira/${auth.cloudId}${path}`,
       headers: { Authorization: `Bearer ${auth.token}`, Accept: "application/json" },
     };
   }
-  if (!host) throw new Error("Basic modunda host gerekli");
+  if (!host) throw new Error("host is required in Basic mode");
   return {
     url: `https://${host}${path}`,
     headers: { Authorization: `Basic ${auth?.token ?? ""}`, Accept: "application/json" },

@@ -1,6 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Sprint Board — Kurulum</title>
+<title>Sprint Board — Setup</title>
 <style>
   * { box-sizing: border-box }
   body {
@@ -28,12 +28,12 @@
 </style>
 
 <h1>⚔ SPRINT BOARD</h1>
-<p class="sub">Giriş yap, gerisi kendiliğinden gelir — Jira adresin, e-postan ve
-izinlerin hesabından okunur. Hiçbir şey dosyaya yazılmaz, keychain'e gider.</p>
+<p class="sub">Sign in and the rest follows — your Jira site, your email and your
+permissions are read from your account. Nothing is written to a file; it goes to the keychain.</p>
 
-<button id="atlassian">ATLASSIAN İLE GİRİŞ YAP</button>
-<div class="hint">Tarayıcı açılır, onaylarsın, kapanır. Salt okunur izin:
-  görüntüleme dışında Jira'da hiçbir şey değiştirilmez.</div>
+<button id="atlassian">SIGN IN WITH ATLASSIAN</button>
+<div class="hint">A browser opens, you approve, it closes. Read-only access:
+  nothing in Jira is ever modified.</div>
 
 
 
@@ -43,30 +43,30 @@ izinlerin hesabından okunur. Hiçbir şey dosyaya yazılmaz, keychain'e gider.<
   const $ = (id) => document.getElementById(id);
   const post = (m) => window.webkit?.messageHandlers?.sb?.postMessage(m);
 
-  // Linkler varsayılan tarayıcıda açılmalı; WKWebView içinde açılırsa kurulum
-  // ekranının yerini alır ve kullanıcı geri dönemez.
+  // Links must open in the default browser; opening inside the WKWebView would
+  // replace the setup screen and leave the user with no way back.
   document.querySelectorAll("[data-url]").forEach((a) =>
     a.addEventListener("click", (e) => { e.preventDefault(); post({ open: a.dataset.url }); }));
 
   $("atlassian").addEventListener("click", () => {
     $("atlassian").disabled = true;
-    $("atlassian").textContent = "TARAYICI AÇILDI, ONAYINI BEKLİYOR…";
+    $("atlassian").textContent = "BROWSER OPENED, WAITING FOR APPROVAL…";
     $("err").style.display = "none";
     post({ atlassianLogin: true });
   });
 
 
-  // Swift doğrulama sonucunu buraya geri veriyor.
+  // Swift hands the validation result back through this.
   window.sbSetupResult = (res) => {
     $("atlassian").disabled = false;
-    $("atlassian").textContent = "ATLASSIAN İLE GİRİŞ YAP";
-    const errs = (res && res.errors) || ["bilinmeyen hata"];
+    $("atlassian").textContent = "SIGN IN WITH ATLASSIAN";
+    const errs = (res && res.errors) || ["unknown error"];
     $("err").innerHTML = "<ul>" + errs.map((e) =>
       "<li>" + String(e).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</li>"
     ).join("") + "</ul>";
     $("err").style.display = "block";
   };
 
-  // Pencere yüksekliğini içeriğe göre ayarla (view.html ile aynı köprü).
+  // Size the window to the content (the same bridge view.html uses).
   requestAnimationFrame(() => post({ height: document.body.scrollHeight + 32 }));
 </script>

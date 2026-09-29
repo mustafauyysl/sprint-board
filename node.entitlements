@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- Node'un V8 motoru JIT kullaniyor; hardened runtime altinda bu iki
-       hak verilmezse notarize edilmis uygulamada node acilir acilmaz coker. -->
+  <!-- Node's V8 engine uses JIT. Without these two entitlements, node in a
+       notarised app crashes the moment it starts under the hardened runtime. -->
   <key>com.apple.security.cs.allow-jit</key><true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
 </dict>

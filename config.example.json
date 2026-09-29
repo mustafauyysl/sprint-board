@@ -1,6 +1,6 @@
 {
-  "host": "sirketin.atlassian.net",
-  "email": "sen@sirket.com",
+  "host": "yourcompany.atlassian.net",
+  "email": "you@company.com",
   "keychainService": "sprint-board-jira",
   "githubOrg": "",
   "updateRepo": "mustafauyysl/sprint-board",
@@ -25,7 +25,7 @@
     "review": "/System/Library/Sounds/Blow.aiff"
   },
   "nameOverrides": {
-    "Jira'daki Ad Soyad": "kısa ad"
+    "Full Name In Jira": "short name"
   },
   "pendingReleaseStatuses": [
     "Ready For Release",

@@ -30,16 +30,16 @@
     50%     { border-color:#ff9c9c; box-shadow:0 0 16px rgba(255,59,59,.5); background:rgba(255,59,59,.14) }
   }
 
-  /* Başlık sürükleme tutamağı — Swift tarafı bu bölgeyi pencere taşımak için kullanır */
+  /* Title drag handle — the Swift side uses this strip to move the window */
   .hdr { display:flex; justify-content:space-between; align-items:baseline;
          letter-spacing:.06em; text-shadow:0 0 8px rgba(57,255,20,.45);
-         cursor: grab; }   /* sürükleme Swift tarafında: üst 34px */
+         cursor: grab; }   /* dragging lives in Swift: the top 34px */
   .hdr:active { cursor: grabbing; }
   .hdr .name { font-weight:700 }
   .hdr .right { color:#9bffb0; font-size:10px; opacity:.85 }
   .hdr .rf { cursor:pointer; margin-left:9px; color:#7CFFAE; font-size:12px }
   .hdr .rf:hover { color:#fff; text-shadow:0 0 8px rgba(57,255,20,.8) }
-  /* fetch.mjs ~13 sn suruyor; donmeyen ⟳ "tiklamadi" gibi hissettiriyordu */
+  /* fetch.mjs takes ~13 s; a ⟳ that did not spin felt like the click had not landed */
   .hdr .rf.spin { display:inline-block; color:#fff; animation:sbSpin 1s linear infinite }
   @keyframes sbSpin { to { transform:rotate(360deg) } }
   @media (prefers-reduced-motion: reduce) {
@@ -74,10 +74,10 @@
   .row.done { opacity:.5 }
   .row.done .k { color:#7ea88a }
   .row.done .s { color:#5d7a68 }
-  /* Üstü çizili = iş bitti. Jira'nın "done" kategorisi bunu tek başına söylemiyor:
-     15 statünün bir kısmı "prod'a çıkmayı bekliyor" demek. */
+  /* Struck through = work finished. Jira's "done" category alone does not say
+     that: some of the 15 statuses mean "waiting to ship to prod". */
   .row.done.finished .k, .row.done.cancelled .k { text-decoration:line-through }
-  /* Release bekleyen hâlâ takipte — daha az soluk, yeşil kalsın. */
+  /* Awaiting release is still being tracked — less faded, keep it green. */
   .row.done.pending { opacity:.78 }
   .row.done.pending .k { color:#7CFFAE; text-decoration:none }
   .row.done.pending .s { color:#6f9d81 }
@@ -87,13 +87,13 @@
 
   .band { margin-top:9px; border-top:1px dashed rgba(255,59,59,.4); padding-top:6px }
 
-  /* PR katmani kapaliyken sessiz kalmak en kotusu: kullanici bandin neden
-     olmadigini anlamiyor. Sonuk ama gorunur bir satir. */
+  /* Staying silent when the PR layer is off is the worst option: the user cannot
+     tell why the band is missing. A dim but visible row. */
   .off { margin-top:9px; padding:4px 8px; border-radius:6px; font-size:9px;
          line-height:1.5; color:#8a7fb8; background:rgba(138,127,184,.10);
          border:1px solid rgba(138,127,184,.28) }
 
-  /* Guncelleme satiri: dikkat cekmeli ama BOSS kadar degil — acil bir sey degil. */
+  /* Update row: should draw the eye, but not as hard as the BOSS — nothing urgent. */
   .upd { margin-top:9px; padding:5px 8px; border-radius:6px; cursor:pointer;
          font-size:10px; letter-spacing:.04em; color:#ffd34d;
          background:rgba(255,211,77,.08); border:1px solid rgba(255,211,77,.35) }
@@ -144,7 +144,7 @@
   }
 </style>
 
-<div id="card"><div class="err">⏳ veri çekiliyor…</div></div>
+<div id="card"><div class="err">⏳ fetching data…</div></div>
 
 <script>
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
@@ -159,16 +159,16 @@
     : t.alert ? "🔥" : t.carriedOver ? "👻" : t.statusCategory === "new" ? "🛡" : "🗡";
   const PR_MARK = { FAILURE:"✗", ERROR:"✗", PENDING:"●", EXPECTED:"●", SUCCESS:"✓" };
   const prMark = (s) => PR_MARK[s] || "·";
-  // Durum bilinmiyorsa (draft PR, ya da CI sorgusu düşmüşse) SINIF VERME: .row .pr
-  // taban rengi zaten nötr. Eskiden buradaki "good" yüzünden durumsuz PR yeşil
-  // çiziliyordu — "geçti" demek oluyordu, oysa hiçbir şey bilinmiyor.
+  // When the state is unknown (draft PR, or the CI query failed) ASSIGN NO CLASS:
+  // the base .row .pr colour is already neutral. The old "good" here painted a
+  // stateless PR green — that read as "passed" when in fact nothing is known.
   const prClass = (s) => (s === "FAILURE" || s === "ERROR") ? "bad"
     : (s === "PENDING" || s === "EXPECTED") ? "wait" : s ? "good" : "";
   const hhmm = (iso) => { try { const d = new Date(iso);
     return String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0");
   } catch { return "—"; } };
 
-  // Link açma Swift tarafına devrediliyor (WKWebView kendi başına açamaz).
+  // Opening links is delegated to the Swift side (a WKWebView cannot do it itself).
   const openUrl = (u) => { if (u && u !== "#") window.webkit?.messageHandlers?.sb?.postMessage({ open: u }); };
   const refresh = () => window.webkit?.messageHandlers?.sb?.postMessage({ refresh: true });
 
@@ -185,14 +185,14 @@
         </div>`).join("")}
     </div>` : "";
 
-  // Geçmiş sprintte kalmış ama canlıya çıkmamış işler. Ana listede yoklar —
-  // sprint kapanınca ana sorgu onları hiç getirmiyor.
+  // Work left behind in a past sprint that never shipped. It is absent from the
+  // main list — once a sprint closes the main query stops returning it.
   const relBand = (rows) => rows.length ? `
     <div class="band rel">
-      <div class="bhdr">🚚 CANLIYA ÇIKMAYI BEKLEYEN (${rows.length})</div>
+      <div class="bhdr">🚚 AWAITING RELEASE (${rows.length})</div>
       ${rows.map((r) => `
         <div class="brow" data-url="${esc(r.url)}"
-             title="${esc(r.summary)}&#10;${esc(r.status)} · ${r.days} iş günü">
+             title="${esc(r.summary)}&#10;${esc(r.status)} · ${r.days} business days">
           <span class="brepo">🟢 ${esc(r.key)}</span>
           <span class="bchecks">${esc(clip(r.status, 16))}${r.sprint
             ? " · " + esc(clip(r.sprint.replace(/^.*Sprint/i, "Sprint"), 12)) : ""} · ${r.days}g</span>
@@ -202,32 +202,32 @@
   let NOTES = [];
   let LAST = null;
 
-  // Swift notları dosyadan gönderir; draw() innerHTML'i ezdiği için burada saklıyoruz.
+  // Swift sends the notes from a file; draw() overwrites innerHTML, so we keep them here.
   window.sbNotes = (n) => { NOTES = Array.isArray(n) ? n : []; if (LAST) draw(LAST); };
 
   const notesHtml = () => `
     <div class="notes">
-      <div class="nhdr">${NOTES.length ? "NOTLAR " + NOTES.length + "/6" : "NOTLAR"}</div>
+      <div class="nhdr">${NOTES.length ? "NOTES " + NOTES.length + "/6" : "NOTES"}</div>
       ${NOTES.map((n) => `
         <div class="nrow">
           <span class="ntext" title="${esc(n.text)}">${esc(n.text)}</span>
           <span class="ndel" data-del="${esc(n.id)}" title="sil">✕</span>
         </div>`).join("")}
       <input class="ninput" type="text" placeholder="${NOTES.length >= 6
-        ? "liste dolu — en eski düşer" : "+ not… (Enter)"}">
+        ? "list full — the oldest drops" : "+ note… (Enter)"}">
     </div>`;
 
   let keepInput = "";
 
-  let LAST_OK = null;    // son BAŞARILI veri — geçici hatada kart silinmesin
+  let LAST_OK = null;    // the last SUCCESSFUL payload — a transient error must not wipe the card
   let staleNote = null;
 
   function draw(d) {
-    // Tek bir ağ kesintisi tüm kartı hata ekranına çeviriyordu ve bir sonraki
-    // deneme 30 dk sonraydı. Elimizde iyi veri varsa onu göstermeye devam et,
-    // üstüne "yenilenemedi" şeridi koy.
+    // A single network blip turned the whole card into an error screen and the
+    // next attempt was 30 minutes away. If we still hold good data, keep showing
+    // it and put a "could not refresh" strip on top.
     if (d && d.ok === false && LAST_OK) {
-      staleNote = { error: d.error || "bilinmeyen hata", at: LAST_OK.generatedAt };
+      staleNote = { error: d.error || "unknown error", at: LAST_OK.generatedAt };
       d = LAST_OK;
     } else if (d && d.ok) {
       LAST_OK = d;
@@ -248,17 +248,17 @@
     card.innerHTML = `
       <div class="hdr">
         <span class="name">⚔ ${esc(clip(sprint.name, 30))}</span>
-        <span class="right">${sprint.daysLeft == null ? "—" : "bitişe " + sprint.daysLeft + "g"}
-          · ${hhmm(d.generatedAt)}<span class="rf" id="rf" title="şimdi yenile">⟳</span></span>
+        <span class="right">${sprint.daysLeft == null ? "—" : sprint.daysLeft + "d left"}
+          · ${hhmm(d.generatedAt)}<span class="rf" id="rf" title="refresh now">⟳</span></span>
       </div>
 
-      ${staleNote ? `<div class="stale">⚠ Yenilenemedi: <b>${esc(staleNote.error)}</b><br>
-        Gösterilen veri ${hhmm(staleNote.at)} itibarıyla. Birazdan tekrar denenecek;
-        beklemek istemezsen ⟳'ye bas.</div>` : ""}
+      ${staleNote ? `<div class="stale">⚠ Could not refresh: <b>${esc(staleNote.error)}</b><br>
+        Showing data as of ${hhmm(staleNote.at)}. It will retry shortly; press ⟳
+        if you would rather not wait.</div>` : ""}
 
       <div class="siege">
         <span>${bar(d.total ? d.cleared / d.total : 0, 12)} ${d.cleared}/${d.total} cleared</span>
-        <span class="legend">statü/yaş</span>
+        <span class="legend">status/age</span>
       </div>
 
       ${boss ? `
@@ -268,12 +268,12 @@
           <div class="key">${esc(boss.key)}</div>
           <div class="sum">${esc(clip(boss.summary, 46))}</div>
           <div class="hp">HP ${bar(Math.max(.15, Math.min(1, (boss.ratio - 1) / 2)))}
-            ${esc(boss.status)} · ${boss.daysInStatus}g / eşik ${boss.threshold}g</div>
-        </div>` : `<div class="clean">⚔ No boss — sprint temiz</div>`}
+            ${esc(boss.status)} · ${boss.daysInStatus}d / threshold ${boss.threshold}d</div>
+        </div>` : `<div class="clean">⚔ No boss — sprint is clean</div>`}
 
       ${tasks.map((t) => `
         <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}" data-url="${esc(t.url)}"
-             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} iş günü (eşik ${t.threshold}g) · yaş ${t.ageDays}g">
+             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (threshold ${t.threshold}d) · age ${t.ageDays}d">
           <span class="k">${icon(t)} ${esc(t.key)}</span>
           <span class="s">${esc(clip(t.status, 14))}</span>
           <span class="qa">${t.qaShort ? "🧪" + esc(t.qaShort) : ""}</span>
@@ -285,16 +285,16 @@
 
       ${relBand(d.pendingRelease || [])}
 
-      ${band("", "⚠ MERGE ENGELLİ", broken, "✗")}
-      ${band("waiting", "⏳ BEKLEYEN", waiting, "●")}
-      ${band("review", "👀 SENDEN REVIEW BEKLİYOR", reviews, "·")}
+      ${band("", "⚠ MERGE BLOCKED", broken, "✗")}
+      ${band("waiting", "⏳ WAITING", waiting, "●")}
+      ${band("review", "👀 AWAITING YOUR REVIEW", reviews, "·")}
 
       ${d.prsAvailable === false ? `<div class="off">
-        PR/CI bandı kapalı — GitHub'a erişilemedi.
-        <b>gh auth login</b> çalıştır ya da ⚔ → Ayarlar'dan bir GitHub token'ı gir.</div>` : ""}
+        PR/CI bands are off — GitHub could not be reached.
+        Run <b>gh auth login</b>, or add a GitHub token from ⚔ → Settings.</div>` : ""}
 
       ${d.update ? `<div class="upd" data-url="${esc(d.update.url || "")}">
-        ⬆ <b>v${esc(d.update.version)}</b> çıktı — indirmek için tıkla</div>` : ""}
+        ⬆ <b>v${esc(d.update.version)}</b> is out — click to download</div>` : ""}
 
       ${notesHtml()}
     `;
@@ -308,7 +308,7 @@
       }));
     const inp = card.querySelector(".ninput");
     if (inp) {
-      inp.value = keepInput;            // yenileme sırasında yazdığın metin kaybolmasın
+      inp.value = keepInput;            // text typed during a refresh must not be lost
       inp.addEventListener("input", () => { keepInput = inp.value; });
       inp.addEventListener("keydown", (e) => {
         e.stopPropagation();
@@ -322,28 +322,28 @@
     const rf = document.getElementById("rf");
     if (rf) rf.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (rf.classList.contains("spin")) return;   // 13 sn boyunca cift tetiklemeyi engelle
+      if (rf.classList.contains("spin")) return;   // block a double trigger for the ~13 s
       rf.classList.add("spin");
       refresh();
     });
 
-    // Swift'e gerçek içerik yüksekliğini bildir ki pencere tam otursun
+    // Report the real content height to Swift so the window fits exactly
     window.webkit?.messageHandlers?.sb?.postMessage({ height: card.offsetHeight });
   }
 
-  // fetch.mjs normalde ~13 sn; yeniden derlemeden sonraki ILK acilista macOS
-  // keychain iznini yeniden sorduğu için 80 sn'ye çıkabiliyor. Sayaç olmayınca
-  // bu "takıldı" gibi görünüyordu.
+  // fetch.mjs normally takes ~13 s; on the FIRST launch after a rebuild it can
+  // stretch to 80 s because macOS re-asks for keychain permission. Without a
+  // counter that looked like the app had hung.
   const T0 = Date.now();
   let waitTimer = setInterval(() => {
     const el = document.getElementById("card");
     if (!el || LAST) return;
     const sec = Math.round((Date.now() - T0) / 1000);
-    el.innerHTML = `<div class="err">⏳ veri çekiliyor… ${sec}s` +
+    el.innerHTML = `<div class="err">⏳ fetching data… ${sec}s` +
       (sec > 25
-        ? `<div class="hint">İlk açılışta macOS keychain izni sorulabiliyor.
-             Ekranda izin penceresi çıktıysa <b>Her Zaman İzin Ver</b>'i seç;
-             bu tek seferlik, sonraki açılışlar ~13 sn.</div>`
+        ? `<div class="hint">macOS may ask for keychain permission on first launch.
+             If a permission dialog appeared, choose <b>Always Allow</b>;
+             it is one-off — later launches take ~13s.</div>`
         : "") + `</div>`;
   }, 1000);
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Sprint Board kurulumu — kaynaktan derler.
+# Sprint Board installer — builds from source.
 #
-# NEDEN KAYNAKTAN: indirilen bir .app'e macOS quarantine damgası vurur ve
-# Gatekeeper ad-hoc imzalı uygulamayı reddeder (spctl: rejected); her kullanıcı
-# Sistem Ayarları'ndan elle "Yine de Aç" demek zorunda kalır. YERELDE derlenen
-# binary'ye quarantine hiç takılmaz — diyalog da çıkmaz, Apple Developer
-# hesabı da gerekmez.
+# WHY FROM SOURCE: macOS stamps every DOWNLOADED .app with a quarantine
+# attribute and Gatekeeper rejects an ad-hoc signed app (spctl: rejected), so
+# every user would have to click "Open Anyway" by hand in System Settings. A
+# binary built LOCALLY never picks up quarantine — no dialog, and no Apple
+# Developer account needed either.
 #
-# Kullanım:
-#   ./install.sh              kur / güncelle
-#   ./install.sh --no-build   sadece önkoşulları ve ayarları hazırla
+# Usage:
+#   ./install.sh              install / update
+#   ./install.sh --no-build   only prepare prerequisites and settings
 set -euo pipefail
 
 REPO="${SPRINT_BOARD_REPO:-mustafauyysl/sprint-board}"
@@ -22,17 +22,17 @@ for a in "$@"; do
   case "$a" in
     --no-build) BUILD=0 ;;
     --yes|-y)   ASSUME_YES=1 ;;
-    *) printf 'bilinmeyen seçenek: %s\n' "$a" >&2; exit 2 ;;
+    *) printf 'unknown option: %s\n' "$a" >&2; exit 2 ;;
   esac
 done
 
 say()  { printf '\033[1m%s\033[0m\n' "$*"; }
-fail() { printf '\033[31mHATA:\033[0m %s\n' "$*" >&2; exit 1; }
+fail() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
-# --- 1. Önkoşullar -----------------------------------------------------------
-# GUI uygulaması shell PATH'ini görmediği için node/gh ADAY DİZİNLERDEN çözülüyor
-# (bkz. resolveExecutable). Burada da aynı yerlere bakıyoruz ki kurulumda geçip
-# çalışma anında patlayan bir durum olmasın.
+# --- 1. Prerequisites --------------------------------------------------------
+# A GUI app does not see the shell PATH, so node/gh are resolved from CANDIDATE
+# DIRECTORIES at runtime (see resolveExecutable). We look in the same places here
+# so nothing passes at install time and then explodes at runtime.
 have() {
   for d in /opt/homebrew/bin /usr/local/bin /usr/bin /bin; do
     [ -x "$d/$1" ] && return 0
@@ -40,76 +40,67 @@ have() {
   return 1
 }
 
-# swiftc Xcode Command Line Tools'la gelir; brew ile kurulamaz.
-have swiftc || fail "swiftc yok. Önce şunu çalıştır:  xcode-select --install"
+# swiftc ships with the Xcode Command Line Tools; it cannot be installed via brew.
+have swiftc || fail "swiftc is missing. Run this first:  xcode-select --install"
 
-# node ve gh stok DEĞİL, Homebrew'dan geliyor. Varsa kendimiz kuralım —
-# yeni bir makinede kullanıcıyı komut ezberletmeye zorlamanın anlamı yok.
+# node and gh are NOT stock, they come from Homebrew. Install them ourselves when
+# possible — there is no point making someone on a fresh machine memorise commands.
 ensure() {
   local tool="$1" formula="$2"
   have "$tool" && return 0
-  have brew || fail "$tool yok ve Homebrew da yok. Önce Homebrew kur:
+  have brew || fail "$tool is missing and so is Homebrew. Install Homebrew first:
     /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"
-  sonra bu script'i tekrar çalıştır."
+  then run this script again."
   if [ "$ASSUME_YES" = "0" ]; then
-    printf '  %s yok. "brew install %s" çalıştırılsın mı? [e/H] ' "$tool" "$formula"
+    printf '  %s is missing. Run "brew install %s"? [y/N] ' "$tool" "$formula"
     read -r reply </dev/tty || reply=""
-    case "$reply" in [eEyY]*) ;; *) fail "$tool gerekli. Elle:  brew install $formula" ;; esac
+    case "$reply" in [yY]*) ;; *) fail "$tool is required. Manually:  brew install $formula" ;; esac
   fi
   say "→ brew install $formula"
   brew install "$formula"
-  have "$tool" || fail "$formula kuruldu ama $tool hâlâ bulunamıyor"
+  have "$tool" || fail "$formula was installed but $tool still cannot be found"
 }
 
 ensure node node
 ensure gh gh
 
-# Klonlama ve PR katmanı yetkili gh oturumu istiyor.
-gh auth status >/dev/null 2>&1 || fail "gh oturumu yok. Çalıştır:  gh auth login"
-say "✓ önkoşullar tamam"
+# Cloning and the PR layer both need an authenticated gh session.
+gh auth status >/dev/null 2>&1 || fail "no gh session. Run:  gh auth login"
+say "✓ prerequisites satisfied"
 
-# --- 2. Kodu getir -----------------------------------------------------------
+# --- 2. Fetch the code -------------------------------------------------------
 if [ -d "$DIR/.git" ]; then
-  say "→ mevcut kurulum güncelleniyor: $DIR"
+  say "→ updating the existing checkout: $DIR"
   git -C "$DIR" pull --ff-only
 else
-  say "→ klonlanıyor: $REPO -> $DIR"
+  say "→ cloning: $REPO -> $DIR"
   mkdir -p "$(dirname "$DIR")"
-  # gh ile klonluyoruz: repo private olduğunda düz https klonu kimlik soruyor,
-  # gh zaten yetkilendirilmiş oturumu kullanıyor.
+  # Clone via gh: a plain https clone prompts for credentials when the repo is
+  # private, whereas gh reuses the already-authorised session.
   gh repo clone "$REPO" "$DIR"
 fi
 
-# --- 3. Ayar dosyası ---------------------------------------------------------
+# --- 3. Settings -------------------------------------------------------------
+# Only defaults (thresholds, sounds, statuses) are seeded here. Identity — Jira
+# site, email, cloudId — is filled in by the app's own setup screen after you
+# sign in with Atlassian, so there is nothing to edit by hand.
 if [ -f "$CONFIG" ]; then
-  say "✓ ayar dosyası zaten var: $CONFIG"
+  say "✓ settings file already present: $CONFIG"
 else
   mkdir -p "$CONFIG_DIR"
   cp "$DIR/config.example.json" "$CONFIG"
-  say "→ ayar dosyası oluşturuldu: $CONFIG"
-  printf '  \033[33mAÇ VE DÜZENLE:\033[0m "email" alanına kendi e-postanı yaz.\n'
+  say "→ settings file created: $CONFIG"
 fi
 
-# --- 4. Jira token -----------------------------------------------------------
-# Token hiçbir dosyaya yazılmaz; keychain'de durur.
-SERVICE=$(node -e 'const c=require(process.argv[1]);process.stdout.write(c.keychainService||"sprint-board-jira")' "$CONFIG")
-EMAIL=$(node -e 'const c=require(process.argv[1]);process.stdout.write(c.email||"")' "$CONFIG")
-
-if [ -n "$EMAIL" ] && security find-generic-password -s "$SERVICE" -a "$EMAIL" >/dev/null 2>&1; then
-  say "✓ Jira token keychain'de mevcut"
-else
-  printf '\n  \033[33mJira token gerekiyor.\033[0m Token üret: https://id.atlassian.com/manage-profile/security/api-tokens\n'
-  printf '  Sonra çalıştır:\n    security add-generic-password -s %s -a <e-postan> -w '"'"'<TOKEN>'"'"'\n\n' "$SERVICE"
-fi
-
-# --- 5. Testler + derleme ----------------------------------------------------
-say "→ testler"
-( cd "$DIR" && node --test test.mjs >/dev/null ) && say "✓ testler geçti"
+# --- 4. Tests + build --------------------------------------------------------
+say "→ tests"
+( cd "$DIR" && node --test test.mjs >/dev/null ) && say "✓ tests passed"
 
 if [ "$BUILD" = "1" ]; then
-  say "→ derleniyor ve /Applications'a kuruluyor"
+  say "→ building and installing into /Applications"
   ( cd "$DIR" && ./build-app.sh )
-  say "✓ kuruldu. Menü çubuğundaki ⚔ simgesinden yönetiliyor (Dock ikonu yok)."
+  say "✓ installed. Managed from the ⚔ icon in the menu bar (there is no Dock icon)."
+  say "  On first launch the setup screen opens — click Sign in with Atlassian."
 else
-  say "(--no-build: derleme atlandı)"
+  say "(--no-build: build skipped)"
 fi
