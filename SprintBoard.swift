@@ -71,9 +71,10 @@ func needsSetup() -> Bool {
     guard let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
           let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
           let email = cfg["email"] as? String, !email.isEmpty,
-          // Copied from the example and never filled in. Both spellings are checked:
-          // the placeholder used to be Turkish and older configs still carry it.
-          !["you@company.com", "sen@sirket.com"].contains(email)
+          // Copied from the example and never filled in: the setup screen fills the
+          // email in from /me, so a config still holding the example value has not
+          // been through sign-in.
+          email != "you@company.com"
     else { return true }
     // In an OAuth setup what we look for is the refresh token, not an API token.
     if (cfg["authMode"] as? String) == "oauth" {
