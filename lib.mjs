@@ -408,7 +408,101 @@ export function emptyState() {
     bossKey: null,
     brokenIds: [],
     reviewIds: [],
+    conflictIds: [],
   };
+}
+
+// --- Open PR list and conflict notifications ----------------------------
+
+const prId = (pr) => `${pr.repo}#${pr.number}`;
+const isConflict = (pr) => pr?.mergeable === "CONFLICTING";
+// Same rule as prBlockers: a draft is not ready, so its CI does not count.
+const isCiBroken = (pr) => !pr?.isDraft && (pr?.ciState === "FAILURE" || pr?.ciState === "ERROR");
+
+/**
+ * Every open PR for the PULL REQUESTS band, conflicts first. A mergeable state
+ * GitHub has not settled yet ("UNKNOWN" or missing) is shown as still being
+ * checked — never as clean.
+ */
+export function prList(prs) {
+  const rank = (pr) => (isConflict(pr) ? 0 : pr.mergeable === "MERGEABLE" ? 2 : 1);
+  return (prs || [])
+    .filter((pr) => pr && pr.number)
+    .map((pr, i) => ({ pr, i }))
+    .sort((a, b) => rank(a.pr) - rank(b.pr) || a.i - b.i)
+    .map(({ pr }) => ({
+      repo: pr.repo,
+      number: pr.number,
+      url: pr.url,
+      title: pr.title || "",
+      draft: !!pr.isDraft,
+      conflict: isConflict(pr),
+      checked: isConflict(pr) || pr.mergeable === "MERGEABLE",
+    }));
+}
+
+/**
+ * The conflicts to remember for the next run. A PR remembered as conflicting whose state
+ * GitHub has not settled this time ("UNKNOWN") stays remembered; dropping it would make
+ * the same conflict notify again once GitHub settles it.
+ */
+export function conflictIds(prs, previous = []) {
+  const now = (prs || []).filter(isConflict).map(prId);
+  const unsettled = new Set((prs || [])
+    .filter((pr) => !isConflict(pr) && pr.mergeable !== "MERGEABLE").map(prId));
+  const kept = (Array.isArray(previous) ? previous : []).filter((id) => unsettled.has(id));
+  return [...new Set([...now, ...kept])];
+}
+
+/**
+ * PRs that started conflicting since the previous run. Quiet when the previous run
+ * kept no conflict list (first launch, or a state file written before this field
+ * existed), so conflicts that already existed never fire a burst of notifications.
+ */
+export function newConflicts(prev, prs) {
+  if (!prev || prev.initialized !== true || !Array.isArray(prev.conflictIds)) return [];
+  const known = new Set(prev.conflictIds);
+  return (prs || []).filter((pr) => isConflict(pr) && !known.has(prId(pr)));
+}
+
+/** One macOS notification per new conflict; clicking it opens the PR. */
+export function conflictNotifications(prs) {
+  return (prs || []).map((pr) => ({
+    id: `conflict-${prId(pr)}`,
+    title: `Conflict: ${pr.repo} #${pr.number}`,
+    body: pr.title || "This PR no longer merges into its base branch",
+    url: pr.url || null,
+  }));
+}
+
+/**
+ * What a refresh the user asked for reports, so that it always answers. It never claims
+ * more than was checked: a failed required-checks query (`ciError`) or a PR GitHub is
+ * still computing is said out loud instead of being reported as clean.
+ */
+export function refreshSummary(prs, ciError = null) {
+  if (!Array.isArray(prs)) {
+    return { id: "refresh", title: "PRs not checked", body: "GitHub could not be reached", url: null };
+  }
+  const count = (n, word) => `${n} ${word}${n > 1 ? "s" : ""}`;
+  const conflicts = prs.filter(isConflict);
+  const ciBroken = ciError ? [] : prs.filter(isCiBroken);
+  const unsettled = prs.filter((pr) => !isConflict(pr) && pr.mergeable !== "MERGEABLE").length;
+  const caveats = [];
+  if (ciError) caveats.push("CI not checked");
+  if (unsettled) caveats.push(`${unsettled} still checking`);
+
+  if (conflicts.length === 0 && ciBroken.length === 0) {
+    if (caveats.length === 0) {
+      return { id: "refresh", title: "No conflicts, no CI errors", body: `${prs.length} open PRs checked`, url: null };
+    }
+    return { id: "refresh", title: "No conflicts found", body: [...caveats, `${prs.length} open PRs`].join(" · "), url: null };
+  }
+  const parts = [];
+  if (conflicts.length) parts.push(count(conflicts.length, "conflict"));
+  if (ciBroken.length) parts.push(count(ciBroken.length, "CI error"));
+  const names = [...new Set([...conflicts, ...ciBroken].map(prId))].join(", ");
+  return { id: "refresh", title: parts.join(", "), body: [names, ...caveats].join(" · "), url: null };
 }
 
 // --- Executable lookup --------------------------------------------------

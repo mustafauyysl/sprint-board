@@ -36,6 +36,11 @@
          cursor: grab; }   /* dragging lives in Swift: the top 34px */
   .hdr:active { cursor: grabbing; }
   .hdr .name { font-weight:700 }
+  .hdr .lights { display:inline-flex; gap:6px; margin-right:8px; vertical-align:-1px }
+  .hdr .tl { width:10px; height:10px; border-radius:50%; cursor:pointer; display:inline-block }
+  .hdr .tl.close { background:#ff5f57 } .hdr .tl.min { background:#febc2e } .hdr .tl.fill { background:#28c840 }
+  .hdr .tl:hover { filter:brightness(1.25) }
+  body.filled #card { min-height:calc(100vh - 2px) }
   .hdr .right { color:#9bffb0; font-size:10px; opacity:.85 }
   .hdr .rf { cursor:pointer; margin-left:9px; color:#7CFFAE; font-size:12px }
   .hdr .rf:hover { color:#fff; text-shadow:0 0 8px rgba(57,255,20,.8) }
@@ -115,6 +120,11 @@
   .band.review .bhdr { color:#7fb0ff } .band.review .brow { color:#bcd6ff }
   .band.review .brow .bchecks { color:#7f97bd }
   .band.review .brow.stale { color:#ffb0b0 }
+  .band.prs { border-top-color:rgba(200,200,200,.3) }
+  .band.prs .bhdr { color:#c8c8c8 } .band.prs .brow { color:#b8c4b8 }
+  .band.prs .brow .bchecks { color:#7c8c7c }
+  .band.prs .brow.ok .bchecks { color:#7CFFAE }
+  .band.prs .brow.bad, .band.prs .brow.bad .bchecks { color:#ff6b6b }
 
   .notes { margin-top:9px; padding-top:7px; border-top:1px solid rgba(57,255,20,.18) }
   .notes .nhdr { color:#44607d; font-size:9px; letter-spacing:.16em; margin-bottom:3px }
@@ -185,6 +195,17 @@
         </div>`).join("")}
     </div>` : "";
 
+  // Every open PR with its conflict state, so a clean PR reads as clean.
+  const prBand = (rows) => rows.length ? `
+    <div class="band prs">
+      <div class="bhdr">🔀 CONFLICT WATCHER (${rows.length})</div>
+      ${rows.map((p) => `
+        <div class="brow ${p.conflict ? "bad" : p.checked ? "ok" : ""}" data-url="${esc(p.url)}" title="${esc(p.title)}">
+          <span class="brepo">${p.conflict ? "✗" : p.checked ? "✓" : "·"} ${esc(p.repo)}#${p.number}</span>
+          <span class="bchecks">${p.conflict ? "conflict" : p.checked ? "no conflict" : "checking…"}${p.draft ? " · draft" : ""}</span>
+        </div>`).join("")}
+    </div>` : "";
+
   // Work left behind in a past sprint that never shipped. It is absent from the
   // main list — once a sprint closes the main query stops returning it.
   const relBand = (rows) => rows.length ? `
@@ -247,7 +268,7 @@
 
     card.innerHTML = `
       <div class="hdr">
-        <span class="name">⚔ ${esc(clip(sprint.name, 30))}</span>
+        <span class="name"><span class="lights"><span class="tl close" data-win="close" title="close"></span><span class="tl min" data-win="minimize" title="minimize"></span><span class="tl fill" data-win="fill" title="full screen"></span></span>⚔ ${esc(clip(sprint.name, 30))}</span>
         <span class="right">${sprint.daysLeft == null ? "—" : sprint.daysLeft + "d left"}
           · ${hhmm(d.generatedAt)}<span class="rf" id="rf" title="refresh now">⟳</span></span>
       </div>
@@ -285,9 +306,10 @@
 
       ${relBand(d.pendingRelease || [])}
 
-      ${band("", "⚠ MERGE BLOCKED", broken, "✗")}
       ${band("waiting", "⏳ WAITING", waiting, "●")}
+      ${band("", "⚠ CI WATCHER", broken, "✗")}
       ${band("review", "👀 AWAITING YOUR REVIEW", reviews, "·")}
+      ${prBand(d.pullRequests || [])}
 
       ${d.prsAvailable === false ? `<div class="off">
         PR/CI bands are off — GitHub could not be reached.
@@ -319,6 +341,10 @@
       });
       if (hadFocus) inp.focus();
     }
+    card.querySelectorAll("[data-win]").forEach((el) => el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      window.webkit?.messageHandlers?.sb?.postMessage({ win: el.dataset.win });
+    }));
     const rf = document.getElementById("rf");
     if (rf) rf.addEventListener("click", (e) => {
       e.stopPropagation();

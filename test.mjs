@@ -24,6 +24,11 @@ import {
   sprintHistory,
   ownershipStartedAt,
   emptyState,
+  prList,
+  conflictIds,
+  newConflicts,
+  conflictNotifications,
+  refreshSummary,
 } from "./lib.mjs";
 
 const config = {
@@ -843,4 +848,120 @@ test("jiraRequest: no mode means Basic (older installs)", () => {
   const r = jiraRequest({ token: "B64" }, "legacy.atlassian.net", "/rest/api/3/field");
   assert.equal(r.url, "https://legacy.atlassian.net/rest/api/3/field");
   assert.ok(r.headers.Authorization.startsWith("Basic "));
+});
+
+// --- PR list, conflict notifications, refresh summary ---
+
+const demoPr = (number, extra = {}) => ({
+  repo: "demo-repo", number, url: `https://example.invalid/demo-repo/pull/${number}`,
+  title: `DEMO-${number} | demo change`, isDraft: false, mergeable: "MERGEABLE", ciState: "SUCCESS", ...extra,
+});
+
+test("prList: conflicts first, then still-checking, then clean; input order kept within a group", () => {
+  const rows = prList([
+    demoPr(1),
+    demoPr(2, { mergeable: "UNKNOWN" }),
+    demoPr(3, { mergeable: "CONFLICTING" }),
+    demoPr(4),
+  ]);
+  assert.deepEqual(rows.map((r) => r.number), [3, 2, 1, 4]);
+  assert.deepEqual(rows.map((r) => [r.conflict, r.checked]), [[true, true], [false, false], [false, true], [false, true]]);
+});
+
+test("prList: an unsettled mergeable state is never shown as clean", () => {
+  const [row] = prList([demoPr(5, { mergeable: null })]);
+  assert.equal(row.conflict, false);
+  assert.equal(row.checked, false);
+});
+
+test("prList: drafts are listed and marked", () => {
+  const [row] = prList([demoPr(6, { isDraft: true })]);
+  assert.equal(row.draft, true);
+});
+
+test("prList: no PR data gives an empty list", () => {
+  assert.deepEqual(prList(null), []);
+});
+
+test("conflictIds: only CONFLICTING PRs", () => {
+  assert.deepEqual(conflictIds([demoPr(1), demoPr(2, { mergeable: "CONFLICTING" })]), ["demo-repo#2"]);
+});
+
+test("newConflicts: only conflicts the previous run did not have", () => {
+  const prev = { initialized: true, conflictIds: ["demo-repo#1"] };
+  const prs = [demoPr(1, { mergeable: "CONFLICTING" }), demoPr(2, { mergeable: "CONFLICTING" }), demoPr(3)];
+  assert.deepEqual(newConflicts(prev, prs).map((p) => p.number), [2]);
+});
+
+test("newConflicts: silent on the first run and on a state file without a conflict list", () => {
+  const prs = [demoPr(1, { mergeable: "CONFLICTING" })];
+  assert.deepEqual(newConflicts(emptyState(), prs), []);
+  assert.deepEqual(newConflicts({ initialized: true, brokenIds: [] }, prs), []);
+});
+
+test("conflictNotifications: one per PR, with its link", () => {
+  const [n] = conflictNotifications([demoPr(7, { mergeable: "CONFLICTING" })]);
+  assert.equal(n.title, "Conflict: demo-repo #7");
+  assert.equal(n.url, "https://example.invalid/demo-repo/pull/7");
+  assert.equal(n.id, "conflict-demo-repo#7");
+});
+
+test("refreshSummary: all clean", () => {
+  const s = refreshSummary([demoPr(1), demoPr(2)]);
+  assert.equal(s.title, "No conflicts, no CI errors");
+  assert.equal(s.body, "2 open PRs checked");
+});
+
+test("refreshSummary: names conflicts and CI errors, a PR with both once", () => {
+  const s = refreshSummary([
+    demoPr(1, { mergeable: "CONFLICTING", ciState: "FAILURE" }),
+    demoPr(2, { mergeable: "CONFLICTING" }),
+    demoPr(3, { ciState: "ERROR" }),
+    demoPr(4),
+  ]);
+  assert.equal(s.title, "2 conflicts, 2 CI errors");
+  assert.equal(s.body, "demo-repo#1, demo-repo#2, demo-repo#3");
+});
+
+test("refreshSummary: a draft's failing CI is not an error", () => {
+  assert.equal(refreshSummary([demoPr(1, { isDraft: true, ciState: "FAILURE" })]).title, "No conflicts, no CI errors");
+});
+
+test("refreshSummary: no PR data says so instead of reporting clean", () => {
+  assert.equal(refreshSummary(null).title, "PRs not checked");
+});
+
+test("refreshSummary: a failed CI query is not reported as no CI errors", () => {
+  const s = refreshSummary([demoPr(1, { ciState: null })], "GitHub HTTP 502");
+  assert.equal(s.title, "No conflicts found");
+  assert.equal(s.body, "CI not checked · 1 open PRs");
+});
+
+test("refreshSummary: PRs GitHub is still computing are counted, not called clean", () => {
+  const s = refreshSummary([demoPr(1), demoPr(2, { mergeable: "UNKNOWN" })]);
+  assert.equal(s.title, "No conflicts found");
+  assert.equal(s.body, "1 still checking · 2 open PRs");
+});
+
+test("refreshSummary: problems keep their caveats", () => {
+  const s = refreshSummary([demoPr(1, { mergeable: "CONFLICTING" }), demoPr(2, { mergeable: "UNKNOWN" })]);
+  assert.equal(s.title, "1 conflict");
+  assert.equal(s.body, "demo-repo#1 · 1 still checking");
+});
+
+test("conflictIds: a remembered conflict GitHub has not settled this run stays remembered", () => {
+  const prs = [demoPr(1, { mergeable: "UNKNOWN" }), demoPr(2, { mergeable: "CONFLICTING" }), demoPr(3)];
+  assert.deepEqual(conflictIds(prs, ["demo-repo#1", "demo-repo#3"]), ["demo-repo#2", "demo-repo#1"]);
+});
+
+test("conflictIds + newConflicts: a conflict that flickers to UNKNOWN does not notify twice", () => {
+  const run1 = [demoPr(1, { mergeable: "CONFLICTING" })];
+  const run2 = [demoPr(1, { mergeable: "UNKNOWN" })];
+  const run3 = [demoPr(1, { mergeable: "CONFLICTING" })];
+  let state = { initialized: true, conflictIds: [] };
+  assert.equal(newConflicts(state, run1).length, 1);
+  state = { initialized: true, conflictIds: conflictIds(run1, state.conflictIds) };
+  assert.equal(newConflicts(state, run2).length, 0);
+  state = { initialized: true, conflictIds: conflictIds(run2, state.conflictIds) };
+  assert.equal(newConflicts(state, run3).length, 0, "the same conflict must not notify again");
 });

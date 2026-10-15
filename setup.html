@@ -25,9 +25,35 @@
     color: #ffb0b0; background: rgba(255,0,0,.08); border: 1px solid rgba(255,80,80,.35);
   }
   .err ul { margin: 0; padding-left: 14px }
+  button.alt { margin-top: 12px; color: #39ff14; background: transparent; border: 1px solid rgba(57,255,20,.45) }
+  #tokenForm { display: none; margin-top: 10px }
+  label { display: block; margin-top: 8px; color: #8fb59c; font-size: 9px; letter-spacing: .08em }
+  input {
+    display: block; width: 100%; margin-top: 3px; padding: 5px 7px; font: inherit; color: #cfe9d8;
+    background: rgba(255,255,255,.04); border: 1px solid rgba(57,255,20,.3); border-radius: 4px;
+    -webkit-user-select: text; user-select: text;
+  }
+  input:focus { outline: none; border-color: #39ff14 }
+  .lights { display: inline-flex; gap: 6px; margin-right: 8px; vertical-align: -1px }
+  .tl { width: 10px; height: 10px; border-radius: 50%; cursor: pointer; display: inline-block }
+  .tl.close { background: #ff5f57 } .tl.min { background: #febc2e } .tl.fill { background: #28c840 }
+  .tl:hover { filter: brightness(1.25) }
+  #current { display: none; margin: 0 0 12px; padding: 6px 8px; border-radius: 5px; font-size: 9px;
+    color: #9bffb0; background: rgba(57,255,20,.06); border: 1px solid rgba(57,255,20,.25) }
+  #current .row { display: flex; align-items: center; gap: 8px }
+  #current .who { flex: 1 }
+  #disconnect { width: auto; margin: 0; padding: 3px 8px; font-size: 9px; letter-spacing: .08em;
+    color: #ffb0b0; background: transparent; border: 1px solid rgba(255,80,80,.45) }
+  #disconnect.armed { color: #06120a; background: #ff6b6b }
+  #back { display: none }
 </style>
 
-<h1>⚔ SPRINT BOARD</h1>
+<h1><span class="lights"><span class="tl close" data-win="close" title="close"></span><span class="tl min" data-win="minimize" title="minimize"></span><span class="tl fill" data-win="fill" title="full screen"></span></span>⚔ SPRINT BOARD</h1>
+<div id="current">
+  <div class="row"><span class="who" id="who"></span><button id="disconnect">DISCONNECT</button></div>
+  <div class="hint">Disconnect removes the token from this Mac. The token itself stays valid until you
+    revoke it at <a href="#" data-url="https://id.atlassian.com/manage-profile/security/api-tokens">id.atlassian.com</a>.</div>
+</div>
 <p class="sub">Sign in and the rest follows — your Jira site, your email and your
 permissions are read from your account. Nothing is written to a file; it goes to the keychain.</p>
 
@@ -35,7 +61,22 @@ permissions are read from your account. Nothing is written to a file; it goes to
 <div class="hint">A browser opens, you approve, it closes. Read-only access:
   nothing in Jira is ever modified.</div>
 
+<button id="useToken" class="alt">USE AN API TOKEN INSTEAD</button>
+<div id="tokenForm">
+  <label for="host">JIRA SITE</label>
+  <input id="host" placeholder="yourcompany.atlassian.net" autocomplete="off" spellcheck="false">
+  <label for="email">EMAIL</label>
+  <input id="email" placeholder="you@company.com" autocomplete="off" spellcheck="false">
+  <label for="token">API TOKEN</label>
+  <input id="token" type="password" placeholder="paste your token" autocomplete="off">
+  <div class="hint">Create one at <a href="#" data-url="https://id.atlassian.com/manage-profile/security/api-tokens">id.atlassian.com → API tokens</a>.
+    It is checked against Jira, then stored in the keychain.</div>
+  <button id="saveToken">SAVE TOKEN</button>
+</div>
 
+
+
+<button id="back" class="alt">BACK TO BOARD</button>
 
 <div id="err" class="err" style="display:none"></div>
 
@@ -56,15 +97,70 @@ permissions are read from your account. Nothing is written to a file; it goes to
   });
 
 
+  const resize = () => requestAnimationFrame(() => post({ height: document.body.scrollHeight + 32 }));
+
+  document.querySelectorAll("[data-win]").forEach((el) =>
+    el.addEventListener("click", () => post({ win: el.dataset.win })));
+
+  // Opened from Settings with a working sign-in: show it and offer a way back.
+  window.sbSetupContext = (ctx) => {
+    if (!ctx || !ctx.email) return;
+    $("who").textContent = "Connected as " + ctx.email + " · " + (ctx.mode === "oauth" ? "Atlassian sign-in" : "API token");
+    $("current").style.display = "block";
+    $("back").style.display = "block";
+    resize();
+  };
+  $("back").addEventListener("click", () => post({ backToBoard: true }));
+
+  // Two clicks, so a stray one never signs you out.
+  let disarm = null;
+  $("disconnect").addEventListener("click", () => {
+    if ($("disconnect").classList.contains("armed")) {
+      clearTimeout(disarm);
+      post({ disconnect: true });
+      return;
+    }
+    $("disconnect").classList.add("armed");
+    $("disconnect").textContent = "CLICK AGAIN";
+    disarm = setTimeout(() => {
+      $("disconnect").classList.remove("armed");
+      $("disconnect").textContent = "DISCONNECT";
+    }, 3000);
+  });
+
+  $("useToken").addEventListener("click", () => {
+    $("tokenForm").style.display = "block";
+    $("useToken").style.display = "none";
+    $("host").focus();
+    resize();
+  });
+
+  $("saveToken").addEventListener("click", () => {
+    const host = $("host").value.trim(), email = $("email").value.trim(), token = $("token").value.trim();
+    if (!host || !email || !token) {
+      window.sbSetupResult({ errors: ["Fill in the Jira site, your email and the token."] });
+      return;
+    }
+    $("saveToken").disabled = true;
+    $("saveToken").textContent = "CHECKING WITH JIRA…";
+    $("err").style.display = "none";
+    post({ tokenLogin: { host, email, token } });
+  });
+  [$("host"), $("email"), $("token")].forEach((el) =>
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter") $("saveToken").click(); }));
+
   // Swift hands the validation result back through this.
   window.sbSetupResult = (res) => {
     $("atlassian").disabled = false;
     $("atlassian").textContent = "SIGN IN WITH ATLASSIAN";
+    $("saveToken").disabled = false;
+    $("saveToken").textContent = "SAVE TOKEN";
     const errs = (res && res.errors) || ["unknown error"];
     $("err").innerHTML = "<ul>" + errs.map((e) =>
       "<li>" + String(e).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</li>"
     ).join("") + "</ul>";
     $("err").style.display = "block";
+    resize();
   };
 
   // Size the window to the content (the same bridge view.html uses).

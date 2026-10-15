@@ -12,6 +12,7 @@ import {
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
   updateInfo, jiraRequest, ownershipStartedAt,
+  prList, conflictIds, newConflicts, conflictNotifications, refreshSummary,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -306,7 +307,9 @@ async function attachRequiredChecks(prs, token) {
     }`);
   try {
     const data = (await ghGraphql(`{${aliases.join("\n")}}`, token))?.data ?? {};
-    prs.forEach((pr, i) => {
+    // Aliases were numbered over `usable`, so they must be read back over `usable` too:
+    // indexing `prs` put a PR's state on its neighbour whenever a PR had no owner.
+    usable.forEach((pr, i) => {
       const ctx = data[`p${i}`]?.pullRequest?.commits?.nodes?.[0]
         ?.commit?.statusCheckRollup?.contexts?.nodes ?? [];
       // The second query = the settled value. The first search may have returned
@@ -639,8 +642,12 @@ async function main() {
     bossKey: bossNow ? bossNow.key : null,
     brokenIds: brokenPrs.map((p) => `${p.repo}#${p.number}`),
     reviewIds: (reviewRequests || []).map((r) => `${r.repo}#${r.number}`),
+    // Kept from the previous run when GitHub is unreachable: an empty list would make
+    // every existing conflict look new on the next successful run.
+    conflictIds: prs ? conflictIds(prs, prevState.conflictIds) : prevState.conflictIds,
   };
   const alerts = detectAlerts(prevState, signals);
+  const notify = conflictNotifications(newConflicts(prevState, prs));
   const played = playAlert(cfg, alerts);
   // `initialized` is REQUIRED: this is how detectAlerts recognises the first run.
   // Without it every launch counts as "first launch" and every existing boss or
@@ -693,6 +700,9 @@ async function main() {
     requiredError,
     brokenPrs,
     waitingPrs,
+    pullRequests: prList(prs),
+    notify,
+    summary: refreshSummary(prs, requiredError),
     update,
   };
 }
