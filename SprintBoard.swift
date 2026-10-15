@@ -98,6 +98,20 @@ func keychainGet(service: String, account: String) -> String? {
     return String(data: d, encoding: .utf8)
 }
 
+/// The Jira Cloud host a typed site names, or nil. Basic auth sends the token itself, so it
+/// only ever goes to an *.atlassian.net host. Only host characters are allowed: a suffix
+/// check alone let "other.example?.atlassian.net" send the request to other.example.
+func jiraCloudHost(_ raw: String) -> String? {
+    var site = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    for scheme in ["https://", "http://"] where site.hasPrefix(scheme) { site.removeFirst(scheme.count) }
+    while site.hasSuffix("/") { site.removeLast() }
+    let hostCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789.-")
+    guard site.unicodeScalars.allSatisfy({ hostCharacters.contains($0) }),
+          site.hasSuffix(".atlassian.net"), site.count > ".atlassian.net".count,
+          !site.hasPrefix("."), !site.contains("..") else { return nil }
+    return site
+}
+
 func keychainDelete(service: String, account: String) {
     SecItemDelete([
         kSecClass as String: kSecClassGenericPassword,
@@ -790,13 +804,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// is checked against Jira first, then stored by this app, so reading it back opens no
     /// keychain permission dialog.
     func finishTokenLogin(host rawHost: String, email: String, token: String) {
-        let host = rawHost.replacingOccurrences(of: "https://", with: "")
-            .replacingOccurrences(of: "http://", with: "")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-        // Basic auth sends the token itself, so it only goes to a Jira Cloud site: a typo
-        // must not hand it to some other host.
-        guard host.hasSuffix(".atlassian.net"), !host.contains("/"), !host.contains("@"),
-              let url = URL(string: "https://\(host)/rest/api/3/myself") else {
+        guard let host = jiraCloudHost(rawHost), let url = URL(string: "https://\(host)/rest/api/3/myself") else {
             setupFailed(["Enter your Jira Cloud site, like yourcompany.atlassian.net."]); return
         }
         var req = URLRequest(url: url)
