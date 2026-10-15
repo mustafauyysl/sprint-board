@@ -112,6 +112,15 @@ func jiraCloudHost(_ raw: String) -> String? {
     return site
 }
 
+/// The keychain service holding a Jira API token this app wrote, or nil. Only a setup
+/// screen sets `tokensOwnedByApp`, and in token mode it also wrote the entry
+/// `keychainService` names (the first version: sprint-board-jira). Under OAuth the field
+/// can still name an older hand-made entry, so it is left alone there.
+func appWrittenTokenService(_ cfg: [String: Any]) -> String? {
+    guard cfg["tokensOwnedByApp"] as? Bool == true, (cfg["authMode"] as? String) != "oauth" else { return nil }
+    return (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
+}
+
 func keychainDelete(service: String, account: String) {
     SecItemDelete([
         kSecClass as String: kSecClassGenericPassword,
@@ -522,12 +531,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         guard let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
               var cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any] else { return }
         if cfg["tokensOwnedByApp"] as? Bool == true, let email = cfg["email"] as? String, !email.isEmpty {
-            // Both entries below are only ever written by this app. `keychainService` can
-            // still name an older hand-made entry, so it is never deleted by name.
             keychainDelete(service: JIRA_OAUTH_KEYCHAIN, account: email)
-            if (cfg["keychainService"] as? String) == JIRA_TOKEN_KEYCHAIN {
-                keychainDelete(service: JIRA_TOKEN_KEYCHAIN, account: email)
-            }
+            if let service = appWrittenTokenService(cfg) { keychainDelete(service: service, account: email) }
         }
         for key in ["email", "host", "cloudId", "authMode", "tokensOwnedByApp"] { cfg.removeValue(forKey: key) }
         if let data = try? JSONSerialization.data(withJSONObject: cfg, options: .prettyPrinted) {
@@ -839,6 +844,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             keychainDelete(service: JIRA_OAUTH_KEYCHAIN, account: oldEmail)
             jiraAccessToken = nil
             jiraAccessExpiry = nil
+        }
+        // Nor may the token this replaces (the first version kept it under sprint-board-jira).
+        if let oldService = appWrittenTokenService(cfg), let oldEmail = cfg["email"] as? String, !oldEmail.isEmpty,
+           !(oldService == JIRA_TOKEN_KEYCHAIN && oldEmail == email) {
+            keychainDelete(service: oldService, account: oldEmail)
         }
         cfg["host"] = host
         cfg["email"] = email
