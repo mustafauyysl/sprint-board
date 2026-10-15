@@ -113,12 +113,15 @@ func jiraCloudHost(_ raw: String) -> String? {
 }
 
 /// The keychain service holding a Jira API token this app wrote, or nil. Only a setup
-/// screen sets `tokensOwnedByApp`, and in token mode it also wrote the entry
-/// `keychainService` names (the first version: sprint-board-jira). Under OAuth the field
-/// can still name an older hand-made entry, so it is left alone there.
+/// screen sets `tokensOwnedByApp`. sprint-board-jira-token is only ever written by the
+/// token sign-in, so it is the app's in any mode. Any other name is the app's only in token
+/// mode (the first version wrote sprint-board-jira); under OAuth it can still name an older
+/// hand-made entry, so it is left alone there.
 func appWrittenTokenService(_ cfg: [String: Any]) -> String? {
-    guard cfg["tokensOwnedByApp"] as? Bool == true, (cfg["authMode"] as? String) != "oauth" else { return nil }
-    return (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
+    guard cfg["tokensOwnedByApp"] as? Bool == true else { return nil }
+    let service = (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
+    if service == JIRA_TOKEN_KEYCHAIN { return service }
+    return (cfg["authMode"] as? String) == "oauth" ? nil : service
 }
 
 func keychainDelete(service: String, account: String) {

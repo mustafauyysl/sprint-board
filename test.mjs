@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   businessDaysBetween,
   evaluate,
@@ -964,4 +968,113 @@ test("conflictIds + newConflicts: a conflict that flickers to UNKNOWN does not n
   assert.equal(newConflicts(state, run2).length, 0);
   state = { initialized: true, conflictIds: conflictIds(run2, state.conflictIds) };
   assert.equal(newConflicts(state, run3).length, 0, "the same conflict must not notify again");
+});
+
+const swiftAvailable = spawnSync("swiftc", ["--version"]).status === 0;
+
+function swiftSource(src, name) {
+  const start = src.indexOf(`\nfunc ${name}(`);
+  const end = src.indexOf("\n}\n", start);
+  assert.ok(start >= 0 && end > start, `${name} not found in SprintBoard.swift`);
+  return src.slice(start + 1, end + 3);
+}
+
+const hostInputs = [
+  "acme.atlassian.net",
+  "https://ACME.atlassian.net/",
+  "other.example?.atlassian.net",
+  "x#.atlassian.net",
+  "evil.com/.atlassian.net",
+  ".atlassian.net",
+  "a..atlassian.net",
+  "user@x.atlassian.net",
+];
+
+const configInputs = {
+  missing: {},
+  notOwned: { tokensOwnedByApp: false },
+  oauthAfterToken: { tokensOwnedByApp: true, authMode: "oauth", keychainService: "sprint-board-jira-token" },
+  oauthLegacy: { tokensOwnedByApp: true, authMode: "oauth", keychainService: "sprint-board-jira" },
+  ownedDefault: { tokensOwnedByApp: true },
+  ownedNamed: { tokensOwnedByApp: true, keychainService: "sprint-board-jira-token" },
+};
+
+let swiftCache;
+function swiftHelpers() {
+  if (swiftCache) return swiftCache;
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const keychainConsts = ["JIRA_KEYCHAIN", "JIRA_TOKEN_KEYCHAIN"].map((name) => {
+    const line = src.match(new RegExp(`^let ${name} = .*$`, "m"));
+    assert.ok(line, `${name} not found in SprintBoard.swift`);
+    return line[0];
+  });
+  const driver = `import Foundation
+${keychainConsts.join("\n")}
+${swiftSource(src, "jiraCloudHost")}
+${swiftSource(src, "appWrittenTokenService")}
+let input = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String: Any]
+let hosts: [Any] = (input["hosts"] as! [String]).map { h in jiraCloudHost(h).map { $0 as Any } ?? NSNull() }
+let configs = input["configs"] as! [String: [String: Any]]
+var services: [String: Any] = [:]
+for (key, cfg) in configs { services[key] = appWrittenTokenService(cfg).map { $0 as Any } ?? NSNull() }
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services]))
+`;
+  const dir = mkdtempSync(join(tmpdir(), "sprint-board-swift-"));
+  try {
+    writeFileSync(join(dir, "main.swift"), driver);
+    execFileSync("swiftc", [join(dir, "main.swift"), "-o", join(dir, "helpers")], { stdio: "pipe" });
+    const out = JSON.parse(
+      execFileSync(join(dir, "helpers"), { input: JSON.stringify({ hosts: hostInputs, configs: configInputs }) }),
+    );
+    swiftCache = {
+      host: Object.fromEntries(hostInputs.map((h, i) => [h, out.hosts[i]])),
+      service: out.services,
+    };
+    return swiftCache;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("jiraCloudHost: a bare atlassian.net host is accepted as-is", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().host["acme.atlassian.net"], "acme.atlassian.net");
+});
+
+test("jiraCloudHost: scheme, upper case and trailing slash are normalised away", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().host["https://ACME.atlassian.net/"], "acme.atlassian.net");
+});
+
+test("jiraCloudHost: a non-host character before the suffix is refused", { skip: !swiftAvailable }, () => {
+  const { host } = swiftHelpers();
+  for (const raw of ["other.example?.atlassian.net", "x#.atlassian.net", "evil.com/.atlassian.net", "user@x.atlassian.net"]) {
+    assert.equal(host[raw], null, raw);
+  }
+});
+
+test("jiraCloudHost: an empty label is refused", { skip: !swiftAvailable }, () => {
+  const { host } = swiftHelpers();
+  assert.equal(host[".atlassian.net"], null);
+  assert.equal(host["a..atlassian.net"], null);
+});
+
+test("appWrittenTokenService: a token the app did not write is left alone", { skip: !swiftAvailable }, () => {
+  const { service } = swiftHelpers();
+  assert.equal(service.missing, null);
+  assert.equal(service.notOwned, null);
+});
+
+test("appWrittenTokenService: after switching from an API token to OAuth, the token entry is still the app's", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().service.oauthAfterToken, "sprint-board-jira-token");
+});
+
+test("appWrittenTokenService: under OAuth an older keychainService name is left alone", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().service.oauthLegacy, null);
+});
+
+test("appWrittenTokenService: an owned token without keychainService is the first version's entry", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().service.ownedDefault, "sprint-board-jira");
+});
+
+test("appWrittenTokenService: an owned token's keychainService names the entry", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().service.ownedNamed, "sprint-board-jira-token");
 });
