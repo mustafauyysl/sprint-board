@@ -910,6 +910,16 @@ test("conflictNotifications: one per PR, with its link", () => {
   assert.equal(n.id, "conflict-demo-repo#7");
 });
 
+test("conflictNotifications: a PR without a title gets the fallback body", () => {
+  const [n] = conflictNotifications([demoPr(8, { mergeable: "CONFLICTING", title: "" })]);
+  assert.equal(n.body, "This PR no longer merges into its base branch");
+});
+
+test("conflictNotifications: a PR without a url gets a null link", () => {
+  const [n] = conflictNotifications([demoPr(9, { mergeable: "CONFLICTING", url: undefined })]);
+  assert.equal(n.url, null);
+});
+
 test("refreshSummary: all clean", () => {
   const s = refreshSummary([demoPr(1), demoPr(2)]);
   assert.equal(s.title, "No conflicts, no CI errors");
