@@ -134,6 +134,26 @@ func githubOrgName(_ raw: String) -> String? {
     return name
 }
 
+/// The notifications a fetch result asks for. New conflicts always notify, even while the
+/// setup screen is open: fetch.mjs has already remembered them, so a dropped one is lost
+/// for good. The summary answers a refresh the user asked for; the setup screen cancels it.
+func resultNotifications(_ obj: [String: Any]?, ok: Bool, manual: Bool, onSetupScreen: Bool) -> [[String: String]] {
+    var out: [[String: String]] = []
+    for n in (obj?["notify"] as? [[String: Any]]) ?? [] {
+        guard let id = n["id"] as? String, let title = n["title"] as? String else { continue }
+        var note = ["id": id, "title": title, "body": (n["body"] as? String) ?? ""]
+        if let url = n["url"] as? String { note["url"] = url }
+        out.append(note)
+    }
+    guard manual, !onSetupScreen else { return out }
+    if ok, let s = obj?["summary"] as? [String: Any], let title = s["title"] as? String {
+        out.append(["id": "refresh", "title": title, "body": (s["body"] as? String) ?? ""])
+    } else if !ok {
+        out.append(["id": "refresh", "title": "Refresh failed", "body": (obj?["error"] as? String) ?? "unknown error"])
+    }
+    return out
+}
+
 func keychainDelete(service: String, account: String) {
     SecItemDelete([
         kSecClass as String: kSecClassGenericPassword,
@@ -652,17 +672,12 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     /// New conflicts always notify; a refresh the user asked for also reports its result.
     func notifyFromResult(_ obj: [String: Any]?, ok: Bool) {
-        for n in (obj?["notify"] as? [[String: Any]]) ?? [] {
-            guard let id = n["id"] as? String, let title = n["title"] as? String else { continue }
-            notifyUser(id: id, title: title, body: (n["body"] as? String) ?? "", url: n["url"] as? String)
+        let notes = resultNotifications(obj, ok: ok, manual: manualRefreshPending, onSetupScreen: onSetupScreen)
+        for n in notes {
+            guard let id = n["id"], let title = n["title"] else { continue }
+            notifyUser(id: id, title: title, body: n["body"] ?? "", url: n["url"])
         }
-        guard manualRefreshPending else { return }
-        manualRefreshPending = false
-        if ok, let s = obj?["summary"] as? [String: Any], let title = s["title"] as? String {
-            notifyUser(id: "refresh", title: title, body: (s["body"] as? String) ?? "", url: nil)
-        } else if !ok {
-            notifyUser(id: "refresh", title: "Refresh failed", body: (obj?["error"] as? String) ?? "unknown error", url: nil)
-        }
+        if !onSetupScreen { manualRefreshPending = false }
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
@@ -1073,14 +1088,16 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     }
 
     func push(_ json: String) {
-        if onSetupScreen { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
 
             let obj = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
             let ok = obj?["ok"] as? Bool ?? false
-            if ok { self.retryCount = 0; self.retryTimer?.invalidate() } else { self.scheduleRetry() }
+            // Before the setup-screen check: fetch.mjs has already remembered these
+            // conflicts, so one dropped here would never notify.
             self.notifyFromResult(obj, ok: ok)
+            if self.onSetupScreen { return }
+            if ok { self.retryCount = 0; self.retryTimer?.invalidate() } else { self.scheduleRetry() }
 
             guard self.ready else { self.pendingJSON = json; return }
             let escaped = json.data(using: .utf8).flatMap {

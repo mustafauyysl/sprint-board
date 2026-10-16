@@ -1167,6 +1167,16 @@ const configInputs = {
 
 const orgInputs = [...orgValid, ...orgEmpty, ...orgInvalid];
 
+const conflictNote = { id: "conflict-demo-repo#7", title: "Conflict: demo-repo #7", body: "DEMO-7 | demo change", url: "https://example.invalid/demo-repo/pull/7" };
+const goodResult = { ok: true, notify: [conflictNote], summary: { id: "refresh", title: "1 conflict", body: "demo-repo#7", url: null } };
+const resultInputs = {
+  setupScreen: { obj: goodResult, ok: true, manual: false, onSetupScreen: true },
+  setupScreenManual: { obj: goodResult, ok: true, manual: true, onSetupScreen: true },
+  boardAuto: { obj: goodResult, ok: true, manual: false, onSetupScreen: false },
+  boardManual: { obj: goodResult, ok: true, manual: true, onSetupScreen: false },
+  boardManualFailed: { obj: { ok: false, error: "GitHub HTTP 502" }, ok: false, manual: true, onSetupScreen: false },
+};
+
 let swiftCache;
 function swiftHelpers() {
   if (swiftCache) return swiftCache;
@@ -1181,25 +1191,32 @@ ${keychainConsts.join("\n")}
 ${swiftSource(src, "jiraCloudHost")}
 ${swiftSource(src, "appWrittenTokenService")}
 ${swiftSource(src, "githubOrgName")}
+${swiftSource(src, "resultNotifications")}
 let input = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String: Any]
 let hosts: [Any] = (input["hosts"] as! [String]).map { h in jiraCloudHost(h).map { $0 as Any } ?? NSNull() }
 let configs = input["configs"] as! [String: [String: Any]]
 var services: [String: Any] = [:]
 for (key, cfg) in configs { services[key] = appWrittenTokenService(cfg).map { $0 as Any } ?? NSNull() }
 let orgs: [Any] = (input["orgs"] as! [String]).map { o in githubOrgName(o).map { $0 as Any } ?? NSNull() }
-FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services, "orgs": orgs]))
+var notes: [String: Any] = [:]
+for (key, r) in input["results"] as! [String: [String: Any]] {
+  notes[key] = resultNotifications(r["obj"] as? [String: Any], ok: r["ok"] as! Bool,
+                                   manual: r["manual"] as! Bool, onSetupScreen: r["onSetupScreen"] as! Bool)
+}
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services, "orgs": orgs, "notes": notes]))
 `;
   const dir = mkdtempSync(join(tmpdir(), "sprint-board-swift-"));
   try {
     writeFileSync(join(dir, "main.swift"), driver);
     execFileSync("swiftc", [join(dir, "main.swift"), "-o", join(dir, "helpers")], { stdio: "pipe" });
     const out = JSON.parse(
-      execFileSync(join(dir, "helpers"), { input: JSON.stringify({ hosts: hostInputs, configs: configInputs, orgs: orgInputs }) }),
+      execFileSync(join(dir, "helpers"), { input: JSON.stringify({ hosts: hostInputs, configs: configInputs, orgs: orgInputs, results: resultInputs }) }),
     );
     swiftCache = {
       host: Object.fromEntries(hostInputs.map((h, i) => [h, out.hosts[i]])),
       service: out.services,
       org: Object.fromEntries(orgInputs.map((o, i) => [o, out.orgs[i]])),
+      notes: out.notes,
     };
     return swiftCache;
   } finally {
@@ -1263,4 +1280,24 @@ test("githubOrgName: empty means all PRs", { skip: !swiftAvailable }, () => {
 test("githubOrgName: an invalid name is refused", { skip: !swiftAvailable }, () => {
   const { org } = swiftHelpers();
   for (const raw of orgInvalid) assert.equal(org[raw], null, raw);
+});
+
+test("resultNotifications: a conflict found while the setup screen is open still notifies", { skip: !swiftAvailable }, () => {
+  const { notes } = swiftHelpers();
+  assert.deepEqual(notes.setupScreen, [conflictNote]);
+  assert.deepEqual(notes.setupScreenManual, [conflictNote], "the setup screen cancels the refresh summary only");
+});
+
+test("resultNotifications: an automatic refresh sends only the new conflicts", { skip: !swiftAvailable }, () => {
+  assert.deepEqual(swiftHelpers().notes.boardAuto, [conflictNote]);
+});
+
+test("resultNotifications: a refresh the user asked for also reports its summary", { skip: !swiftAvailable }, () => {
+  assert.deepEqual(swiftHelpers().notes.boardManual,
+    [conflictNote, { id: "refresh", title: "1 conflict", body: "demo-repo#7" }]);
+});
+
+test("resultNotifications: a failed refresh the user asked for says so", { skip: !swiftAvailable }, () => {
+  assert.deepEqual(swiftHelpers().notes.boardManualFailed,
+    [{ id: "refresh", title: "Refresh failed", body: "GitHub HTTP 502" }]);
 });
