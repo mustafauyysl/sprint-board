@@ -527,6 +527,21 @@ export function refreshSummary(all, ciError = null) {
   return { id: "refresh", title: parts.join(", "), body: [names, ...caveats].join(" · "), url: null };
 }
 
+const GITHUB_ORG = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/;
+
+/**
+ * The `org:` qualifier for the GitHub searches: "" when no organization is set (all PRs),
+ * null when the configured name is not a valid GitHub login. The name goes into the query
+ * text, and the config can be edited by hand, so an invalid one is never passed through.
+ */
+export function githubOrgQualifier(org) {
+  if (org === undefined || org === null) return "";
+  if (typeof org !== "string") return null;
+  const name = org.trim();
+  if (!name) return "";
+  return name.length <= 39 && GITHUB_ORG.test(name) ? `org:${name} ` : null;
+}
+
 // --- Executable lookup --------------------------------------------------
 // A GUI app launched from Finder does NOT see the shell PATH (it is limited to
 // /usr/bin:/bin), so we cannot assume node/gh are "on PATH". Homebrew installs

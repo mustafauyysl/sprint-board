@@ -12,7 +12,7 @@ import {
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
   updateInfo, jiraRequest, ownershipStartedAt,
-  mergeBlocked, conflictIds, newConflicts, conflictNotifications, refreshSummary,
+  mergeBlocked, githubOrgQualifier, conflictIds, newConflicts, conflictNotifications, refreshSummary,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -214,11 +214,11 @@ function githubToken(cfg) {
   }
 }
 
-// With no org the filter is omitted entirely: all of the user's open PRs come back.
+// With no org the qualifier is "" and all of the user's open PRs come back.
 // The org used to be hard-coded, which returned nothing on any other installation.
-const prQuery = (org) => `
+const prQuery = (qualifier) => `
 {
-  search(query: "${org ? `org:${org} ` : ""}author:@me is:pr is:open", type: ISSUE, first: 50) {
+  search(query: "${qualifier}author:@me is:pr is:open", type: ISSUE, first: 50) {
     nodes { ... on PullRequest {
       number title url isDraft
       repository { name nameWithOwner }
@@ -252,10 +252,10 @@ async function ghGraphql(query, token) {
  * Returns null when there is no token or the request fails — PR data is optional
  * and the rest of the widget must not go down because of it.
  */
-async function fetchPrs(org, token) {
+async function fetchPrs(qualifier, token) {
   if (!token) return null;
   try {
-    const nodes = (await ghGraphql(prQuery(org), token))?.data?.search?.nodes ?? [];
+    const nodes = (await ghGraphql(prQuery(qualifier), token))?.data?.search?.nodes ?? [];
     return nodes.filter((n) => n && n.number).map((n) => ({
       number: n.number,
       title: n.title,
@@ -622,11 +622,13 @@ async function main() {
     });
   }
 
-  // The org is optional: without it the PR search runs with no org filter.
-  const githubOrg = cfg.githubOrg || "";
+  // The org is optional: without it the PR search runs with no org filter. An invalid
+  // one skips the searches and says so; it never widens them to all PRs.
+  const orgQualifier = githubOrgQualifier(cfg.githubOrg);
+  const githubOrgError = orgQualifier === null ? "GitHub organization in config is not valid" : null;
   const ghToken = piped.githubToken || githubToken(cfg);
-  const prs = await fetchPrs(githubOrg, ghToken);
-  const reviewRequests = await fetchReviewRequests(new Date(), ghToken);
+  const prs = githubOrgError ? null : await fetchPrs(orgQualifier, ghToken);
+  const reviewRequests = githubOrgError ? null : await fetchReviewRequests(new Date(), ghToken);
   await attachRequiredChecks(prs, ghToken);
   const { byKey: prByKey, broken: brokenPrs, waiting: waitingPrs } = summarizePrs(prs);
   for (const t of tasks) {
@@ -691,6 +693,7 @@ async function main() {
       : null,
     tasks: visible,
     prsAvailable: prs !== null,
+    githubOrgError,
     pendingRelease: (await pendingReleaseP) || [],
     pendingReleaseError,
     reviewRequests: reviewRequests || [],

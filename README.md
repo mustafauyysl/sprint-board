@@ -115,6 +115,11 @@ costs.
   dots on the strip close the widget (the app keeps running; the Dock icon, Cmd+Tab or
   ⚔ → Bring widget to front brings it back), minimise it to the Dock, or make it fill
   the screen with larger text
+- The **⚙** next to ⟳ opens the settings screen. **GitHub organization** limits the PR
+  searches (your PRs and the reviews you are asked for) to one organization; empty
+  means all PRs. Only a valid GitHub organization name is saved, and the board uses it
+  at the next refresh. An invalid name typed into the config by hand turns the PR
+  bands off with a message; it never widens the search to all PRs
 - Refresh runs every 30 minutes and takes ~13 s
 - **⛔ MERGE BLOCKED** lists the PRs that cannot be merged, each with its reasons:
   conflicts first, then failing required checks, then changes requested. A PR whose

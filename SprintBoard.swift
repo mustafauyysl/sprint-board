@@ -124,6 +124,16 @@ func appWrittenTokenService(_ cfg: [String: Any]) -> String? {
     return (cfg["authMode"] as? String) == "oauth" ? nil : service
 }
 
+/// The GitHub organization a typed name gives: "" for none (all PRs), nil when it is not a
+/// valid GitHub login. The name goes into a search query, so nothing else is let through.
+func githubOrgName(_ raw: String) -> String? {
+    let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if name.isEmpty { return "" }
+    guard name.count <= 39,
+          name.range(of: "^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$", options: .regularExpression) != nil else { return nil }
+    return name
+}
+
 func keychainDelete(service: String, account: String) {
     SecItemDelete([
         kSecClass as String: kSecClassGenericPassword,
@@ -547,6 +557,31 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         manualRefreshPending = false
         onSetupScreen = true
         loadPage("setup.html")
+    }
+
+    /// Writes the board settings from the setup screen. fetch.mjs reads the config on every
+    /// run, so the next refresh uses them.
+    func saveSettings(_ s: [String: Any]) {
+        guard let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
+              var cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any] else {
+            settingsResult(["errors": ["Could not read the config file."]]); return
+        }
+        guard let org = githubOrgName((s["githubOrg"] as? String) ?? "") else {
+            settingsResult(["errors": ["Not a valid GitHub organization name: letters, digits and single hyphens, at most 39 characters."]])
+            return
+        }
+        cfg["githubOrg"] = org
+        guard let data = try? JSONSerialization.data(withJSONObject: cfg, options: .prettyPrinted),
+              (try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))) != nil else {
+            settingsResult(["errors": ["Could not write the config file."]]); return
+        }
+        settingsResult(["saved": true, "githubOrg": org])
+    }
+
+    func settingsResult(_ res: [String: Any]) {
+        let json = (try? JSONSerialization.data(withJSONObject: res))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        web.evaluateJavaScript("window.sbSettingsResult && window.sbSettingsResult(\(json))")
     }
 
     /// The green button: the widget fills the screen with larger text; again restores it.
@@ -1068,7 +1103,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
            let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
            let email = cfg["email"] as? String {
             let mode = (cfg["authMode"] as? String) == "oauth" ? "oauth" : "token"
-            let ctx = (try? JSONSerialization.data(withJSONObject: ["email": email, "mode": mode]))
+            let ctx = (try? JSONSerialization.data(withJSONObject: [
+                "email": email, "mode": mode, "githubOrg": (cfg["githubOrg"] as? String) ?? "",
+            ]))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
             w.evaluateJavaScript("window.sbSetupContext && window.sbSetupContext(\(ctx))")
         }
@@ -1155,6 +1192,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
         if let t = body["noteAdd"] as? String { addNote(t) }
         if let i = body["noteDel"] as? String { removeNote(i) }
+        if body["settings"] != nil, !onSetupScreen { menuSetup() }
+        if let s = body["saveSettings"] as? [String: Any], onSetupScreen { saveSettings(s) }
         if body["disconnect"] != nil, onSetupScreen { disconnect() }
         if body["backToBoard"] != nil, onSetupScreen {
             onSetupScreen = false

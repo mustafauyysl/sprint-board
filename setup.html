@@ -46,6 +46,7 @@
     color: #ffb0b0; background: transparent; border: 1px solid rgba(255,80,80,.45) }
   #disconnect.armed { color: #06120a; background: #ff6b6b }
   #back { display: none }
+  #settings { display: none; margin-top: 14px; padding-top: 6px; border-top: 1px solid rgba(57,255,20,.18) }
 </style>
 
 <h1><span class="lights"><span class="tl close" data-win="close" title="close"></span><span class="tl min" data-win="minimize" title="minimize"></span><span class="tl fill" data-win="fill" title="full screen"></span></span>⚔ SPRINT BOARD</h1>
@@ -75,6 +76,13 @@ permissions are read from your account. Nothing is written to a file; it goes to
 </div>
 
 
+<div id="settings">
+  <label for="org">GITHUB ORGANIZATION</label>
+  <input id="org" placeholder="empty = all your PRs" autocomplete="off" spellcheck="false">
+  <div class="hint">Only PRs in this organization are watched. The board uses it at the next refresh.</div>
+  <button id="saveSettings" class="alt">SAVE SETTINGS</button>
+  <div id="saved" class="hint"></div>
+</div>
 
 <button id="back" class="alt">BACK TO BOARD</button>
 
@@ -108,7 +116,26 @@ permissions are read from your account. Nothing is written to a file; it goes to
     $("who").textContent = "Connected as " + ctx.email + " · " + (ctx.mode === "oauth" ? "Atlassian sign-in" : "API token");
     $("current").style.display = "block";
     $("back").style.display = "block";
+    $("org").value = ctx.githubOrg || "";
+    $("settings").style.display = "block";
     resize();
+  };
+
+  $("saveSettings").addEventListener("click", () => {
+    $("err").style.display = "none";
+    $("saved").textContent = "";
+    post({ saveSettings: { githubOrg: $("org").value } });
+  });
+  $("org").addEventListener("keydown", (e) => { if (e.key === "Enter") $("saveSettings").click(); });
+
+  window.sbSettingsResult = (res) => {
+    if (res && res.saved) {
+      $("org").value = res.githubOrg || "";
+      $("saved").textContent = "Saved. The board uses it at the next refresh.";
+      resize();
+      return;
+    }
+    window.sbSetupResult(res);
   };
   $("back").addEventListener("click", () => post({ backToBoard: true }));
 

@@ -269,7 +269,7 @@
       <div class="hdr">
         <span class="name"><span class="lights"><span class="tl close" data-win="close" title="close"></span><span class="tl min" data-win="minimize" title="minimize"></span><span class="tl fill" data-win="fill" title="full screen"></span></span>⚔ ${esc(clip(sprint.name, 30))}</span>
         <span class="right">${sprint.daysLeft == null ? "—" : sprint.daysLeft + "d left"}
-          · ${hhmm(d.generatedAt)}<span class="rf" id="rf" title="refresh now">⟳</span></span>
+          · ${hhmm(d.generatedAt)}<span class="rf" id="rf" title="refresh now">⟳</span><span class="rf" id="gear" title="settings">⚙</span></span>
       </div>
 
       ${staleNote ? `<div class="stale">⚠ Could not refresh: <b>${esc(staleNote.error)}</b><br>
@@ -309,9 +309,10 @@
       ${band("review", "👀 AWAITING YOUR REVIEW", reviews, "·")}
       ${prBand(d.pullRequests || [])}
 
-      ${d.prsAvailable === false ? `<div class="off">
-        PR/CI bands are off — GitHub could not be reached.
-        Run <b>gh auth login</b>, or add a GitHub token from ⚔ → Settings.</div>` : ""}
+      ${d.prsAvailable === false ? `<div class="off">${d.githubOrgError
+        ? `PR/CI bands are off — ${esc(d.githubOrgError)}. Fix it from ⚙.`
+        : `PR/CI bands are off — GitHub could not be reached.
+        Run <b>gh auth login</b>, or add a GitHub token from ⚔ → Settings.`}</div>` : ""}
 
       ${d.update ? `<div class="upd" data-url="${esc(d.update.url || "")}">
         ⬆ <b>v${esc(d.update.version)}</b> is out — click to download</div>` : ""}
@@ -349,6 +350,11 @@
       if (rf.classList.contains("spin")) return;   // block a double trigger for the ~13 s
       rf.classList.add("spin");
       refresh();
+    });
+    const gear = document.getElementById("gear");
+    if (gear) gear.addEventListener("click", (e) => {
+      e.stopPropagation();
+      window.webkit?.messageHandlers?.sb?.postMessage({ settings: true });
     });
 
     // Report the real content height to Swift so the window fits exactly

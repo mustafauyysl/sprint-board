@@ -30,6 +30,7 @@ import {
   emptyState,
   watchedPrs,
   mergeBlocked,
+  githubOrgQualifier,
   conflictIds,
   newConflicts,
   conflictNotifications,
@@ -1052,6 +1053,24 @@ test("conflictIds + newConflicts: a conflict that flickers to UNKNOWN does not n
   assert.equal(newConflicts(state, run3).length, 0, "the same conflict must not notify again");
 });
 
+// --- GitHub organization filter ---
+
+const orgValid = ["acme", " Acme-Labs ", "a", "a1-b2", "a".repeat(39)];
+const orgEmpty = ["", "   "];
+const orgInvalid = ["-acme", "acme-", "ac--me", "a".repeat(40), 'ac"me', "ac me", "acme/x", "ac_me", "org:acme"];
+
+test("githubOrgQualifier: a valid organization name becomes the search qualifier", () => {
+  for (const org of orgValid) assert.equal(githubOrgQualifier(org), `org:${org.trim()} `, org);
+});
+
+test("githubOrgQualifier: empty or missing means all PRs", () => {
+  for (const org of [...orgEmpty, undefined, null]) assert.equal(githubOrgQualifier(org), "", String(org));
+});
+
+test("githubOrgQualifier: an invalid name is refused, never passed into the query", () => {
+  for (const org of [...orgInvalid, 42, {}]) assert.equal(githubOrgQualifier(org), null, String(org));
+});
+
 const swiftAvailable = spawnSync("swiftc", ["--version"]).status === 0;
 
 function swiftSource(src, name) {
@@ -1081,6 +1100,8 @@ const configInputs = {
   ownedNamed: { tokensOwnedByApp: true, keychainService: "sprint-board-jira-token" },
 };
 
+const orgInputs = [...orgValid, ...orgEmpty, ...orgInvalid];
+
 let swiftCache;
 function swiftHelpers() {
   if (swiftCache) return swiftCache;
@@ -1094,23 +1115,26 @@ function swiftHelpers() {
 ${keychainConsts.join("\n")}
 ${swiftSource(src, "jiraCloudHost")}
 ${swiftSource(src, "appWrittenTokenService")}
+${swiftSource(src, "githubOrgName")}
 let input = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String: Any]
 let hosts: [Any] = (input["hosts"] as! [String]).map { h in jiraCloudHost(h).map { $0 as Any } ?? NSNull() }
 let configs = input["configs"] as! [String: [String: Any]]
 var services: [String: Any] = [:]
 for (key, cfg) in configs { services[key] = appWrittenTokenService(cfg).map { $0 as Any } ?? NSNull() }
-FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services]))
+let orgs: [Any] = (input["orgs"] as! [String]).map { o in githubOrgName(o).map { $0 as Any } ?? NSNull() }
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services, "orgs": orgs]))
 `;
   const dir = mkdtempSync(join(tmpdir(), "sprint-board-swift-"));
   try {
     writeFileSync(join(dir, "main.swift"), driver);
     execFileSync("swiftc", [join(dir, "main.swift"), "-o", join(dir, "helpers")], { stdio: "pipe" });
     const out = JSON.parse(
-      execFileSync(join(dir, "helpers"), { input: JSON.stringify({ hosts: hostInputs, configs: configInputs }) }),
+      execFileSync(join(dir, "helpers"), { input: JSON.stringify({ hosts: hostInputs, configs: configInputs, orgs: orgInputs }) }),
     );
     swiftCache = {
       host: Object.fromEntries(hostInputs.map((h, i) => [h, out.hosts[i]])),
       service: out.services,
+      org: Object.fromEntries(orgInputs.map((o, i) => [o, out.orgs[i]])),
     };
     return swiftCache;
   } finally {
@@ -1159,4 +1183,19 @@ test("appWrittenTokenService: an owned token without keychainService is the firs
 
 test("appWrittenTokenService: an owned token's keychainService names the entry", { skip: !swiftAvailable }, () => {
   assert.equal(swiftHelpers().service.ownedNamed, "sprint-board-jira-token");
+});
+
+test("githubOrgName: a valid organization name is kept, trimmed", { skip: !swiftAvailable }, () => {
+  const { org } = swiftHelpers();
+  for (const raw of orgValid) assert.equal(org[raw], raw.trim(), raw);
+});
+
+test("githubOrgName: empty means all PRs", { skip: !swiftAvailable }, () => {
+  const { org } = swiftHelpers();
+  for (const raw of orgEmpty) assert.equal(org[raw], "", JSON.stringify(raw));
+});
+
+test("githubOrgName: an invalid name is refused", { skip: !swiftAvailable }, () => {
+  const { org } = swiftHelpers();
+  for (const raw of orgInvalid) assert.equal(org[raw], null, raw);
 });
