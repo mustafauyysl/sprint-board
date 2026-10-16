@@ -128,7 +128,7 @@
   .notes { margin-top:9px; padding-top:7px; border-top:1px solid rgba(57,255,20,.18) }
   .notes .nhdr { color:#44607d; font-size:9px; letter-spacing:.16em; margin-bottom:3px }
   .notes .nrow { display:flex; gap:6px; align-items:baseline; font-size:10px; color:#cfe9d8; padding:1px 0 }
-  .notes .ntext { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  .notes .ntext { flex:1; min-width:0; white-space:pre-wrap; overflow-wrap:anywhere }
   .notes .ndel { flex:none; color:#4d6b5a; cursor:pointer }
   .notes .ndel:hover { color:#ff6b6b }
   .notes .ninput { width:100%; margin-top:4px; background:rgba(57,255,20,.05);
@@ -230,10 +230,10 @@
       <div class="nhdr">${NOTES.length ? "NOTES " + NOTES.length + "/6" : "NOTES"}</div>
       ${NOTES.map((n) => `
         <div class="nrow">
-          <span class="ntext" title="${esc(n.text)}">${esc(n.text)}</span>
+          <span class="ntext">${esc(n.text)}</span>
           <span class="ndel" data-del="${esc(n.id)}" title="sil">✕</span>
         </div>`).join("")}
-      <input class="ninput" type="text" placeholder="${NOTES.length >= 6
+      <input class="ninput" type="text" maxlength="500" placeholder="${NOTES.length >= 6
         ? "list full — the oldest drops" : "+ note… (Enter)"}">
     </div>`;
 

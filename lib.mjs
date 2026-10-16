@@ -349,7 +349,9 @@ export function firstName(displayName, overrides) {
 
 // --- Quick notes (live on the browser side; never sent to Jira) ---
 export const MAX_NOTES = 6;
-const NOTE_LIMIT = 140;
+// The same limit is NOTE_LIMIT in SprintBoard.swift and the note field's maxlength in
+// view.html, so typing stops where saving would cut.
+export const NOTE_LIMIT = 500;
 
 /** Empty/whitespace notes are not added; when the list is full the OLDEST drops. */
 export function addNote(notes, text, now) {

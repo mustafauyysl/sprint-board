@@ -352,7 +352,7 @@ let WARP_CA = "/usr/local/etc/cloudflare-zt/allCAbundle.pem"
 let REFRESH_SECONDS: TimeInterval = 30 * 60
 let NOTES_PATH = ("~/.local/state/sprint-widget/notes.json" as NSString).expandingTildeInPath
 let MAX_NOTES = 6
-let NOTE_LIMIT = 140
+let NOTE_LIMIT = 500
 
 /// Dragging the top strip moves the window; everything else reaches the WebView
 /// as a normal click. (CSS -webkit-app-region is Electron-specific and does

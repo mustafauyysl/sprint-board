@@ -26,6 +26,7 @@ import {
   addNote,
   removeNote,
   MAX_NOTES,
+  NOTE_LIMIT,
   sprintHistory,
   ownershipStartedAt,
   emptyState,
@@ -634,8 +635,23 @@ test("addNote: when the list is full the OLDEST note drops", () => {
 });
 
 test("addNote: an over-long note is truncated", () => {
-  const n = addNote([], "x".repeat(500), at("2026-08-20"));
-  assert.equal(n[0].text.length, 140);
+  const n = addNote([], "x".repeat(600), at("2026-08-20"));
+  assert.equal(n[0].text.length, NOTE_LIMIT);
+  assert.equal(NOTE_LIMIT, 500);
+});
+
+test("addNote: a 300-character note is kept whole", () => {
+  const text = "a long sentence ".repeat(19).slice(0, 300);
+  assert.equal(text.length, 300);
+  assert.equal(addNote([], text, at("2026-08-20"))[0].text, text.trim());
+});
+
+test("NOTE_LIMIT: the Swift save limit and the note field's maxlength match lib.mjs", () => {
+  const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
+  assert.equal(Number(swift.match(/^let NOTE_LIMIT = (\d+)$/m)?.[1]), NOTE_LIMIT);
+  assert.equal(Number(view.match(/class="ninput"[^>]*maxlength="(\d+)"/)?.[1]), NOTE_LIMIT,
+    "typing must stop where saving would cut");
 });
 
 test("addNote: every note gets a unique id", () => {
