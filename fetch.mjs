@@ -12,7 +12,7 @@ import {
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
   updateInfo, jiraRequest, ownershipStartedAt,
-  mergeBlocked, githubOrgQualifier, conflictIds, newConflicts, conflictNotifications, refreshSummary,
+  mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, conflictIds, newConflicts, conflictNotifications, refreshSummary,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -218,7 +218,7 @@ function githubToken(cfg) {
 // The org used to be hard-coded, which returned nothing on any other installation.
 const prQuery = (qualifier) => `
 {
-  search(query: "${qualifier}author:@me is:pr is:open", type: ISSUE, first: 50) {
+  search(query: "${prSearch(qualifier)}", type: ISSUE, first: 50) {
     nodes { ... on PullRequest {
       number title url isDraft
       repository { name nameWithOwner }
@@ -329,10 +329,10 @@ async function attachRequiredChecks(prs, token) {
   }
 }
 
-const REVIEW_QUERY = `
+const reviewQuery = (qualifier) => `
 {
   viewer { login }
-  search(query: "is:open is:pr review-requested:@me", type: ISSUE, first: 30) {
+  search(query: "${reviewSearch(qualifier)}", type: ISSUE, first: 30) {
     nodes { ... on PullRequest {
       number title url createdAt isDraft
       repository { name }
@@ -371,10 +371,10 @@ async function fetchLatestRelease(repo, token) {
 }
 
 /** PRs awaiting your review (the widget's equivalent of github.com/pulls/reviews). */
-async function fetchReviewRequests(now, token) {
+async function fetchReviewRequests(qualifier, now, token) {
   if (!token) return null;
   try {
-    const d = (await ghGraphql(REVIEW_QUERY, token))?.data;
+    const d = (await ghGraphql(reviewQuery(qualifier), token))?.data;
     const login = d?.viewer?.login || null;
     return (d?.search?.nodes ?? []).filter((n) => n && n.number).map((n) => {
       const { requestedAt, days } = reviewWaitInfo(n, login, now);
@@ -628,7 +628,7 @@ async function main() {
   const githubOrgError = orgQualifier === null ? "GitHub organization in config is not valid" : null;
   const ghToken = piped.githubToken || githubToken(cfg);
   const prs = githubOrgError ? null : await fetchPrs(orgQualifier, ghToken);
-  const reviewRequests = githubOrgError ? null : await fetchReviewRequests(new Date(), ghToken);
+  const reviewRequests = githubOrgError ? null : await fetchReviewRequests(orgQualifier, new Date(), ghToken);
   await attachRequiredChecks(prs, ghToken);
   const { byKey: prByKey, broken: brokenPrs, waiting: waitingPrs } = summarizePrs(prs);
   for (const t of tasks) {

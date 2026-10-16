@@ -542,6 +542,9 @@ export function githubOrgQualifier(org) {
   return name.length <= 39 && GITHUB_ORG.test(name) ? `org:${name} ` : null;
 }
 
+export const prSearch = (qualifier) => `${qualifier}author:@me is:pr is:open`;
+export const reviewSearch = (qualifier) => `${qualifier}is:open is:pr review-requested:@me`;
+
 // --- Executable lookup --------------------------------------------------
 // A GUI app launched from Finder does NOT see the shell PATH (it is limited to
 // /usr/bin:/bin), so we cannot assume node/gh are "on PATH". Homebrew installs

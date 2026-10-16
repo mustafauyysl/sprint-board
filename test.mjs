@@ -31,6 +31,8 @@ import {
   watchedPrs,
   mergeBlocked,
   githubOrgQualifier,
+  prSearch,
+  reviewSearch,
   conflictIds,
   newConflicts,
   conflictNotifications,
@@ -1069,6 +1071,16 @@ test("githubOrgQualifier: empty or missing means all PRs", () => {
 
 test("githubOrgQualifier: an invalid name is refused, never passed into the query", () => {
   for (const org of [...orgInvalid, 42, {}]) assert.equal(githubOrgQualifier(org), null, String(org));
+});
+
+test("prSearch / reviewSearch: both searches carry the organization qualifier", () => {
+  assert.equal(prSearch("org:acme "), "org:acme author:@me is:pr is:open");
+  assert.equal(reviewSearch("org:acme "), "org:acme is:open is:pr review-requested:@me");
+});
+
+test("prSearch / reviewSearch: no organization searches all PRs", () => {
+  assert.equal(prSearch(""), "author:@me is:pr is:open");
+  assert.equal(reviewSearch(""), "is:open is:pr review-requested:@me");
 });
 
 const swiftAvailable = spawnSync("swiftc", ["--version"]).status === 0;
