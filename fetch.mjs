@@ -12,7 +12,7 @@ import {
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
   updateInfo, jiraRequest, ownershipStartedAt,
-  mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, reviewIds, conflictIds, newConflicts, conflictNotifications, refreshSummary,
+  mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, reviewIds, conflictIds, newConflicts, conflictNotifications, refreshSummary, CONFLICT_SCOPE,
   showDraftPrs, sprintGoalTracking, activeSprints, goalJql, goalBand, withGoalMarks,
 } from "./lib.mjs";
 
@@ -691,6 +691,7 @@ async function main() {
     // Kept from the previous run when GitHub is unreachable or the search failed: an empty
     // list would make every existing conflict look new on the next successful run.
     conflictIds: conflictIds(prs, prevState.conflictIds, includeDrafts),
+    conflictScope: CONFLICT_SCOPE,
   };
   const alerts = detectAlerts(prevState, signals);
   const notify = conflictNotifications(newConflicts(prevState, prs, includeDrafts));

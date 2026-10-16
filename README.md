@@ -130,8 +130,10 @@ costs.
 - Refresh runs every 30 minutes and takes ~13 s
 - **⛔ MERGE BLOCKED** lists the PRs that cannot be merged, each with its reasons:
   conflicts first, then failing required checks, then changes requested. A PR whose
-  merge state GitHub has not settled shows as "checking". Only PRs with a Jira key in
-  the title count. Drafts count and are marked "draft" while **Show draft PRs** (⚙, on
+  merge state GitHub has not settled shows as "checking". Every PR the search returns
+  counts; a Jira key in the title is not needed (the **GitHub organization** setting
+  scopes the search). A key in the title still links the PR to its task as the badge
+  on the task row. Drafts count and are marked "draft" while **Show draft PRs** (⚙, on
   by default) is on; the WAITING band never shows drafts. A PR in this band that starts conflicting sends
   a macOS notification (click opens the PR); a refresh you trigger (Refresh now or ⟳)
   always reports its result for the same PRs: "No conflicts, no CI errors" or which

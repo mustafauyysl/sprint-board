@@ -287,38 +287,40 @@ export function reviewWaitInfo(pr, login, now) {
 }
 
 /**
- * Summarises a PR list by task key.
- * Jira's dev-status comes back empty here, so PRs come from GitHub and are
- * matched by the key in the title — a PR without a key is silently skipped.
+ * Summarises a PR list: the task badges by key, and the broken and waiting rows.
+ * Jira's dev-status comes back empty here, so PRs come from GitHub and a badge is
+ * matched by the key in the title. A PR without a key gets no badge, but it still
+ * joins the rows: the GitHub organization filter now scopes the search.
  */
 export function summarizePrs(prs) {
   const byKey = {};
   const broken = [];
   const waiting = [];
   for (const pr of prs || []) {
-    const key = extractIssueKey(pr?.title);
-    if (!key) continue;
-
-    const entry = byKey[key] || (byKey[key] = { count: 0, rated: 0, state: null, rank: 0 });
-    entry.count++;
+    if (!pr) continue;
+    const key = extractIssueKey(pr.title);
+    const entry = key ? byKey[key] || (byKey[key] = { count: 0, rated: 0, state: null, rank: 0 }) : null;
+    if (entry) entry.count++;
 
     // A draft PR is not ready yet: it COUNTS in the badge (work has started) but
     // produces no blocker — it neither joins a band nor plays a CI sound. Measured
     // live: 7 of 8 open PRs were drafts and 5 were REVIEW_REQUIRED, so drafts
     // filled the WAITING band on their own and the one real item was lost in them.
-    if (pr?.isDraft) continue;
+    if (pr.isDraft) continue;
 
     const { rank, reasons } = prBlockers(pr);
-    entry.rated++;
-    // Always set on the FIRST PR: while rank is 0, "rank > entry.rank" never holds
-    // and unblocked PRs would stay stateless (null). The counter must be rated, NOT
-    // count — otherwise a draft first in the list leaves the next real PR stateless.
-    if (entry.rated === 1 || rank > entry.rank) {
-      entry.rank = rank;
-      // With nothing blocking, reflect CI's own state: if unknown (null), do not show green.
-      entry.state = rank === 3 ? "FAILURE" : rank === 2 ? "PENDING" : pr.ciState || null;
-    } else if (rank === entry.rank && !entry.state && pr.ciState) {
-      entry.state = pr.ciState;
+    if (entry) {
+      entry.rated++;
+      // Always set on the FIRST PR: while rank is 0, "rank > entry.rank" never holds
+      // and unblocked PRs would stay stateless (null). The counter must be rated, NOT
+      // count — otherwise a draft first in the list leaves the next real PR stateless.
+      if (entry.rated === 1 || rank > entry.rank) {
+        entry.rank = rank;
+        // With nothing blocking, reflect CI's own state: if unknown (null), do not show green.
+        entry.state = rank === 3 ? "FAILURE" : rank === 2 ? "PENDING" : pr.ciState || null;
+      } else if (rank === entry.rank && !entry.state && pr.ciState) {
+        entry.state = pr.ciState;
+      }
     }
 
     const row = { key, repo: pr.repo, number: pr.number, url: pr.url, checks: reasons };
@@ -439,14 +441,14 @@ export function showDraftPrs(config) {
 }
 
 /**
- * The PRs the MERGE BLOCKED band covers: a Jira key in the title, as in summarizePrs, and
- * drafts only when `includeDrafts` (the "Show draft PRs" setting) is on. Conflict
+ * The PRs the MERGE BLOCKED band covers: every PR the search returned, with drafts only
+ * when `includeDrafts` (the "Show draft PRs" setting) is on. Conflict
  * notifications and the refresh summary use this set too, so a PR the band does not show
  * never notifies. The WAITING band (summarizePrs) leaves drafts out whatever the setting.
  */
 export function watchedPrs(prs, includeDrafts = false) {
   return (prs || []).filter((pr) =>
-    pr && pr.number && extractIssueKey(pr.title) && (includeDrafts || !pr.isDraft));
+    pr && pr.number && (includeDrafts || !pr.isDraft));
 }
 
 const BLOCK_ORDER = { conflict: 0, ci: 1, changes: 2, checking: 3 };
@@ -505,12 +507,20 @@ export function conflictIds(prs, previous = [], includeDrafts = false) {
 }
 
 /**
+ * What the remembered conflict list covers. A state written before PRs without a Jira key
+ * joined the band lacks it, so the first run after that change only remembers.
+ */
+export const CONFLICT_SCOPE = "all-prs";
+
+/**
  * PRs that started conflicting since the previous run. Quiet when the previous run
- * kept no conflict list (first launch, or a state file written before this field
- * existed), so conflicts that already existed never fire a burst of notifications.
+ * kept no conflict list over the same PRs (first launch, or a state file written before
+ * this field or this scope existed), so conflicts that already existed never fire a
+ * burst of notifications.
  */
 export function newConflicts(prev, prs, includeDrafts = false) {
-  if (!prev || prev.initialized !== true || !Array.isArray(prev.conflictIds)) return [];
+  if (!prev || prev.initialized !== true || prev.conflictScope !== CONFLICT_SCOPE
+    || !Array.isArray(prev.conflictIds)) return [];
   const known = new Set(prev.conflictIds);
   return watchedPrs(prs, includeDrafts).filter((pr) => isConflict(pr) && !known.has(prId(pr)));
 }

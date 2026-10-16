@@ -38,6 +38,7 @@ import {
   searchNodes,
   reviewIds,
   showDraftPrs,
+  CONFLICT_SCOPE,
   sprintGoalTracking,
   activeSprints,
   goalJql,
@@ -602,10 +603,9 @@ test("summarizePrs: PENDING overrides SUCCESS but cannot override FAILURE", () =
   assert.equal(b.byKey["AB-1"].state, "FAILURE");
 });
 
-test("summarizePrs: a PR without a key is skipped, empty input does not crash", () => {
+test("summarizePrs: a PR without a key gets no task badge, empty input does not crash", () => {
   const r = summarizePrs([{ title: "chore: bump", ciState: "FAILURE" }]);
   assert.deepEqual(r.byKey, {});
-  assert.equal(r.broken.length, 0);
   assert.deepEqual(summarizePrs(null), { byKey: {}, broken: [], waiting: [] });
 });
 
@@ -939,11 +939,33 @@ test("mergeBlocked: a clean PR is not shown, nor is pending CI or a review that 
   ]), []);
 });
 
-test("mergeBlocked: drafts and PRs without a Jira key are left out", () => {
-  assert.deepEqual(mergeBlocked([
-    demoPr(1, { mergeable: "CONFLICTING", isDraft: true }),
-    demoPr(2, { mergeable: "CONFLICTING", title: "no key here" }),
-  ]), []);
+test("mergeBlocked: drafts are left out unless the setting includes them", () => {
+  assert.deepEqual(mergeBlocked([demoPr(1, { mergeable: "CONFLICTING", isDraft: true })]), []);
+});
+
+test("mergeBlocked: a PR without a Jira key shows in the band", () => {
+  const [row] = mergeBlocked([demoPr(2, { mergeable: "CONFLICTING", title: "no key here" })]);
+  assert.deepEqual(row, {
+    key: null, repo: "demo-repo", number: 2, url: "https://example.invalid/demo-repo/pull/2",
+    title: "no key here", kind: "conflict", reasons: ["conflict"],
+  });
+});
+
+test("summarizePrs: a PR without a key shows in WAITING and gets no task badge", () => {
+  const r = summarizePrs([demoPr(4, { title: "chore: bump", reviewDecision: "REVIEW_REQUIRED" })]);
+  assert.deepEqual(r.waiting.map((w) => [w.key, w.number, w.checks]), [[null, 4, ["awaiting review"]]]);
+  assert.deepEqual(r.byKey, {});
+});
+
+test("summarizePrs: a keyless draft stays out of WAITING", () => {
+  const r = summarizePrs([demoPr(5, { title: "chore: bump", isDraft: true, reviewDecision: "REVIEW_REQUIRED" })]);
+  assert.deepEqual(r.waiting, []);
+});
+
+test("summarizePrs: the task badge still links a PR by the key in its title", () => {
+  const r = summarizePrs([demoPr(6, { title: "DEMO-6 | fix" }), demoPr(7, { title: "chore: bump" })]);
+  assert.deepEqual(Object.keys(r.byKey), ["DEMO-6"]);
+  assert.equal(r.byKey["DEMO-6"].count, 1);
 });
 
 test("mergeBlocked: a row carries what the band needs", () => {
@@ -958,20 +980,20 @@ test("mergeBlocked: no PR data gives an empty list", () => {
   assert.deepEqual(mergeBlocked(null), []);
 });
 
-test("watchedPrs: the summarizePrs filter — a Jira key in the title, no drafts", () => {
+test("watchedPrs: every PR the search returned, no drafts by default, a Jira key not needed", () => {
   const prs = [demoPr(1), demoPr(2, { isDraft: true }), demoPr(3, { title: "no key" }), null];
-  assert.deepEqual(watchedPrs(prs).map((p) => p.number), [1]);
+  assert.deepEqual(watchedPrs(prs).map((p) => p.number), [1, 3]);
   assert.deepEqual(watchedPrs(null), []);
 });
 
-test("newConflicts: a conflicting PR the band does not show does not notify", () => {
-  const prev = { initialized: true, conflictIds: [] };
+test("newConflicts: a hidden draft does not notify, a keyless PR does", () => {
+  const prev = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: [] };
   const prs = [
     demoPr(1, { mergeable: "CONFLICTING", isDraft: true }),
     demoPr(2, { mergeable: "CONFLICTING", title: "no key" }),
     demoPr(3, { mergeable: "CONFLICTING" }),
   ];
-  assert.deepEqual(newConflicts(prev, prs).map((p) => p.number), [3]);
+  assert.deepEqual(newConflicts(prev, prs).map((p) => p.number), [2, 3]);
 });
 
 test("conflictIds: only the conflicts the band shows are remembered", () => {
@@ -979,14 +1001,24 @@ test("conflictIds: only the conflicts the band shows are remembered", () => {
   assert.deepEqual(conflictIds(prs), ["demo-repo#2"]);
 });
 
-test("refreshSummary: counts only the PRs the band covers", () => {
+test("refreshSummary: counts only the PRs the band covers, keyless ones included", () => {
   const s = refreshSummary([
     demoPr(1, { mergeable: "CONFLICTING", title: "no key" }),
     demoPr(2, { mergeable: "UNKNOWN", isDraft: true }),
     demoPr(3),
   ]);
-  assert.equal(s.title, "No conflicts, no CI errors");
-  assert.equal(s.body, "1 open PRs checked");
+  assert.equal(s.title, "1 conflict");
+  assert.equal(s.body, "demo-repo#1");
+});
+
+test("newConflicts: the first run after keyless PRs joined the band only remembers", () => {
+  const old = { initialized: true, conflictIds: ["demo-repo#3"] };
+  const prs = [demoPr(1, { mergeable: "CONFLICTING", title: "no key" }), demoPr(3, { mergeable: "CONFLICTING" })];
+  assert.deepEqual(newConflicts(old, prs), [], "no burst for conflicts that already existed");
+  const next = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: conflictIds(prs, old.conflictIds) };
+  assert.deepEqual(next.conflictIds, ["demo-repo#1", "demo-repo#3"]);
+  const later = [...prs, demoPr(4, { mergeable: "CONFLICTING", title: "no key either" })];
+  assert.deepEqual(newConflicts(next, later).map((p) => p.number), [4]);
 });
 
 test("conflictIds: only CONFLICTING PRs", () => {
@@ -994,7 +1026,7 @@ test("conflictIds: only CONFLICTING PRs", () => {
 });
 
 test("newConflicts: only conflicts the previous run did not have", () => {
-  const prev = { initialized: true, conflictIds: ["demo-repo#1"] };
+  const prev = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: ["demo-repo#1"] };
   const prs = [demoPr(1, { mergeable: "CONFLICTING" }), demoPr(2, { mergeable: "CONFLICTING" }), demoPr(3)];
   assert.deepEqual(newConflicts(prev, prs).map((p) => p.number), [2]);
 });
@@ -1074,11 +1106,11 @@ test("conflictIds + newConflicts: a conflict that flickers to UNKNOWN does not n
   const run1 = [demoPr(1, { mergeable: "CONFLICTING" })];
   const run2 = [demoPr(1, { mergeable: "UNKNOWN" })];
   const run3 = [demoPr(1, { mergeable: "CONFLICTING" })];
-  let state = { initialized: true, conflictIds: [] };
+  let state = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: [] };
   assert.equal(newConflicts(state, run1).length, 1);
-  state = { initialized: true, conflictIds: conflictIds(run1, state.conflictIds) };
+  state = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: conflictIds(run1, state.conflictIds) };
   assert.equal(newConflicts(state, run2).length, 0);
-  state = { initialized: true, conflictIds: conflictIds(run2, state.conflictIds) };
+  state = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: conflictIds(run2, state.conflictIds) };
   assert.equal(newConflicts(state, run3).length, 0, "the same conflict must not notify again");
 });
 
@@ -1129,8 +1161,8 @@ test("conflictIds: with no PR data the remembered conflicts are kept", () => {
 
 test("conflictIds + newConflicts: a run without PR data does not make a known conflict notify again", () => {
   const run1 = [demoPr(1, { mergeable: "CONFLICTING" })];
-  let state = { initialized: true, conflictIds: conflictIds(run1, []) };
-  state = { initialized: true, conflictIds: conflictIds(null, state.conflictIds) };
+  let state = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: conflictIds(run1, []) };
+  state = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: conflictIds(null, state.conflictIds) };
   assert.equal(newConflicts(state, run1).length, 0);
 });
 
@@ -1163,12 +1195,12 @@ test("showDraftPrs: a missing key means drafts are shown", () => {
 
 test("watchedPrs: drafts are kept when the setting is on and dropped when it is off", () => {
   const prs = [demoPr(1), demoPr(2, { isDraft: true }), demoPr(3, { isDraft: true, title: "no key" })];
-  assert.deepEqual(watchedPrs(prs, true).map((p) => p.number), [1, 2]);
+  assert.deepEqual(watchedPrs(prs, true).map((p) => p.number), [1, 2, 3]);
   assert.deepEqual(watchedPrs(prs, false).map((p) => p.number), [1]);
 });
 
 test("newConflicts: a conflicting draft notifies only when drafts are shown", () => {
-  const prev = { initialized: true, conflictIds: [] };
+  const prev = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: [] };
   const prs = [demoPr(1, { isDraft: true, mergeable: "CONFLICTING" })];
   assert.deepEqual(newConflicts(prev, prs, true).map((p) => p.number), [1]);
   assert.deepEqual(newConflicts(prev, prs, false), []);
@@ -1194,10 +1226,10 @@ test("summarizePrs: the WAITING band still leaves drafts out, whatever the setti
 
 test("conflictIds: a draft conflict hidden by the setting stays remembered and does not notify again", () => {
   const draft = demoPr(1, { isDraft: true, mergeable: "CONFLICTING" });
-  let state = { initialized: true, conflictIds: [] };
+  let state = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: [] };
   assert.equal(newConflicts(state, [draft], true).length, 1);
-  state = { initialized: true, conflictIds: conflictIds([draft], state.conflictIds, true) };
-  state = { initialized: true, conflictIds: conflictIds([draft], state.conflictIds, false) };
+  state = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: conflictIds([draft], state.conflictIds, true) };
+  state = { initialized: true, conflictScope: CONFLICT_SCOPE, conflictIds: conflictIds([draft], state.conflictIds, false) };
   assert.deepEqual(state.conflictIds, ["demo-repo#1"], "switching drafts off must not forget it");
   assert.equal(newConflicts(state, [draft], true).length, 0, "switching drafts back on must not notify again");
 });
