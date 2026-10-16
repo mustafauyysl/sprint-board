@@ -661,6 +661,20 @@ test("NOTE_LIMIT: the Swift save limit and the note field's maxlength match lib.
     "typing must stop where saving would cut");
 });
 
+test("setup screen: a transparent page around a card panel, sized to the card, as on the board", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  for (const [name, page, height] of [
+    ["view.html", read("./view.html"), /postMessage\(\{ height: card\.offsetHeight \}\)/],
+    ["setup.html", read("./setup.html"), /post\(\{ height: \$\("card"\)\.offsetHeight \}\)/],
+  ]) {
+    // A background on <body> paints the whole square window; the rounded panel needs its own element.
+    assert.match(page, /html, body \{[^}]*background: transparent/, name);
+    assert.match(page, /<div id="card">/, name);
+    assert.match(page, height, `${name} reports the card's height`);
+    assert.doesNotMatch(page, /scrollHeight \+/, name);
+  }
+});
+
 test("addNote: every note gets a unique id", () => {
   const t = at("2026-08-20");
   const n = addNote(addNote([], "a", t), "b", t);
