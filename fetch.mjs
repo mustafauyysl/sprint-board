@@ -457,13 +457,14 @@ function demoPayload(cfg) {
   });
 
   const demoPrs = [
-    { title: "DEMO-101 | Template gate", ciState: "FAILURE", failingRequired: ["LintChecker"], repo: "web-frontend", number: 4608, url: "#" },
-    { title: "DEMO-101 | Template UI", ciState: "SUCCESS", repo: "editor-frontend", number: 327, url: "#" },
-    { title: "DEMO-101 | Template generator", ciState: "SUCCESS", repo: "template-generator", number: 243, url: "#" },
-    { title: "DEMO-102 | Shared library upgrade", ciState: "PENDING", pendingRequired: ["AI Code Review"], repo: "backend-api", number: 1166, url: "#" },
-    { title: "DEMO-102 | Submit guard", ciState: "SUCCESS", repo: "shared-lib", number: 97, url: "#" },
-    { title: "DEMO-106 | Dependency upgrade", ciState: "FAILURE", failingRequired: ["qa/smoke"], repo: "worker-jobs", number: 288, url: "#" },
-    { title: "DEMO-103 | Catalog service search", ciState: "SUCCESS", reviewDecision: "REVIEW_REQUIRED", repo: "catalog-service", number: 33957, url: "#" },
+    { title: "DEMO-101 | Template gate", ciState: "FAILURE", failingRequired: ["LintChecker"], mergeable: "MERGEABLE", repo: "web-frontend", number: 4608, url: "#" },
+    { title: "DEMO-101 | Template UI", ciState: "SUCCESS", mergeable: "CONFLICTING", repo: "editor-frontend", number: 327, url: "#" },
+    { title: "DEMO-101 | Template generator", ciState: "SUCCESS", mergeable: "UNKNOWN", repo: "template-generator", number: 243, url: "#" },
+    { title: "DEMO-102 | Shared library upgrade", ciState: "PENDING", pendingRequired: ["AI Code Review"], mergeable: "MERGEABLE", repo: "backend-api", number: 1166, url: "#" },
+    { title: "DEMO-102 | Submit guard", ciState: "SUCCESS", reviewDecision: "CHANGES_REQUESTED", mergeable: "MERGEABLE", repo: "shared-lib", number: 97, url: "#" },
+    { title: "DEMO-106 | Dependency upgrade", ciState: "FAILURE", failingRequired: ["qa/smoke"], mergeable: "MERGEABLE", repo: "worker-jobs", number: 288, url: "#" },
+    { title: "DEMO-103 | Catalog service search", ciState: "SUCCESS", reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE", repo: "catalog-service", number: 33957, url: "#" },
+    { title: "DEMO-104 | Rate limit draft", ciState: "SUCCESS", isDraft: true, mergeable: "CONFLICTING", repo: "rate-limiter", number: 52, url: "#" },
   ];
   const { byKey: demoByKey, broken: demoBroken, waiting: demoWaiting } = summarizePrs(demoPrs);
   for (const t of tasks) {
@@ -497,6 +498,7 @@ function demoPayload(cfg) {
     ],
     brokenPrs: demoBroken,
     waitingPrs: demoWaiting,
+    pullRequests: mergeBlocked(demoPrs),
     tasks: [...tasks].sort((a, b) =>
       a.done !== b.done ? (a.done ? 1 : -1) : b.ratio - a.ratio || b.daysInStatus - a.daysInStatus),
   };

@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   businessDaysBetween,
   evaluate,
@@ -1081,6 +1082,33 @@ test("prSearch / reviewSearch: both searches carry the organization qualifier", 
 test("prSearch / reviewSearch: no organization searches all PRs", () => {
   assert.equal(prSearch(""), "author:@me is:pr is:open");
   assert.equal(reviewSearch(""), "is:open is:pr review-requested:@me");
+});
+
+// --demo returns before any token or keychain read, so a temporary HOME holding only a
+// config keeps the real config and keychain out of the test.
+function runDemo(cfg) {
+  const home = mkdtempSync(join(tmpdir(), "sprint-board-demo-"));
+  try {
+    mkdirSync(join(home, ".config", "sprint-widget"), { recursive: true });
+    writeFileSync(join(home, ".config", "sprint-widget", "config.json"), JSON.stringify(cfg));
+    const out = execFileSync(process.execPath, [fileURLToPath(new URL("./fetch.mjs", import.meta.url)), "--demo"],
+      { env: { ...process.env, HOME: home }, encoding: "utf8" });
+    return JSON.parse(out);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("--demo: the board shows the MERGE BLOCKED band, in its order", () => {
+  const out = runDemo({ host: "example.invalid" });
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.pullRequests.map((r) => [r.repo, r.kind]), [
+    ["editor-frontend", "conflict"],
+    ["web-frontend", "ci"],
+    ["worker-jobs", "ci"],
+    ["shared-lib", "changes"],
+    ["template-generator", "checking"],
+  ]);
 });
 
 const swiftAvailable = spawnSync("swiftc", ["--version"]).status === 0;
