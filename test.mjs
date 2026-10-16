@@ -1409,6 +1409,23 @@ test("real run: AWAITING RELEASE fills, counted from the last status change", ()
   assert.equal(out.pendingRelease[0].days, businessDaysBetween(releaseEnteredAt, new Date()));
 });
 
+test("real run: with sprint goal tracking off there is no goal search and no goal data", () => {
+  const { out, jql } = runReal(realCfg, realSearches);
+  assert.equal(out.sprintGoal, null);
+  assert.ok(jql.length >= 2, "the main and pending-release searches ran");
+  assert.ok(!jql.some((q) => q.includes("Flagged")), jql.join(" | "));
+  assert.ok(out.tasks.every((t) => !t.goal));
+});
+
+test("real run: with sprint goal tracking on the goal search runs and my goal task is marked", () => {
+  const { out, jql } = runReal({ ...realCfg, sprintGoalTracking: true }, realSearches);
+  assert.ok(jql.includes("sprint = 9002 AND Flagged is not EMPTY"), jql.join(" | "));
+  assert.deepEqual(out.sprintGoal.rows.map((r) => [r.key, r.owner, r.status]),
+    [["DEMO-101", "Demo User", "In Progress"]]);
+  assert.deepEqual([out.sprintGoal.done, out.sprintGoal.total], [0, 1]);
+  assert.deepEqual(out.tasks.filter((t) => t.goal).map((t) => t.key), ["DEMO-101"]);
+});
+
 test("--demo: the board shows the MERGE BLOCKED band, in its order, drafts included by default", () => {
   const out = runDemo({ host: "example.invalid" });
   assert.equal(out.ok, true);
