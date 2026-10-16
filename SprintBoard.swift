@@ -164,6 +164,7 @@ func setupContext(_ cfg: [String: Any]) -> [String: Any]? {
         "mode": (cfg["authMode"] as? String) == "oauth" ? "oauth" : "token",
         "githubOrg": (cfg["githubOrg"] as? String) ?? "",
         "showDraftPrs": (cfg["showDraftPrs"] as? Bool) ?? true,
+        "sprintGoalTracking": (cfg["sprintGoalTracking"] as? Bool) ?? false,
         "hint": disconnectHint(cfg),
     ]
 }
@@ -634,13 +635,15 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             return
         }
         let drafts = (s["showDraftPrs"] as? Bool) ?? true
+        let goals = (s["sprintGoalTracking"] as? Bool) ?? false
         cfg["githubOrg"] = org
         cfg["showDraftPrs"] = drafts
+        cfg["sprintGoalTracking"] = goals
         guard let data = try? JSONSerialization.data(withJSONObject: cfg, options: .prettyPrinted),
               (try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))) != nil else {
             settingsResult(["errors": ["Could not write the config file."]]); return
         }
-        settingsResult(["saved": true, "githubOrg": org, "showDraftPrs": drafts])
+        settingsResult(["saved": true, "githubOrg": org, "showDraftPrs": drafts, "sprintGoalTracking": goals])
     }
 
     func settingsResult(_ res: [String: Any]) {

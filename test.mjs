@@ -38,6 +38,13 @@ import {
   searchNodes,
   reviewIds,
   showDraftPrs,
+  sprintGoalTracking,
+  activeSprints,
+  goalJql,
+  isGoalDone,
+  goalRisk,
+  goalBand,
+  withGoalMarks,
   conflictIds,
   newConflicts,
   conflictNotifications,
@@ -1200,6 +1207,114 @@ test("conflictIds: a hidden draft that no longer conflicts is forgotten", () => 
   assert.deepEqual(conflictIds([draft], ["demo-repo#1"], false), []);
 });
 
+// --- Sprint goal tracking ---
+// Sprint: Mon 2026-08-10 → Mon 2026-08-24. Day 8 = Mon 08-17. Business days before the
+// end: Tue 08-18 = 4th, Wed 08-19 = 3rd (the weekend 08-22/23 lies between).
+const goalStart = "2026-08-10T07:00:00.000Z";
+const goalEnd = "2026-08-24T15:00:00.000Z";
+
+test("sprintGoalTracking: a missing key means off", () => {
+  assert.equal(sprintGoalTracking({}), false);
+  assert.equal(sprintGoalTracking(null), false);
+  assert.equal(sprintGoalTracking({ sprintGoalTracking: "yes" }), false);
+  assert.equal(sprintGoalTracking({ sprintGoalTracking: true }), true);
+});
+
+test("isGoalDone: done is the status category, not a status name", () => {
+  assert.equal(isGoalDone({ key: "done", name: "Done" }), true);
+  assert.equal(isGoalDone({ key: "done", name: "Released on Prod" }), true);
+  assert.equal(isGoalDone({ key: "indeterminate", name: "Done-ish" }), false);
+  assert.equal(isGoalDone(null), false);
+});
+
+test("goalRisk: a goal task is not coloured in the first week (day 7)", () => {
+  assert.equal(goalRisk(at("2026-08-16"), goalStart, goalEnd, { key: "indeterminate" }), "ok");
+});
+
+test("goalRisk: from day 8 an open goal task is yellow", () => {
+  assert.equal(goalRisk(at("2026-08-17"), goalStart, goalEnd, { key: "indeterminate" }), "yellow");
+});
+
+test("goalRisk: the 4th business day before the end is still yellow", () => {
+  assert.equal(goalRisk(at("2026-08-18"), goalStart, goalEnd, { key: "new" }), "yellow");
+});
+
+test("goalRisk: the 3rd business day before the end is red, across the weekend", () => {
+  assert.equal(goalRisk(at("2026-08-19"), goalStart, goalEnd, { key: "new" }), "red");
+  assert.equal(goalRisk(at("2026-08-21"), goalStart, goalEnd, { key: "new" }), "red");
+  assert.equal(goalRisk(at("2026-08-26"), goalStart, goalEnd, { key: "new" }), "red", "after the end it stays red");
+});
+
+test("goalRisk: a done goal task is done whatever the date", () => {
+  assert.equal(goalRisk(at("2026-08-21"), goalStart, goalEnd, { key: "done" }), "done");
+});
+
+test("goalRisk: without sprint dates an open goal task is not coloured", () => {
+  assert.equal(goalRisk(at("2026-08-21"), null, null, { key: "new" }), "ok");
+});
+
+const goalSprint = { id: 60509, name: "Demo - Sprint#2", state: "active", startDate: goalStart, endDate: goalEnd };
+
+test("activeSprints: the active sprints of my tasks, once each", () => {
+  const issues = [
+    { fields: { customfield_1: [{ id: 1, state: "closed" }, goalSprint] } },
+    { fields: { customfield_1: [goalSprint] } },
+    { fields: { customfield_1: null } },
+  ];
+  assert.deepEqual(activeSprints(issues, "customfield_1"), [
+    { id: 60509, name: "Demo - Sprint#2", startDate: goalStart, endDate: goalEnd },
+  ]);
+});
+
+test("goalJql: flagged issues of the sprint, whoever owns them", () => {
+  assert.equal(goalJql([60509]), "sprint = 60509 AND Flagged is not EMPTY");
+  assert.equal(goalJql([1, 2]), "sprint in (1, 2) AND Flagged is not EMPTY");
+});
+
+test("goalJql: no sprint, or an id that is not a number, gives no query", () => {
+  assert.equal(goalJql([]), null);
+  assert.equal(goalJql(["1 OR project = X"]), null);
+});
+
+const goalIssue = (key, category, extra = {}) => ({
+  key,
+  fields: {
+    summary: `${key} summary`,
+    status: { name: category === "done" ? "Done" : "In Progress", statusCategory: { key: category } },
+    assignee: { displayName: "Ada Yilmaz" },
+    customfield_1: [goalSprint],
+    ...extra,
+  },
+});
+
+test("goalBand: counts done goal tasks and takes the worst colour", () => {
+  const band = goalBand([goalIssue("DEMO-1", "done"), goalIssue("DEMO-2", "indeterminate")],
+    [goalSprint], at("2026-08-19"), "example.invalid", "customfield_1");
+  assert.equal(band.done, 1);
+  assert.equal(band.total, 2);
+  assert.equal(band.worst, "red");
+  assert.deepEqual(band.rows.map((r) => [r.key, r.risk]), [["DEMO-2", "red"], ["DEMO-1", "done"]]);
+  assert.deepEqual(band.rows[0], {
+    key: "DEMO-2", summary: "DEMO-2 summary", owner: "Ada Yilmaz", status: "In Progress",
+    risk: "red", url: "https://example.invalid/browse/DEMO-2",
+  });
+});
+
+test("goalBand: an unassigned goal task and a sprint with no goal tasks", () => {
+  const one = goalBand([goalIssue("DEMO-3", "new", { assignee: null })],
+    [goalSprint], at("2026-08-12"), "example.invalid", "customfield_1");
+  assert.equal(one.rows[0].owner, null);
+  assert.equal(one.worst, "ok");
+  const none = goalBand([], [goalSprint], at("2026-08-12"), "example.invalid", "customfield_1");
+  assert.deepEqual([none.done, none.total, none.worst, none.rows], [0, 0, "ok", []]);
+});
+
+test("withGoalMarks: my task that is also a goal task gets the GOAL mark", () => {
+  const tasks = withGoalMarks([{ key: "DEMO-1" }, { key: "DEMO-2" }], { rows: [{ key: "DEMO-2" }] });
+  assert.deepEqual(tasks.map((t) => t.goal), [false, true]);
+  assert.deepEqual(withGoalMarks([{ key: "DEMO-1" }], null).map((t) => t.goal), [false]);
+});
+
 // --demo returns before any token or keychain read, so a temporary HOME holding only a
 // config keeps the real config and keychain out of the test.
 function runDemo(cfg) {
@@ -1227,6 +1342,20 @@ test("--demo: the board shows the MERGE BLOCKED band, in its order, drafts inclu
     ["template-generator", "checking"],
   ]);
   assert.deepEqual(out.pullRequests[1].reasons, ["conflict", "draft"]);
+});
+
+test("--demo: with sprint goal tracking off there is no goal data and no GOAL mark", () => {
+  const out = runDemo({ host: "example.invalid" });
+  assert.equal(out.sprintGoal, null);
+  assert.ok(out.tasks.every((t) => !t.goal));
+});
+
+test("--demo: with sprint goal tracking on the band shows every colour and my goal task is marked", () => {
+  const out = runDemo({ host: "example.invalid", sprintGoalTracking: true });
+  assert.deepEqual(out.sprintGoal.rows.map((r) => r.risk), ["red", "yellow", "done"]);
+  assert.equal(out.sprintGoal.worst, "red");
+  assert.deepEqual([out.sprintGoal.done, out.sprintGoal.total], [1, 3]);
+  assert.deepEqual(out.tasks.filter((t) => t.goal).map((t) => t.key), ["DEMO-102"]);
 });
 
 test("--demo: with Show draft PRs off the draft leaves the band", () => {
@@ -1281,7 +1410,7 @@ const setupInputs = {
   disconnected: { githubOrg: "acme", showDraftPrs: false },
   emptyEmail: { email: "" },
   oauth: { email: "ada@example.invalid", authMode: "oauth", tokensOwnedByApp: true, githubOrg: "acme" },
-  token: { email: "ada@example.invalid", authMode: "token", tokensOwnedByApp: true, showDraftPrs: false },
+  token: { email: "ada@example.invalid", authMode: "token", tokensOwnedByApp: true, showDraftPrs: false, sprintGoalTracking: true },
   handMade: { email: "ada@example.invalid", keychainService: "sprint-board-jira" },
 };
 
@@ -1438,6 +1567,12 @@ test("setupContext: carries the board settings, with their defaults", { skip: !s
   assert.equal(contexts.oauth.showDraftPrs, true);
   assert.equal(contexts.token.githubOrg, "");
   assert.equal(contexts.token.showDraftPrs, false);
+});
+
+test("setupContext: sprint goal tracking is off unless the config turns it on", { skip: !swiftAvailable }, () => {
+  const { contexts } = swiftHelpers();
+  assert.equal(contexts.oauth.sprintGoalTracking, false);
+  assert.equal(contexts.token.sprintGoalTracking, true);
 });
 
 test("disconnectHint: Atlassian sign-in points to connected apps", { skip: !swiftAvailable }, () => {

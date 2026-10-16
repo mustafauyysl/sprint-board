@@ -84,6 +84,8 @@ permissions are read from your account. Nothing is written to a file; it goes to
   <div class="hint">Only PRs in this organization are watched. The board uses it at the next refresh.</div>
   <label class="check"><input id="drafts" type="checkbox"> SHOW DRAFT PRS</label>
   <div class="hint">Drafts appear in MERGE BLOCKED, marked "draft". They never appear in WAITING.</div>
+  <label class="check"><input id="goals" type="checkbox"> SPRINT GOAL TRACKING</label>
+  <div class="hint">Shows the flagged tasks of your sprint at the top of the board, whoever owns them.</div>
   <button id="saveSettings" class="alt">SAVE SETTINGS</button>
   <div id="saved" class="hint"></div>
 </div>
@@ -128,6 +130,7 @@ permissions are read from your account. Nothing is written to a file; it goes to
     $("back").style.display = "block";
     $("org").value = ctx.githubOrg || "";
     $("drafts").checked = ctx.showDraftPrs !== false;
+    $("goals").checked = ctx.sprintGoalTracking === true;
     $("settings").style.display = "block";
     resize();
   };
@@ -135,7 +138,7 @@ permissions are read from your account. Nothing is written to a file; it goes to
   $("saveSettings").addEventListener("click", () => {
     $("err").style.display = "none";
     $("saved").textContent = "";
-    post({ saveSettings: { githubOrg: $("org").value, showDraftPrs: $("drafts").checked } });
+    post({ saveSettings: { githubOrg: $("org").value, showDraftPrs: $("drafts").checked, sprintGoalTracking: $("goals").checked } });
   });
   $("org").addEventListener("keydown", (e) => { if (e.key === "Enter") $("saveSettings").click(); });
 
@@ -143,6 +146,7 @@ permissions are read from your account. Nothing is written to a file; it goes to
     if (res && res.saved) {
       $("org").value = res.githubOrg || "";
       $("drafts").checked = res.showDraftPrs !== false;
+      $("goals").checked = res.sprintGoalTracking === true;
       $("saved").textContent = "Saved. The board uses it at the next refresh.";
       resize();
       return;

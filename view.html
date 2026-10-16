@@ -89,6 +89,26 @@
   .row.warn .d, .row.warn .k { color:#ffb000 }
   .row.critical .d, .row.critical .k { color:#ff6b6b }
   .row.warn .d, .row.critical .d { animation:sbBlink 1.6s ease-in-out infinite }
+  .row .goal { flex:none; color:#ffd24a; font-size:9px; letter-spacing:.06em }
+
+  .goals { border:1px solid rgba(120,200,255,.35); border-radius:7px; padding:6px 9px;
+           margin-bottom:10px; background:rgba(120,200,255,.05) }
+  .goals .ghdr { color:#9fd4ff; font-size:10px; letter-spacing:.12em; font-weight:700; margin-bottom:3px }
+  .goals .grow { display:flex; gap:7px; font-size:10px; color:#cfe9ff; cursor:pointer; border-radius:3px }
+  .goals .grow:hover { background:rgba(255,255,255,.06) }
+  .goals .grow .gkey { flex:none; white-space:nowrap }
+  .goals .grow .gsum { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity:.85 }
+  .goals .grow .gown { flex:none; max-width:26%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#8fa9c9 }
+  .goals .grow .gst { flex:none; max-width:22%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#8fa9c9 }
+  .goals .gnone { font-size:10px; color:#8fa9c9 }
+  .goals .grow.done { opacity:.55; color:#7CFFAE }
+  .goals .grow.done .gkey { text-decoration:line-through }
+  .goals .grow.yellow, .goals .grow.yellow .gst { color:#ffb000 }
+  .goals .grow.red, .goals .grow.red .gst { color:#ff6b6b }
+  .goals.yellow { border-color:rgba(255,176,0,.55); background:rgba(255,176,0,.06) }
+  .goals.yellow .ghdr { color:#ffb000 }
+  .goals.red { border-color:rgba(255,59,59,.6); background:rgba(255,59,59,.07) }
+  .goals.red .ghdr { color:#ff6b6b; animation:sbBlink 1.6s ease-in-out infinite }
 
   .band { margin-top:9px; border-top:1px dashed rgba(255,59,59,.4); padding-top:6px }
 
@@ -205,6 +225,22 @@
         </div>`).join("")}
     </div>` : "";
 
+  // The flagged tasks of the sprint, whoever owns them. null = the setting is off.
+  const GOAL_MARK = { done: "✓", red: "✗", yellow: "!", ok: "·" };
+  const goalBand = (g) => g ? `
+    <div class="goals ${esc(g.worst)}">
+      <div class="ghdr">🎯 SPRINT GOAL (${g.done}/${g.total})</div>
+      ${g.error ? `<div class="gnone">Could not read the goal tasks: ${esc(g.error)}</div>`
+        : g.rows.length ? g.rows.map((r) => `
+        <div class="grow ${esc(r.risk)}" data-url="${esc(r.url)}" title="${esc(r.summary)}">
+          <span class="gkey">${GOAL_MARK[r.risk] || "·"} ${esc(r.key)}</span>
+          <span class="gsum">${esc(r.summary)}</span>
+          <span class="gown">${esc(r.owner || "unassigned")}</span>
+          <span class="gst">${esc(r.status)}</span>
+        </div>`).join("")
+        : `<div class="gnone">No goal tasks in this sprint.</div>`}
+    </div>` : "";
+
   // Work left behind in a past sprint that never shipped. It is absent from the
   // main list — once a sprint closes the main query stops returning it.
   const relBand = (rows) => rows.length ? `
@@ -276,6 +312,8 @@
         Showing data as of ${hhmm(staleNote.at)}. It will retry shortly; press ⟳
         if you would rather not wait.</div>` : ""}
 
+      ${goalBand(d.sprintGoal)}
+
       <div class="siege">
         <span>${bar(d.total ? d.cleared / d.total : 0, 12)} ${d.cleared}/${d.total} cleared</span>
         <span class="legend">status/age</span>
@@ -296,6 +334,7 @@
              title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (threshold ${t.threshold}d) · age ${t.ageDays}d">
           <span class="k">${icon(t)} ${esc(t.key)}</span>
           <span class="s">${esc(clip(t.status, 14))}</span>
+          ${t.goal ? `<span class="goal">🎯 GOAL</span>` : ""}
           <span class="qa">${t.qaShort ? "🧪" + esc(t.qaShort) : ""}</span>
           <span class="carry">${t.carriedOver ? "×" + t.sprintCount : ""}</span>
           <span class="pr ${t.pr ? prClass(t.pr.state) : ""}">${t.pr ? "⚙" + t.pr.count + prMark(t.pr.state) : ""}</span>

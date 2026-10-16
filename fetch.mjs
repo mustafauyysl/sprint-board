@@ -13,7 +13,7 @@ import {
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
   updateInfo, jiraRequest, ownershipStartedAt,
   mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, reviewIds, conflictIds, newConflicts, conflictNotifications, refreshSummary,
-  showDraftPrs,
+  showDraftPrs, sprintGoalTracking, activeSprints, goalJql, goalBand, withGoalMarks,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -416,6 +416,25 @@ function playAlert(cfg, alerts) {
   }
 }
 
+/**
+ * The SPRINT GOAL band: the flagged issues of my active sprints, whoever owns them. Off
+ * (null, and no Jira call) unless the setting is on. A failed search is said in the band,
+ * never shown as "no goal tasks".
+ */
+async function fetchSprintGoal(cfg, auth, issues, sprintField, now) {
+  if (!sprintGoalTracking(cfg)) return null;
+  const sprints = activeSprints(issues, sprintField);
+  const jql = goalJql(sprints.map((s) => s.id));
+  if (!jql) return goalBand([], sprints, now, cfg.host, sprintField);
+  try {
+    const goalIssues = await searchIssues(cfg, auth, jql, `summary,status,assignee,${sprintField}`);
+    return goalBand(goalIssues, sprints, now, cfg.host, sprintField);
+  } catch (err) {
+    return { done: 0, total: 0, worst: "ok", rows: [],
+      error: String(err && err.message ? err.message : err).slice(0, 200) };
+  }
+}
+
 function activeSprint(issues, sprintField) {
   for (const issue of issues) {
     const raw = issue.fields?.[sprintField];
@@ -478,8 +497,25 @@ function demoPayload(cfg) {
 
   const boss = pickBoss(tasks);
 
+  // Two sprints so every colour shows: one ends tomorrow (red), one is in its second week
+  // (yellow). Dates are relative to now, so the colours never age out of the demo.
+  const daysFromNow = (n) => new Date(now.getTime() + n * 86400000).toISOString();
+  const endingSprint = { id: 9001, name: "Demo Team - Sprint#3", state: "active", startDate: daysFromNow(-12), endDate: daysFromNow(1) };
+  const runningSprint = { id: 9002, name: "Demo Team - Sprint#4", state: "active", startDate: daysFromNow(-9), endDate: daysFromNow(20) };
+  const goalIssue = (key, summary, status, category, owner, sprint) => ({
+    key, fields: { summary, status: { name: status, statusCategory: { key: category } }, assignee: { displayName: owner }, sprint: [sprint] },
+  });
+  const sprintGoal = sprintGoalTracking(cfg)
+    ? goalBand([
+        goalIssue("DEMO-111", "Checkout flow audit", "Done", "done", "Ada Yilmaz", runningSprint),
+        goalIssue("DEMO-102", "Clean up duplicate registration ids", "In Code Review", "indeterminate", "Demo User", runningSprint),
+        goalIssue("DEMO-110", "Payment retry window", "In Progress", "indeterminate", "Deniz Kaya", endingSprint),
+      ], activeSprints([{ fields: { sprint: [endingSprint, runningSprint] } }], "sprint"), now, cfg.host, "sprint")
+    : null;
+
   return {
     ok: true, demo: true, generatedAt: now.toISOString(), apiCalls: 0,
+    sprintGoal,
     sprint: { name: "Demo Team - Sprint#4", endDate: null, daysLeft: 2 },
     cleared: 1, total: tasks.length,
     boss: boss && {
@@ -503,8 +539,8 @@ function demoPayload(cfg) {
     brokenPrs: demoBroken,
     waitingPrs: demoWaiting,
     pullRequests: mergeBlocked(demoPrs, showDraftPrs(cfg)),
-    tasks: [...tasks].sort((a, b) =>
-      a.done !== b.done ? (a.done ? 1 : -1) : b.ratio - a.ratio || b.daysInStatus - a.daysInStatus),
+    tasks: withGoalMarks([...tasks].sort((a, b) =>
+      a.done !== b.done ? (a.done ? 1 : -1) : b.ratio - a.ratio || b.daysInStatus - a.daysInStatus), sprintGoal),
   };
 }
 
@@ -666,10 +702,11 @@ async function main() {
   // Closed items are NOT dropped from the list, only sorted to the end: statuses
   // like "Awaiting Release" sit in Jira's done category while the work may not have
   // shipped yet — it must not disappear from view.
-  const visible = [...tasks].sort((a, b) => {
+  const sprintGoal = await fetchSprintGoal(cfg, jiraAuth, issues, sprintField, now);
+  const visible = withGoalMarks([...tasks].sort((a, b) => {
     if (a.done !== b.done) return a.done ? 1 : -1;
     return b.ratio - a.ratio || b.daysInStatus - a.daysInStatus;
-  });
+  }), sprintGoal);
 
   // The version is only embedded in a distribution build; without it we skip the
   // release query entirely — no wasted request and no noisy warning while developing.
@@ -699,6 +736,7 @@ async function main() {
         }
       : null,
     tasks: visible,
+    sprintGoal,
     prsAvailable: prs !== null,
     githubOrgError,
     pendingRelease: (await pendingReleaseP) || [],

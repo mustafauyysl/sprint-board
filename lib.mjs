@@ -584,6 +584,89 @@ export function searchNodes(response) {
 export const prSearch = (qualifier) => `${qualifier}author:@me is:pr is:open`;
 export const reviewSearch = (qualifier) => `${qualifier}is:open is:pr review-requested:@me`;
 
+// --- Sprint goal ----------------------------------------------------------
+// The goal tasks of a sprint are its flagged issues. One that does not reach release in the
+// sprint fails the sprint goal, so the band warns from the second week on.
+
+/** The "Sprint goal tracking" setting. A missing key means off: no extra Jira call. */
+export function sprintGoalTracking(config) {
+  return config?.sprintGoalTracking === true;
+}
+
+/** The active sprints of my tasks, once each. */
+export function activeSprints(issues, sprintField) {
+  const byId = new Map();
+  for (const issue of issues || []) {
+    const raw = issue?.fields?.[sprintField];
+    for (const s of Array.isArray(raw) ? raw : []) {
+      if (s && s.state === "active" && !byId.has(s.id)) {
+        byId.set(s.id, { id: s.id, name: s.name, startDate: s.startDate ?? null, endDate: s.endDate ?? null });
+      }
+    }
+  }
+  return [...byId.values()];
+}
+
+/** JQL for the goal tasks of these sprints, whoever owns them; null when there is none to ask. */
+export function goalJql(sprintIds) {
+  const ids = sprintIds || [];
+  if (ids.length === 0 || !ids.every((id) => Number.isInteger(id))) return null;
+  const sprint = ids.length === 1 ? `sprint = ${ids[0]}` : `sprint in (${ids.join(", ")})`;
+  return `${sprint} AND Flagged is not EMPTY`;
+}
+
+/** Reached release = the green status category, whatever the status is called. */
+export function isGoalDone(statusCategory) {
+  return statusCategory?.key === "done";
+}
+
+const GOAL_RED_BUSINESS_DAYS = 3;
+const GOAL_YELLOW_FROM_DAY = 8;
+
+/**
+ * The colour of one goal task: "done" once released; for an open one "red" in the last
+ * three business days before the sprint end (and after it), "yellow" from day 8 of the
+ * sprint, otherwise "ok". Day 1 is the start day.
+ */
+export function goalRisk(now, start, end, statusCategory) {
+  if (isGoalDone(statusCategory)) return "done";
+  if (!start || !end) return "ok";
+  if (businessDaysBetween(now, end) <= GOAL_RED_BUSINESS_DAYS) return "red";
+  if (dayIndex(now) - dayIndex(start) + 1 >= GOAL_YELLOW_FROM_DAY) return "yellow";
+  return "ok";
+}
+
+const RISK_ORDER = { red: 0, yellow: 1, ok: 2, done: 3 };
+
+/** The SPRINT GOAL band: done/total, the worst colour, and one row per goal task. */
+export function goalBand(issues, sprints, now, host, sprintField) {
+  const known = new Map((sprints || []).map((s) => [s.id, s]));
+  const rows = (issues || []).map((issue, i) => {
+    const f = issue.fields || {};
+    const own = (Array.isArray(f[sprintField]) ? f[sprintField] : []).find((s) => s && known.has(s.id));
+    const sprint = own ? known.get(own.id) : (sprints || [])[0] || {};
+    return {
+      row: {
+        key: issue.key,
+        summary: f.summary ?? "",
+        owner: f.assignee?.displayName ?? null,
+        status: f.status?.name ?? "",
+        risk: goalRisk(now, sprint.startDate, sprint.endDate, f.status?.statusCategory),
+        url: `https://${host}/browse/${issue.key}`,
+      },
+      i,
+    };
+  }).sort((a, b) => RISK_ORDER[a.row.risk] - RISK_ORDER[b.row.risk] || a.i - b.i).map(({ row }) => row);
+  const worst = rows.length && rows[0].risk !== "done" ? rows[0].risk : "ok";
+  return { done: rows.filter((r) => r.risk === "done").length, total: rows.length, worst, rows };
+}
+
+/** My tasks, each marked when it is also a goal task of the sprint. */
+export function withGoalMarks(tasks, band) {
+  const keys = new Set((band?.rows || []).map((r) => r.key));
+  return (tasks || []).map((t) => ({ ...t, goal: keys.has(t.key) }));
+}
+
 // --- Executable lookup --------------------------------------------------
 // A GUI app launched from Finder does NOT see the shell PATH (it is limited to
 // /usr/bin:/bin), so we cannot assume node/gh are "on PATH". Homebrew installs

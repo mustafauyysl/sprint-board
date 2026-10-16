@@ -120,6 +120,13 @@ costs.
   means all PRs. Only a valid GitHub organization name is saved, and the board uses it
   at the next refresh. An invalid name typed into the config by hand turns the PR
   bands off with a message; it never widens the search to all PRs
+- **🎯 SPRINT GOAL** (off by default; turn on **Sprint goal tracking** under ⚙) sits at
+  the top of the board. It lists the flagged tasks of your active sprint, whoever owns
+  them, with done/total. A task counts as done when its status category is done. From
+  day 8 of the sprint an open goal task is yellow; in the last 3 business days before
+  the sprint end it is red. The header takes the worst colour. Your own tasks that are
+  also goal tasks carry a "🎯 GOAL" mark. The warning is on the board only; there is no
+  notification. With the setting off the app makes no extra Jira call
 - Refresh runs every 30 minutes and takes ~13 s
 - **⛔ MERGE BLOCKED** lists the PRs that cannot be merged, each with its reasons:
   conflicts first, then failing required checks, then changes requested. A PR whose
