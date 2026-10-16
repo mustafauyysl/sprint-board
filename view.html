@@ -123,7 +123,6 @@
   .band.prs { border-top-color:rgba(200,200,200,.3) }
   .band.prs .bhdr { color:#c8c8c8 } .band.prs .brow { color:#b8c4b8 }
   .band.prs .brow .bchecks { color:#7c8c7c }
-  .band.prs .brow.ok .bchecks { color:#7CFFAE }
   .band.prs .brow.bad, .band.prs .brow.bad .bchecks { color:#ff6b6b }
 
   .notes { margin-top:9px; padding-top:7px; border-top:1px solid rgba(57,255,20,.18) }
@@ -195,14 +194,14 @@
         </div>`).join("")}
     </div>` : "";
 
-  // Every open PR with its conflict state, so a clean PR reads as clean.
+  // Every PR that cannot be merged, with its reasons; a PR GitHub has not settled reads "checking".
   const prBand = (rows) => rows.length ? `
     <div class="band prs">
-      <div class="bhdr">🔀 CONFLICT WATCHER (${rows.length})</div>
+      <div class="bhdr">⛔ MERGE BLOCKED (${rows.length})</div>
       ${rows.map((p) => `
-        <div class="brow ${p.conflict ? "bad" : p.checked ? "ok" : ""}" data-url="${esc(p.url)}" title="${esc(p.title)}">
-          <span class="brepo">${p.conflict ? "✗" : p.checked ? "✓" : "·"} ${esc(p.repo)}#${p.number}</span>
-          <span class="bchecks">${p.conflict ? "conflict" : p.checked ? "no conflict" : "checking…"}${p.draft ? " · draft" : ""}</span>
+        <div class="brow ${p.kind === "checking" ? "" : "bad"}" data-url="${esc(p.url)}" title="${esc(p.title)}">
+          <span class="brepo">${p.kind === "checking" ? "·" : "✗"} ${esc(p.repo)}#${p.number}</span>
+          <span class="bchecks">${esc((p.reasons || []).join(" · "))}</span>
         </div>`).join("")}
     </div>` : "";
 
@@ -264,7 +263,7 @@
       return;
     }
     const { sprint = {}, boss, tasks = [] } = d;
-    const broken = d.brokenPrs || [], waiting = d.waitingPrs || [], reviews = d.reviewRequests || [];
+    const waiting = d.waitingPrs || [], reviews = d.reviewRequests || [];
 
     card.innerHTML = `
       <div class="hdr">
@@ -307,7 +306,6 @@
       ${relBand(d.pendingRelease || [])}
 
       ${band("waiting", "⏳ WAITING", waiting, "●")}
-      ${band("", "⚠ CI WATCHER", broken, "✗")}
       ${band("review", "👀 AWAITING YOUR REVIEW", reviews, "·")}
       ${prBand(d.pullRequests || [])}
 

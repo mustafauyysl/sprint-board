@@ -116,9 +116,12 @@ costs.
   ⚔ → Bring widget to front brings it back), minimise it to the Dock, or make it fill
   the screen with larger text
 - Refresh runs every 30 minutes and takes ~13 s
-- **🔀 CONFLICT WATCHER** lists every open PR with its merge state. A PR that starts
-  conflicting sends a macOS notification (click opens the PR); a refresh you trigger
-  (Refresh now or ⟳) always reports its result: "No conflicts, no CI errors" or which
+- **⛔ MERGE BLOCKED** lists the PRs that cannot be merged, each with its reasons:
+  conflicts first, then failing required checks, then changes requested. A PR whose
+  merge state GitHub has not settled shows as "checking". Only PRs with a Jira key in
+  the title count, and drafts do not. A PR in this band that starts conflicting sends
+  a macOS notification (click opens the PR); a refresh you trigger (Refresh now or ⟳)
+  always reports its result for the same PRs: "No conflicts, no CI errors" or which
   PRs have a conflict or a failing required check
 
 `view.html` / `fetch.mjs` / `lib.mjs` are read at runtime → after editing them **no

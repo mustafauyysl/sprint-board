@@ -28,7 +28,8 @@ import {
   sprintHistory,
   ownershipStartedAt,
   emptyState,
-  prList,
+  watchedPrs,
+  mergeBlocked,
   conflictIds,
   newConflicts,
   conflictNotifications,
@@ -861,30 +862,101 @@ const demoPr = (number, extra = {}) => ({
   title: `DEMO-${number} | demo change`, isDraft: false, mergeable: "MERGEABLE", ciState: "SUCCESS", ...extra,
 });
 
-test("prList: conflicts first, then still-checking, then clean; input order kept within a group", () => {
-  const rows = prList([
-    demoPr(1),
-    demoPr(2, { mergeable: "UNKNOWN" }),
-    demoPr(3, { mergeable: "CONFLICTING" }),
-    demoPr(4),
+test("mergeBlocked: conflicts, then failing required checks, then changes requested, then checking", () => {
+  const rows = mergeBlocked([
+    demoPr(1, { mergeable: "UNKNOWN" }),
+    demoPr(2, { reviewDecision: "CHANGES_REQUESTED" }),
+    demoPr(3, { ciState: "FAILURE", failingRequired: ["Lint"] }),
+    demoPr(4, { mergeable: "CONFLICTING" }),
+    demoPr(5, { ciState: "ERROR", failingRequired: ["Build"] }),
   ]);
-  assert.deepEqual(rows.map((r) => r.number), [3, 2, 1, 4]);
-  assert.deepEqual(rows.map((r) => [r.conflict, r.checked]), [[true, true], [false, false], [false, true], [false, true]]);
+  assert.deepEqual(rows.map((r) => r.number), [4, 3, 5, 2, 1]);
+  assert.deepEqual(rows.map((r) => r.kind), ["conflict", "ci", "ci", "changes", "checking"]);
 });
 
-test("prList: an unsettled mergeable state is never shown as clean", () => {
-  const [row] = prList([demoPr(5, { mergeable: null })]);
-  assert.equal(row.conflict, false);
-  assert.equal(row.checked, false);
+test("mergeBlocked: each row names its reason", () => {
+  const rows = mergeBlocked([
+    demoPr(1, { mergeable: "CONFLICTING" }),
+    demoPr(2, { ciState: "FAILURE", failingRequired: ["Lint", "Build"] }),
+    demoPr(3, { reviewDecision: "CHANGES_REQUESTED" }),
+    demoPr(4, { mergeable: null }),
+  ]);
+  assert.deepEqual(rows.map((r) => r.reasons), [["conflict"], ["CI: Lint, Build"], ["changes requested"], ["checking"]]);
 });
 
-test("prList: drafts are listed and marked", () => {
-  const [row] = prList([demoPr(6, { isDraft: true })]);
-  assert.equal(row.draft, true);
+test("mergeBlocked: a PR with several blockers lists all of them", () => {
+  const [row] = mergeBlocked([demoPr(1, {
+    mergeable: "CONFLICTING", ciState: "FAILURE", failingRequired: ["Lint"], reviewDecision: "CHANGES_REQUESTED",
+  })]);
+  assert.equal(row.kind, "conflict");
+  assert.deepEqual(row.reasons, ["conflict", "CI: Lint", "changes requested"]);
 });
 
-test("prList: no PR data gives an empty list", () => {
-  assert.deepEqual(prList(null), []);
+test("mergeBlocked: a blocked PR whose merge state is unsettled stays in its group and says so", () => {
+  const rows = mergeBlocked([
+    demoPr(1, { mergeable: "UNKNOWN" }),
+    demoPr(2, { mergeable: "UNKNOWN", ciState: "FAILURE", failingRequired: ["Lint"] }),
+  ]);
+  assert.deepEqual(rows.map((r) => [r.number, r.kind]), [[2, "ci"], [1, "checking"]]);
+  assert.deepEqual(rows[0].reasons, ["CI: Lint", "merge checking"]);
+});
+
+test("mergeBlocked: a clean PR is not shown, nor is pending CI or a review that is only required", () => {
+  assert.deepEqual(mergeBlocked([
+    demoPr(1),
+    demoPr(2, { ciState: "PENDING", pendingRequired: ["Lint"] }),
+    demoPr(3, { reviewDecision: "REVIEW_REQUIRED" }),
+  ]), []);
+});
+
+test("mergeBlocked: drafts and PRs without a Jira key are left out", () => {
+  assert.deepEqual(mergeBlocked([
+    demoPr(1, { mergeable: "CONFLICTING", isDraft: true }),
+    demoPr(2, { mergeable: "CONFLICTING", title: "no key here" }),
+  ]), []);
+});
+
+test("mergeBlocked: a row carries what the band needs", () => {
+  const [row] = mergeBlocked([demoPr(7, { mergeable: "CONFLICTING" })]);
+  assert.deepEqual(row, {
+    key: "DEMO-7", repo: "demo-repo", number: 7, url: "https://example.invalid/demo-repo/pull/7",
+    title: "DEMO-7 | demo change", kind: "conflict", reasons: ["conflict"],
+  });
+});
+
+test("mergeBlocked: no PR data gives an empty list", () => {
+  assert.deepEqual(mergeBlocked(null), []);
+});
+
+test("watchedPrs: the summarizePrs filter — a Jira key in the title, no drafts", () => {
+  const prs = [demoPr(1), demoPr(2, { isDraft: true }), demoPr(3, { title: "no key" }), null];
+  assert.deepEqual(watchedPrs(prs).map((p) => p.number), [1]);
+  assert.deepEqual(watchedPrs(null), []);
+});
+
+test("newConflicts: a conflicting PR the band does not show does not notify", () => {
+  const prev = { initialized: true, conflictIds: [] };
+  const prs = [
+    demoPr(1, { mergeable: "CONFLICTING", isDraft: true }),
+    demoPr(2, { mergeable: "CONFLICTING", title: "no key" }),
+    demoPr(3, { mergeable: "CONFLICTING" }),
+  ];
+  assert.deepEqual(newConflicts(prev, prs).map((p) => p.number), [3]);
+});
+
+test("conflictIds: only the conflicts the band shows are remembered", () => {
+  const prs = [demoPr(1, { mergeable: "CONFLICTING", isDraft: true }), demoPr(2, { mergeable: "CONFLICTING" })];
+  assert.deepEqual(conflictIds(prs), ["demo-repo#2"]);
+});
+
+test("refreshSummary: counts only the PRs the band covers", () => {
+  const s = refreshSummary([
+    demoPr(1, { mergeable: "CONFLICTING", title: "no key" }),
+    demoPr(2, { mergeable: "UNKNOWN", isDraft: true }),
+    demoPr(3),
+  ]);
+  assert.equal(s.title, "No conflicts, no CI errors");
+  assert.equal(s.body, "1 open PRs checked");
 });
 
 test("conflictIds: only CONFLICTING PRs", () => {

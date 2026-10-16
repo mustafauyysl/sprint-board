@@ -12,7 +12,7 @@ import {
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
   updateInfo, jiraRequest, ownershipStartedAt,
-  prList, conflictIds, newConflicts, conflictNotifications, refreshSummary,
+  mergeBlocked, conflictIds, newConflicts, conflictNotifications, refreshSummary,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -700,7 +700,7 @@ async function main() {
     requiredError,
     brokenPrs,
     waitingPrs,
-    pullRequests: prList(prs),
+    pullRequests: mergeBlocked(prs),
     notify,
     summary: refreshSummary(prs, requiredError),
     update,

@@ -419,26 +419,47 @@ const isConflict = (pr) => pr?.mergeable === "CONFLICTING";
 // Same rule as prBlockers: a draft is not ready, so its CI does not count.
 const isCiBroken = (pr) => !pr?.isDraft && (pr?.ciState === "FAILURE" || pr?.ciState === "ERROR");
 
+const isUnsettled = (pr) => !isConflict(pr) && pr?.mergeable !== "MERGEABLE";
+const isChangesRequested = (pr) => pr?.reviewDecision === "CHANGES_REQUESTED";
+
 /**
- * Every open PR for the PULL REQUESTS band, conflicts first. A mergeable state
- * GitHub has not settled yet ("UNKNOWN" or missing) is shown as still being
- * checked — never as clean.
+ * The PRs the MERGE BLOCKED band covers, with the same filter as summarizePrs: a Jira key
+ * in the title and not a draft. Conflict notifications and the refresh summary use this
+ * set too, so a PR the band does not show never notifies.
  */
-export function prList(prs) {
-  const rank = (pr) => (isConflict(pr) ? 0 : pr.mergeable === "MERGEABLE" ? 2 : 1);
-  return (prs || [])
-    .filter((pr) => pr && pr.number)
-    .map((pr, i) => ({ pr, i }))
-    .sort((a, b) => rank(a.pr) - rank(b.pr) || a.i - b.i)
-    .map(({ pr }) => ({
-      repo: pr.repo,
-      number: pr.number,
-      url: pr.url,
-      title: pr.title || "",
-      draft: !!pr.isDraft,
-      conflict: isConflict(pr),
-      checked: isConflict(pr) || pr.mergeable === "MERGEABLE",
-    }));
+export function watchedPrs(prs) {
+  return (prs || []).filter((pr) => pr && pr.number && extractIssueKey(pr.title) && !pr.isDraft);
+}
+
+const BLOCK_ORDER = { conflict: 0, ci: 1, changes: 2, checking: 3 };
+
+/**
+ * The MERGE BLOCKED band: conflicts, then failing required checks, then changes requested,
+ * then PRs whose merge state GitHub has not settled. Each row names every reason it has;
+ * a blocked PR that is also unsettled stays in its blocker group.
+ */
+export function mergeBlocked(prs) {
+  const rows = [];
+  watchedPrs(prs).forEach((pr, i) => {
+    const reasons = [];
+    if (isConflict(pr)) reasons.push("conflict");
+    if (isCiBroken(pr)) reasons.push(`CI: ${(pr.failingRequired || []).join(", ") || "?"}`);
+    if (isChangesRequested(pr)) reasons.push("changes requested");
+    const kind = isConflict(pr) ? "conflict" : isCiBroken(pr) ? "ci"
+      : isChangesRequested(pr) ? "changes" : isUnsettled(pr) ? "checking" : null;
+    if (!kind) return;
+    if (isUnsettled(pr)) reasons.push(kind === "checking" ? "checking" : "merge checking");
+    rows.push({
+      row: {
+        key: extractIssueKey(pr.title), repo: pr.repo, number: pr.number, url: pr.url,
+        title: pr.title, kind, reasons,
+      },
+      i,
+    });
+  });
+  return rows
+    .sort((a, b) => BLOCK_ORDER[a.row.kind] - BLOCK_ORDER[b.row.kind] || a.i - b.i)
+    .map(({ row }) => row);
 }
 
 /**
@@ -447,9 +468,9 @@ export function prList(prs) {
  * the same conflict notify again once GitHub settles it.
  */
 export function conflictIds(prs, previous = []) {
-  const now = (prs || []).filter(isConflict).map(prId);
-  const unsettled = new Set((prs || [])
-    .filter((pr) => !isConflict(pr) && pr.mergeable !== "MERGEABLE").map(prId));
+  const watched = watchedPrs(prs);
+  const now = watched.filter(isConflict).map(prId);
+  const unsettled = new Set(watched.filter(isUnsettled).map(prId));
   const kept = (Array.isArray(previous) ? previous : []).filter((id) => unsettled.has(id));
   return [...new Set([...now, ...kept])];
 }
@@ -462,7 +483,7 @@ export function conflictIds(prs, previous = []) {
 export function newConflicts(prev, prs) {
   if (!prev || prev.initialized !== true || !Array.isArray(prev.conflictIds)) return [];
   const known = new Set(prev.conflictIds);
-  return (prs || []).filter((pr) => isConflict(pr) && !known.has(prId(pr)));
+  return watchedPrs(prs).filter((pr) => isConflict(pr) && !known.has(prId(pr)));
 }
 
 /** One macOS notification per new conflict; clicking it opens the PR. */
@@ -480,14 +501,15 @@ export function conflictNotifications(prs) {
  * more than was checked: a failed required-checks query (`ciError`) or a PR GitHub is
  * still computing is said out loud instead of being reported as clean.
  */
-export function refreshSummary(prs, ciError = null) {
-  if (!Array.isArray(prs)) {
+export function refreshSummary(all, ciError = null) {
+  if (!Array.isArray(all)) {
     return { id: "refresh", title: "PRs not checked", body: "GitHub could not be reached", url: null };
   }
+  const prs = watchedPrs(all);
   const count = (n, word) => `${n} ${word}${n > 1 ? "s" : ""}`;
   const conflicts = prs.filter(isConflict);
   const ciBroken = ciError ? [] : prs.filter(isCiBroken);
-  const unsettled = prs.filter((pr) => !isConflict(pr) && pr.mergeable !== "MERGEABLE").length;
+  const unsettled = prs.filter(isUnsettled).length;
   const caveats = [];
   if (ciError) caveats.push("CI not checked");
   if (unsettled) caveats.push(`${unsettled} still checking`);
