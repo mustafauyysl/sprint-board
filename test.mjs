@@ -1211,6 +1211,8 @@ ${swiftSource(src, "jiraCloudHost")}
 ${swiftSource(src, "appWrittenTokenService")}
 ${swiftSource(src, "githubOrgName")}
 ${swiftSource(src, "resultNotifications")}
+${swiftSource(src, "dockChoice")}
+${swiftSource(src, "toggledDockChoice")}
 let input = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String: Any]
 let hosts: [Any] = (input["hosts"] as! [String]).map { h in jiraCloudHost(h).map { $0 as Any } ?? NSNull() }
 let configs = input["configs"] as! [String: [String: Any]]
@@ -1222,7 +1224,11 @@ for (key, r) in input["results"] as! [String: [String: Any]] {
   notes[key] = resultNotifications(r["obj"] as? [String: Any], ok: r["ok"] as! Bool,
                                    manual: r["manual"] as! Bool, onSetupScreen: r["onSetupScreen"] as! Bool)
 }
-FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services, "orgs": orgs, "notes": notes]))
+let dock: [String: Bool] = [
+  "unset": dockChoice(nil), "storedTrue": dockChoice(true), "storedFalse": dockChoice(false),
+  "toggledFromUnset": toggledDockChoice(nil), "toggledFromTrue": toggledDockChoice(true),
+]
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services, "orgs": orgs, "notes": notes, "dock": dock]))
 `;
   const dir = mkdtempSync(join(tmpdir(), "sprint-board-swift-"));
   try {
@@ -1236,6 +1242,7 @@ FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["ho
       service: out.services,
       org: Object.fromEntries(orgInputs.map((o, i) => [o, out.orgs[i]])),
       notes: out.notes,
+      dock: out.dock,
     };
     return swiftCache;
   } finally {
@@ -1314,6 +1321,19 @@ test("resultNotifications: an automatic refresh sends only the new conflicts", {
 test("resultNotifications: a refresh the user asked for also reports its summary", { skip: !swiftAvailable }, () => {
   assert.deepEqual(swiftHelpers().notes.boardManual,
     [conflictNote, { id: "refresh", title: "1 conflict", body: "demo-repo#7" }]);
+});
+
+test("dockChoice: with no stored choice the app is not in the Dock", { skip: !swiftAvailable }, () => {
+  const { dock } = swiftHelpers();
+  assert.equal(dock.unset, false);
+  assert.equal(dock.storedFalse, false);
+  assert.equal(dock.storedTrue, true);
+});
+
+test("toggledDockChoice: Show in Dock turns it on, a second click turns it off", { skip: !swiftAvailable }, () => {
+  const { dock } = swiftHelpers();
+  assert.equal(dock.toggledFromUnset, true);
+  assert.equal(dock.toggledFromTrue, false);
 });
 
 test("resultNotifications: a failed refresh the user asked for says so", { skip: !swiftAvailable }, () => {

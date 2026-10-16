@@ -189,7 +189,18 @@ let OAUTH_SCOPES = "read:jira-work read:jira-user read:me offline_access"
 /// The refresh token lives here. The access token is kept in memory — it lasts an
 /// hour, so writing it to disk is pointless.
 let JIRA_OAUTH_KEYCHAIN = "sprint-board-jira-oauth"
-let HIDE_IN_DOCK_KEY = "hideInDock"
+let SHOW_IN_DOCK_KEY = "showInDock"
+
+/// Whether the app shows in the Dock (and so in Cmd+Tab). A desktop widget stays out of
+/// both unless the user opts in from the menu bar; LSUIElement in Info.plist says the same.
+func dockChoice(_ stored: Any?) -> Bool {
+    (stored as? Bool) ?? false
+}
+
+/// The choice after one click on "Show in Dock".
+func toggledDockChoice(_ stored: Any?) -> Bool {
+    !dockChoice(stored)
+}
 /// An API token entered on the setup screen. A separate service from JIRA_KEYCHAIN so it
 /// never collides with an entry made by hand with `security`, which this app cannot
 /// read without a permission dialog.
@@ -482,7 +493,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         let mRefresh = NSMenuItem(title: "Refresh now", action: #selector(menuRefresh), keyEquivalent: "r")
         let mFront = NSMenuItem(title: "Bring widget to front", action: #selector(menuFront), keyEquivalent: "")
         let mSetup = NSMenuItem(title: "Settings…", action: #selector(menuSetup), keyEquivalent: "")
-        dockItem = NSMenuItem(title: dockItemTitle(), action: #selector(toggleDock), keyEquivalent: "")
+        dockItem = NSMenuItem(title: "Show in Dock", action: #selector(toggleDock), keyEquivalent: "")
+        dockItem?.state = dockChoice(UserDefaults.standard.object(forKey: SHOW_IN_DOCK_KEY)) ? .on : .off
         for m in [mRefresh, mFront, mSetup, dockItem!] { m.target = self; menu.addItem(m) }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Sprint Board", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -538,21 +550,18 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func dockItemTitle() -> String {
-        UserDefaults.standard.bool(forKey: HIDE_IN_DOCK_KEY) ? "Show in Dock" : "Hide in Dock"
-    }
-
     /// Without a Dock icon the app also leaves Cmd+Tab (macOS ties the two together);
     /// the menu bar item stays the way back.
     @objc func toggleDock() {
-        let hide = !UserDefaults.standard.bool(forKey: HIDE_IN_DOCK_KEY)
-        UserDefaults.standard.set(hide, forKey: HIDE_IN_DOCK_KEY)
-        NSApp.setActivationPolicy(hide ? .accessory : .regular)
-        dockItem?.title = dockItemTitle()
-        if !hide { NSApp.activate(ignoringOtherApps: true) }
+        let show = toggledDockChoice(UserDefaults.standard.object(forKey: SHOW_IN_DOCK_KEY))
+        UserDefaults.standard.set(show, forKey: SHOW_IN_DOCK_KEY)
+        NSApp.setActivationPolicy(show ? .regular : .accessory)
+        dockItem?.state = show ? .on : .off
+        if show { NSApp.activate(ignoringOtherApps: true) }
     }
 
-    /// Cmd+Tab back to the app shows the widget even after its close button hid it.
+    /// Cmd+Tab back to the app (only when it shows in the Dock) brings the widget back even
+    /// after its close button hid it.
     func applicationDidBecomeActive(_ note: Notification) {
         if window != nil, !window.isVisible, !window.isMiniaturized { window.orderFront(nil) }
     }
@@ -1243,7 +1252,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 let app = NSApplication.shared
 let delegate = App()
 app.delegate = delegate
-// A regular app unless the user chose "Hide in Dock": Cmd+Tab only lists apps that have a
+// Out of the Dock unless the user chose "Show in Dock": Cmd+Tab only lists apps that have a
 // Dock icon, and the two come together.
-app.setActivationPolicy(UserDefaults.standard.bool(forKey: HIDE_IN_DOCK_KEY) ? .accessory : .regular)
+app.setActivationPolicy(dockChoice(UserDefaults.standard.object(forKey: SHOW_IN_DOCK_KEY)) ? .regular : .accessory)
 app.run()
