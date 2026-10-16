@@ -111,11 +111,11 @@ costs.
 - **⚔** in the menu bar → refresh / bring to front / settings / show in Dock / quit
 - The app is not in the Dock or Cmd+Tab (macOS ties the two together). **⚔ → Show in
   Dock** adds both; click it again to remove them. The choice is remembered across launches
-- Drag by the card's **top strip**; the **⟳** on that same strip refreshes. The three
-  dots on the strip close the widget (the app keeps running; ⚔ → Bring widget to front
+- Drag by the card's **top strip**. The three dots on the strip close the widget (the app keeps running; ⚔ → Bring widget to front
   brings it back, as do the Dock icon and Cmd+Tab when it is in the Dock), minimise it,
   or make it fill the screen with larger text
-- The **⚙** next to ⟳ opens the settings screen. **GitHub organization** limits the PR
+- Under the strip, on the right of the "cleared" line, **⟳** refreshes and **⚙** opens the
+  settings screen. **GitHub organization** limits the PR
   searches (your PRs and the reviews you are asked for) to one organization; empty
   means all PRs. Only a valid GitHub organization name is saved, and the board uses it
   at the next refresh. An invalid name typed into the config by hand turns the PR

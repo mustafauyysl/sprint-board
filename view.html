@@ -42,18 +42,18 @@
   .hdr .tl:hover { filter:brightness(1.25) }
   body.filled #card { min-height:calc(100vh - 2px) }
   .hdr .right { color:#9bffb0; font-size:10px; opacity:.85 }
-  .hdr .rf { cursor:pointer; margin-left:9px; color:#7CFFAE; font-size:12px }
-  .hdr .rf:hover { color:#fff; text-shadow:0 0 8px rgba(57,255,20,.8) }
+  .rf { cursor:pointer; margin-left:9px; color:#7CFFAE; font-size:12px }
+  .rf:hover { color:#fff; text-shadow:0 0 8px rgba(57,255,20,.8) }
   /* fetch.mjs takes ~13 s; a ⟳ that did not spin felt like the click had not landed */
-  .hdr .rf.spin { display:inline-block; color:#fff; animation:sbSpin 1s linear infinite }
+  .rf.spin { display:inline-block; color:#fff; animation:sbSpin 1s linear infinite }
   @keyframes sbSpin { to { transform:rotate(360deg) } }
   @media (prefers-reduced-motion: reduce) {
-    .hdr .rf.spin { animation:none; opacity:.45 }
+    .rf.spin { animation:none; opacity:.45 }
   }
 
   .siege { margin:6px 0 10px; color:#7CFFAE; font-size:10px; letter-spacing:.1em;
            display:flex; justify-content:space-between; align-items:baseline }
-  .siege .legend { color:#44607d; letter-spacing:0 }
+  .siege .tools { letter-spacing:0 }
 
   .boss { border:1px solid #ff3b3b; border-radius:7px; padding:8px 10px; margin-bottom:10px;
           background:rgba(255,59,59,.07); animation:sbPulse 1.2s ease-in-out infinite; cursor:pointer }
@@ -305,7 +305,7 @@
       <div class="hdr">
         <span class="name"><span class="lights"><span class="tl close" data-win="close" title="close"></span><span class="tl min" data-win="minimize" title="minimize"></span><span class="tl fill" data-win="fill" title="full screen"></span></span>⚔ ${esc(clip(sprint.name, 30))}</span>
         <span class="right">${sprint.daysLeft == null ? "—" : sprint.daysLeft + "d left"}
-          · ${hhmm(d.generatedAt)}<span class="rf" id="rf" title="refresh now">⟳</span><span class="rf" id="gear" title="settings">⚙</span></span>
+          · ${hhmm(d.generatedAt)}</span>
       </div>
 
       ${staleNote ? `<div class="stale">⚠ Could not refresh: <b>${esc(staleNote.error)}</b><br>
@@ -316,7 +316,7 @@
 
       <div class="siege">
         <span>${bar(d.total ? d.cleared / d.total : 0, 12)} ${d.cleared}/${d.total} cleared</span>
-        <span class="legend">status/age</span>
+        <span class="tools"><span class="rf" id="rf" title="refresh now">⟳</span><span class="rf" id="gear" title="settings">⚙</span></span>
       </div>
 
       ${boss ? `
