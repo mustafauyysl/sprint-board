@@ -675,6 +675,22 @@ test("setup screen: a transparent page around a card panel, sized to the card, a
   }
 });
 
+test("both screens: one card radius, and no shadow outside the card", () => {
+  const card = (f) => readFileSync(new URL(f, import.meta.url), "utf8").match(/#card \{([^}]*)\}/)?.[1] ?? "";
+  const [view, setup] = [card("./view.html"), card("./setup.html")];
+  const radius = (css) => css.match(/border-radius: ?([^;]+);/)?.[1];
+  assert.equal(radius(view), "10px");
+  assert.equal(radius(setup), radius(view));
+  // The window is cut exactly to the card, so an outer shadow can only show in the corners
+  // outside the curve, as a dark tip with a square edge. Only an inset shadow is allowed.
+  for (const [name, css] of [["view.html", view], ["setup.html", setup]]) {
+    const shadow = css.match(/box-shadow: ?([^;]+);/)?.[1] ?? "";
+    for (const layer of shadow.split(/,(?![^(]*\))/).filter((l) => l.trim())) {
+      assert.match(layer, /\binset\b/, `${name}: outer shadow "${layer.trim()}"`);
+    }
+  }
+});
+
 test("addNote: every note gets a unique id", () => {
   const t = at("2026-08-20");
   const n = addNote(addNote([], "a", t), "b", t);
