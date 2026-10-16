@@ -134,6 +134,40 @@ func githubOrgName(_ raw: String) -> String? {
     return name
 }
 
+/// The Disconnect hint for how this Mac signed in. Disconnect only deletes keychain entries the
+/// app wrote itself, so an entry made by hand is left alone and the hint says so.
+func disconnectHint(_ cfg: [String: Any]) -> [String: String] {
+    guard cfg["tokensOwnedByApp"] as? Bool == true else {
+        return ["text": "This token was saved in the keychain by hand, so Disconnect deletes nothing from the keychain. It only signs this board out."]
+    }
+    if (cfg["authMode"] as? String) == "oauth" {
+        return [
+            "text": "Disconnect removes the sign-in from this Mac. Sprint Board keeps its access to your Atlassian account until you remove it under Connected apps at",
+            "link": "id.atlassian.com",
+            "url": "https://id.atlassian.com/manage-profile/apps",
+        ]
+    }
+    return [
+        "text": "Disconnect removes the token from this Mac. The token itself stays valid until you revoke it at",
+        "link": "id.atlassian.com",
+        "url": "https://id.atlassian.com/manage-profile/security/api-tokens",
+    ]
+}
+
+/// What the setup screen gets when it opens from Settings or ⚙. nil while nobody is signed in
+/// (first run, after Disconnect): the sign-in block then stays. Otherwise the screen shows the
+/// account, the board settings and the Disconnect hint, and hides the sign-in block.
+func setupContext(_ cfg: [String: Any]) -> [String: Any]? {
+    guard let email = cfg["email"] as? String, !email.isEmpty else { return nil }
+    return [
+        "email": email,
+        "mode": (cfg["authMode"] as? String) == "oauth" ? "oauth" : "token",
+        "githubOrg": (cfg["githubOrg"] as? String) ?? "",
+        "showDraftPrs": (cfg["showDraftPrs"] as? Bool) ?? true,
+        "hint": disconnectHint(cfg),
+    ]
+}
+
 /// The notifications a fetch result asks for. New conflicts always notify, even while the
 /// setup screen is open: fetch.mjs has already remembered them, so a dropped one is lost
 /// for good. The summary answers a refresh the user asked for; the setup screen cancels it.
@@ -1129,12 +1163,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         if onSetupScreen, setupFromSettings,
            let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
            let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
-           let email = cfg["email"] as? String {
-            let mode = (cfg["authMode"] as? String) == "oauth" ? "oauth" : "token"
-            let ctx = (try? JSONSerialization.data(withJSONObject: [
-                "email": email, "mode": mode, "githubOrg": (cfg["githubOrg"] as? String) ?? "",
-                "showDraftPrs": (cfg["showDraftPrs"] as? Bool) ?? true,
-            ]))
+           let context = setupContext(cfg) {
+            let ctx = (try? JSONSerialization.data(withJSONObject: context))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
             w.evaluateJavaScript("window.sbSetupContext && window.sbSetupContext(\(ctx))")
         }

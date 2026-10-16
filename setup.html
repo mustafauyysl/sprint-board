@@ -54,9 +54,9 @@
 <h1><span class="lights"><span class="tl close" data-win="close" title="close"></span><span class="tl min" data-win="minimize" title="minimize"></span><span class="tl fill" data-win="fill" title="full screen"></span></span>⚔ SPRINT BOARD</h1>
 <div id="current">
   <div class="row"><span class="who" id="who"></span><button id="disconnect">DISCONNECT</button></div>
-  <div class="hint">Disconnect removes the token from this Mac. The token itself stays valid until you
-    revoke it at <a href="#" data-url="https://id.atlassian.com/manage-profile/security/api-tokens">id.atlassian.com</a>.</div>
+  <div class="hint"><span id="hintText"></span> <a href="#" id="hintLink"></a></div>
 </div>
+<div id="signin">
 <p class="sub">Sign in and the rest follows — your Jira site, your email and your
 permissions are read from your account. Nothing is written to a file; it goes to the keychain.</p>
 
@@ -76,7 +76,7 @@ permissions are read from your account. Nothing is written to a file; it goes to
     It is checked against Jira, then stored in the keychain.</div>
   <button id="saveToken">SAVE TOKEN</button>
 </div>
-
+</div>
 
 <div id="settings">
   <label for="org">GITHUB ORGANIZATION</label>
@@ -118,7 +118,13 @@ permissions are read from your account. Nothing is written to a file; it goes to
   window.sbSetupContext = (ctx) => {
     if (!ctx || !ctx.email) return;
     $("who").textContent = "Connected as " + ctx.email + " · " + (ctx.mode === "oauth" ? "Atlassian sign-in" : "API token");
+    const hint = ctx.hint || {};
+    $("hintText").textContent = hint.text || "";
+    $("hintLink").textContent = hint.url ? (hint.link || hint.url) : "";
+    $("hintLink").dataset.url = hint.url || "";
     $("current").style.display = "block";
+    // Signed in, in any mode: the sign-in block is for the first run and after Disconnect.
+    $("signin").style.display = "none";
     $("back").style.display = "block";
     $("org").value = ctx.githubOrg || "";
     $("drafts").checked = ctx.showDraftPrs !== false;
@@ -144,6 +150,10 @@ permissions are read from your account. Nothing is written to a file; it goes to
     window.sbSetupResult(res);
   };
   $("back").addEventListener("click", () => post({ backToBoard: true }));
+  $("hintLink").addEventListener("click", (e) => {
+    e.preventDefault();
+    if ($("hintLink").dataset.url) post({ open: $("hintLink").dataset.url });
+  });
 
   // Two clicks, so a stray one never signs you out.
   let disarm = null;

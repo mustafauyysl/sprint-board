@@ -1276,6 +1276,15 @@ const resultInputs = {
   boardManualFailed: { obj: { ok: false, error: "GitHub HTTP 502" }, ok: false, manual: true, onSetupScreen: false },
 };
 
+const setupInputs = {
+  signedOut: {},
+  disconnected: { githubOrg: "acme", showDraftPrs: false },
+  emptyEmail: { email: "" },
+  oauth: { email: "ada@example.invalid", authMode: "oauth", tokensOwnedByApp: true, githubOrg: "acme" },
+  token: { email: "ada@example.invalid", authMode: "token", tokensOwnedByApp: true, showDraftPrs: false },
+  handMade: { email: "ada@example.invalid", keychainService: "sprint-board-jira" },
+};
+
 let swiftCache;
 function swiftHelpers() {
   if (swiftCache) return swiftCache;
@@ -1293,6 +1302,8 @@ ${swiftSource(src, "githubOrgName")}
 ${swiftSource(src, "resultNotifications")}
 ${swiftSource(src, "dockChoice")}
 ${swiftSource(src, "toggledDockChoice")}
+${swiftSource(src, "disconnectHint")}
+${swiftSource(src, "setupContext")}
 let input = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String: Any]
 let hosts: [Any] = (input["hosts"] as! [String]).map { h in jiraCloudHost(h).map { $0 as Any } ?? NSNull() }
 let configs = input["configs"] as! [String: [String: Any]]
@@ -1308,14 +1319,16 @@ let dock: [String: Bool] = [
   "unset": dockChoice(nil), "storedTrue": dockChoice(true), "storedFalse": dockChoice(false),
   "toggledFromUnset": toggledDockChoice(nil), "toggledFromTrue": toggledDockChoice(true),
 ]
-FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services, "orgs": orgs, "notes": notes, "dock": dock]))
+var contexts: [String: Any] = [:]
+for (key, cfg) in input["setups"] as! [String: [String: Any]] { contexts[key] = setupContext(cfg) ?? NSNull() }
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services, "orgs": orgs, "notes": notes, "dock": dock, "contexts": contexts]))
 `;
   const dir = mkdtempSync(join(tmpdir(), "sprint-board-swift-"));
   try {
     writeFileSync(join(dir, "main.swift"), driver);
     execFileSync("swiftc", [join(dir, "main.swift"), "-o", join(dir, "helpers")], { stdio: "pipe" });
     const out = JSON.parse(
-      execFileSync(join(dir, "helpers"), { input: JSON.stringify({ hosts: hostInputs, configs: configInputs, orgs: orgInputs, results: resultInputs }) }),
+      execFileSync(join(dir, "helpers"), { input: JSON.stringify({ hosts: hostInputs, configs: configInputs, orgs: orgInputs, results: resultInputs, setups: setupInputs }) }),
     );
     swiftCache = {
       host: Object.fromEntries(hostInputs.map((h, i) => [h, out.hosts[i]])),
@@ -1323,6 +1336,7 @@ FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["ho
       org: Object.fromEntries(orgInputs.map((o, i) => [o, out.orgs[i]])),
       notes: out.notes,
       dock: out.dock,
+      contexts: out.contexts,
     };
     return swiftCache;
   } finally {
@@ -1401,6 +1415,47 @@ test("resultNotifications: an automatic refresh sends only the new conflicts", {
 test("resultNotifications: a refresh the user asked for also reports its summary", { skip: !swiftAvailable }, () => {
   assert.deepEqual(swiftHelpers().notes.boardManual,
     [conflictNote, { id: "refresh", title: "1 conflict", body: "demo-repo#7" }]);
+});
+
+test("setupContext: signed out (first run, after Disconnect) gives no context, so the sign-in block shows", { skip: !swiftAvailable }, () => {
+  const { contexts } = swiftHelpers();
+  assert.equal(contexts.signedOut, null);
+  assert.equal(contexts.disconnected, null);
+  assert.equal(contexts.emptyEmail, null);
+});
+
+test("setupContext: signed in, in any mode, gives a context, so the sign-in block hides", { skip: !swiftAvailable }, () => {
+  const { contexts } = swiftHelpers();
+  assert.equal(contexts.oauth.mode, "oauth");
+  assert.equal(contexts.token.mode, "token");
+  assert.equal(contexts.handMade.mode, "token");
+  for (const key of ["oauth", "token", "handMade"]) assert.equal(contexts[key].email, "ada@example.invalid", key);
+});
+
+test("setupContext: carries the board settings, with their defaults", { skip: !swiftAvailable }, () => {
+  const { contexts } = swiftHelpers();
+  assert.equal(contexts.oauth.githubOrg, "acme");
+  assert.equal(contexts.oauth.showDraftPrs, true);
+  assert.equal(contexts.token.githubOrg, "");
+  assert.equal(contexts.token.showDraftPrs, false);
+});
+
+test("disconnectHint: Atlassian sign-in points to connected apps", { skip: !swiftAvailable }, () => {
+  const { hint } = swiftHelpers().contexts.oauth;
+  assert.match(hint.text, /Connected apps/);
+  assert.equal(hint.url, "https://id.atlassian.com/manage-profile/apps");
+});
+
+test("disconnectHint: an API token the app saved points to the API tokens page", { skip: !swiftAvailable }, () => {
+  const { hint } = swiftHelpers().contexts.token;
+  assert.match(hint.text, /removes the token from this Mac/);
+  assert.equal(hint.url, "https://id.atlassian.com/manage-profile/security/api-tokens");
+});
+
+test("disconnectHint: a keychain entry made by hand says Disconnect deletes nothing", { skip: !swiftAvailable }, () => {
+  const { hint } = swiftHelpers().contexts.handMade;
+  assert.match(hint.text, /deletes nothing/);
+  assert.equal(hint.url, undefined);
 });
 
 test("dockChoice: with no stored choice the app is not in the Dock", { skip: !swiftAvailable }, () => {
