@@ -34,6 +34,7 @@ import {
   githubOrgQualifier,
   prSearch,
   reviewSearch,
+  searchNodes,
   conflictIds,
   newConflicts,
   conflictNotifications,
@@ -1082,6 +1083,30 @@ test("prSearch / reviewSearch: both searches carry the organization qualifier", 
 test("prSearch / reviewSearch: no organization searches all PRs", () => {
   assert.equal(prSearch(""), "author:@me is:pr is:open");
   assert.equal(reviewSearch(""), "is:open is:pr review-requested:@me");
+});
+
+test("searchNodes: a GraphQL error answer without a search result is unavailable, not empty", () => {
+  assert.equal(searchNodes({ errors: [{ message: "Something went wrong" }] }), null);
+  assert.equal(searchNodes({ data: { search: null }, errors: [{ message: "timeout" }] }), null);
+  assert.equal(searchNodes({ data: null }), null);
+  assert.equal(searchNodes(null), null);
+});
+
+test("searchNodes: a search result is returned as is, an empty one as []", () => {
+  assert.deepEqual(searchNodes({ data: { search: { nodes: [] } } }), []);
+  assert.deepEqual(searchNodes({ data: { search: { nodes: [{ number: 1 }] } } }), [{ number: 1 }]);
+});
+
+test("conflictIds: with no PR data the remembered conflicts are kept", () => {
+  assert.deepEqual(conflictIds(null, ["demo-repo#1"]), ["demo-repo#1"]);
+  assert.deepEqual(conflictIds(null, undefined), []);
+});
+
+test("conflictIds + newConflicts: a run without PR data does not make a known conflict notify again", () => {
+  const run1 = [demoPr(1, { mergeable: "CONFLICTING" })];
+  let state = { initialized: true, conflictIds: conflictIds(run1, []) };
+  state = { initialized: true, conflictIds: conflictIds(null, state.conflictIds) };
+  assert.equal(newConflicts(state, run1).length, 0);
 });
 
 // --demo returns before any token or keychain read, so a temporary HOME holding only a

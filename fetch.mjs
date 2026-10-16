@@ -12,7 +12,7 @@ import {
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
   updateInfo, jiraRequest, ownershipStartedAt,
-  mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, conflictIds, newConflicts, conflictNotifications, refreshSummary,
+  mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, conflictIds, newConflicts, conflictNotifications, refreshSummary,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -255,7 +255,8 @@ async function ghGraphql(query, token) {
 async function fetchPrs(qualifier, token) {
   if (!token) return null;
   try {
-    const nodes = (await ghGraphql(prQuery(qualifier), token))?.data?.search?.nodes ?? [];
+    const nodes = searchNodes(await ghGraphql(prQuery(qualifier), token));
+    if (!nodes) return null;
     return nodes.filter((n) => n && n.number).map((n) => ({
       number: n.number,
       title: n.title,
@@ -646,9 +647,9 @@ async function main() {
     bossKey: bossNow ? bossNow.key : null,
     brokenIds: brokenPrs.map((p) => `${p.repo}#${p.number}`),
     reviewIds: (reviewRequests || []).map((r) => `${r.repo}#${r.number}`),
-    // Kept from the previous run when GitHub is unreachable: an empty list would make
-    // every existing conflict look new on the next successful run.
-    conflictIds: prs ? conflictIds(prs, prevState.conflictIds) : prevState.conflictIds,
+    // Kept from the previous run when GitHub is unreachable or the search failed: an empty
+    // list would make every existing conflict look new on the next successful run.
+    conflictIds: conflictIds(prs, prevState.conflictIds),
   };
   const alerts = detectAlerts(prevState, signals);
   const notify = conflictNotifications(newConflicts(prevState, prs));

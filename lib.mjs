@@ -465,13 +465,16 @@ export function mergeBlocked(prs) {
 /**
  * The conflicts to remember for the next run. A PR remembered as conflicting whose state
  * GitHub has not settled this time ("UNKNOWN") stays remembered; dropping it would make
- * the same conflict notify again once GitHub settles it.
+ * the same conflict notify again once GitHub settles it. With no PR data at all (GitHub
+ * unreachable or the search failed) the whole list is kept.
  */
 export function conflictIds(prs, previous = []) {
+  const remembered = Array.isArray(previous) ? previous : [];
+  if (!Array.isArray(prs)) return remembered;
   const watched = watchedPrs(prs);
   const now = watched.filter(isConflict).map(prId);
   const unsettled = new Set(watched.filter(isUnsettled).map(prId));
-  const kept = (Array.isArray(previous) ? previous : []).filter((id) => unsettled.has(id));
+  const kept = remembered.filter((id) => unsettled.has(id));
   return [...new Set([...now, ...kept])];
 }
 
@@ -540,6 +543,16 @@ export function githubOrgQualifier(org) {
   const name = org.trim();
   if (!name) return "";
   return name.length <= 39 && GITHUB_ORG.test(name) ? `org:${name} ` : null;
+}
+
+/**
+ * The nodes of a GraphQL search answer, or null when it holds no search result. GitHub
+ * answers HTTP 200 with `errors` and no `data.search` when the search fails; reading
+ * that as an empty list would call every PR clean and forget the remembered conflicts.
+ */
+export function searchNodes(response) {
+  const search = response?.data?.search;
+  return search && Array.isArray(search.nodes) ? search.nodes : null;
 }
 
 export const prSearch = (qualifier) => `${qualifier}author:@me is:pr is:open`;
