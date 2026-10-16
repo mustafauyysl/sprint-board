@@ -1330,6 +1330,85 @@ function runDemo(cfg) {
   }
 }
 
+// The real (non-demo) path, against canned Jira and GitHub answers. A preload swaps
+// globalThis.fetch inside the child only; the tokens come through stdin, so no keychain
+// is read, and HOME is a temp folder, so the real config and state are never touched.
+const FAKE_FETCH = `
+import { appendFileSync, readFileSync } from "node:fs";
+const fake = JSON.parse(readFileSync(process.env.SB_FAKE_JIRA, "utf8"));
+const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+globalThis.fetch = async (url) => {
+  const u = new URL(String(url));
+  if (u.hostname === "api.github.com") return json({ data: { search: { nodes: [] } } });
+  if (u.pathname.endsWith("/search/jql")) {
+    const jql = u.searchParams.get("jql");
+    appendFileSync(process.env.SB_FAKE_JIRA + ".jql", jql + "\\n");
+    const hit = fake.searches.find((r) => jql.includes(r.match));
+    return json({ issues: hit ? hit.issues : [] });
+  }
+  if (u.pathname.endsWith("/myself")) return json({ accountId: "demo-account" });
+  return new Response("not found", { status: 404 });
+};
+`;
+
+function runReal(cfg, searches) {
+  const home = mkdtempSync(join(tmpdir(), "sprint-board-real-"));
+  try {
+    mkdirSync(join(home, ".config", "sprint-widget"), { recursive: true });
+    writeFileSync(join(home, ".config", "sprint-widget", "config.json"), JSON.stringify(cfg));
+    writeFileSync(join(home, "fake.mjs"), FAKE_FETCH);
+    writeFileSync(join(home, "fake.json"), JSON.stringify({ searches }));
+    const out = execFileSync(process.execPath,
+      ["--import", join(home, "fake.mjs"), fileURLToPath(new URL("./fetch.mjs", import.meta.url))],
+      { env: { ...process.env, HOME: home, SB_FAKE_JIRA: join(home, "fake.json") },
+        input: JSON.stringify({ jiraToken: "demo-token", githubToken: "demo-token" }), encoding: "utf8" });
+    let jql = "";
+    try { jql = readFileSync(join(home, "fake.json.jql"), "utf8"); } catch { /* no search made */ }
+    return { out: JSON.parse(out), jql: jql.split("\n").filter(Boolean) };
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+const realCfg = { host: "example.invalid", email: "demo-user@example.invalid", sprintFieldId: "customfield_1", qaFieldId: null };
+const realSprint = { id: 9002, name: "Demo Team - Sprint#4", state: "active",
+  startDate: "2026-01-05T07:00:00.000Z", endDate: "2026-01-19T15:00:00.000Z" };
+const myTask = {
+  key: "DEMO-101",
+  fields: {
+    summary: "Template generator", created: "2026-01-02T09:00:00.000Z",
+    status: { name: "In Progress", statusCategory: { key: "indeterminate" } },
+    priority: null, issuetype: { name: "Task" },
+    assignee: { accountId: "demo-account", displayName: "Demo User" },
+    customfield_1: [realSprint],
+  },
+  changelog: { total: 0, histories: [] },
+};
+const releaseEnteredAt = "2026-01-05T10:00:00.000Z";
+const pendingIssue = {
+  key: "DEMO-107",
+  fields: {
+    summary: "Missing font-display setting", created: "2025-12-01T09:00:00.000Z",
+    status: { name: "Ready For Release", statusCategory: { key: "done" } },
+    customfield_1: [{ id: 9001, name: "Demo Team - Sprint#2", state: "closed" }],
+  },
+  changelog: { total: 1, histories: [{ created: releaseEnteredAt, items: [{ field: "status" }] }] },
+};
+const realSearches = [
+  { match: "NOT IN openSprints()", issues: [pendingIssue] },
+  { match: "Flagged is not EMPTY", issues: [myTask] },
+  { match: "sprint in openSprints()", issues: [myTask] },
+];
+
+test("real run: AWAITING RELEASE fills, counted from the last status change", () => {
+  const { out } = runReal(realCfg, realSearches);
+  assert.equal(out.ok, true);
+  assert.equal(out.pendingReleaseError ?? null, null);
+  assert.deepEqual(out.pendingRelease.map((r) => [r.key, r.status, r.sprint]),
+    [["DEMO-107", "Ready For Release", "Demo Team - Sprint#2"]]);
+  assert.equal(out.pendingRelease[0].days, businessDaysBetween(releaseEnteredAt, new Date()));
+});
+
 test("--demo: the board shows the MERGE BLOCKED band, in its order, drafts included by default", () => {
   const out = runDemo({ host: "example.invalid" });
   assert.equal(out.ok, true);

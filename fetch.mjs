@@ -141,7 +141,8 @@ async function fetchPendingRelease(cfg, auth, sprintField, now) {
       const status = issue.fields?.status?.name ?? "";
       if (releaseState(status, cfg) !== "pending") continue;
 
-      const enteredAt = await statusEnteredAt(cfg, auth, issue);
+      const enteredAt = latestStatusChange(await changelogOf(cfg, auth, issue))
+        ?? new Date(issue.fields?.created);
       const sprints = (issue.fields?.[sprintField] ?? [])
         .map((x) => x && x.name).filter(Boolean);
       rows.push({
