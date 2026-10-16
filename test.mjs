@@ -36,6 +36,7 @@ import {
   reviewSearch,
   searchNodes,
   reviewIds,
+  showDraftPrs,
   conflictIds,
   newConflicts,
   conflictNotifications,
@@ -1128,6 +1129,61 @@ test("reviewIds + detectAlerts: a failed run does not make known review requests
   assert.deepEqual(detectAlerts(state, { reviewIds: reviewIds(good, state.reviewIds) }), []);
 });
 
+// --- Show draft PRs setting ---
+
+test("showDraftPrs: a missing key means drafts are shown", () => {
+  assert.equal(showDraftPrs({}), true);
+  assert.equal(showDraftPrs(null), true);
+  assert.equal(showDraftPrs({ showDraftPrs: true }), true);
+  assert.equal(showDraftPrs({ showDraftPrs: false }), false);
+});
+
+test("watchedPrs: drafts are kept when the setting is on and dropped when it is off", () => {
+  const prs = [demoPr(1), demoPr(2, { isDraft: true }), demoPr(3, { isDraft: true, title: "no key" })];
+  assert.deepEqual(watchedPrs(prs, true).map((p) => p.number), [1, 2]);
+  assert.deepEqual(watchedPrs(prs, false).map((p) => p.number), [1]);
+});
+
+test("newConflicts: a conflicting draft notifies only when drafts are shown", () => {
+  const prev = { initialized: true, conflictIds: [] };
+  const prs = [demoPr(1, { isDraft: true, mergeable: "CONFLICTING" })];
+  assert.deepEqual(newConflicts(prev, prs, true).map((p) => p.number), [1]);
+  assert.deepEqual(newConflicts(prev, prs, false), []);
+});
+
+test("refreshSummary: a conflicting draft is counted only when drafts are shown", () => {
+  const prs = [demoPr(1, { isDraft: true, mergeable: "CONFLICTING" })];
+  assert.equal(refreshSummary(prs, null, true).title, "1 conflict");
+  assert.equal(refreshSummary(prs, null, false).title, "No conflicts, no CI errors");
+});
+
+test("mergeBlocked: a draft row is marked as a draft", () => {
+  const [row] = mergeBlocked([demoPr(1, { isDraft: true, mergeable: "CONFLICTING" })], true);
+  assert.deepEqual(row.reasons, ["conflict", "draft"]);
+  assert.deepEqual(mergeBlocked([demoPr(1, { isDraft: true, mergeable: "CONFLICTING" })], false), []);
+});
+
+test("summarizePrs: the WAITING band still leaves drafts out, whatever the setting", () => {
+  const prs = [demoPr(1, { isDraft: true, reviewDecision: "REVIEW_REQUIRED", mergeable: "UNKNOWN" })];
+  assert.deepEqual(summarizePrs(prs).waiting, []);
+  assert.equal(mergeBlocked(prs, true).length, 1);
+});
+
+test("conflictIds: a draft conflict hidden by the setting stays remembered and does not notify again", () => {
+  const draft = demoPr(1, { isDraft: true, mergeable: "CONFLICTING" });
+  let state = { initialized: true, conflictIds: [] };
+  assert.equal(newConflicts(state, [draft], true).length, 1);
+  state = { initialized: true, conflictIds: conflictIds([draft], state.conflictIds, true) };
+  state = { initialized: true, conflictIds: conflictIds([draft], state.conflictIds, false) };
+  assert.deepEqual(state.conflictIds, ["demo-repo#1"], "switching drafts off must not forget it");
+  assert.equal(newConflicts(state, [draft], true).length, 0, "switching drafts back on must not notify again");
+});
+
+test("conflictIds: a hidden draft that no longer conflicts is forgotten", () => {
+  const draft = demoPr(1, { isDraft: true, mergeable: "MERGEABLE" });
+  assert.deepEqual(conflictIds([draft], ["demo-repo#1"], false), []);
+});
+
 // --demo returns before any token or keychain read, so a temporary HOME holding only a
 // config keeps the real config and keychain out of the test.
 function runDemo(cfg) {
@@ -1143,16 +1199,24 @@ function runDemo(cfg) {
   }
 }
 
-test("--demo: the board shows the MERGE BLOCKED band, in its order", () => {
+test("--demo: the board shows the MERGE BLOCKED band, in its order, drafts included by default", () => {
   const out = runDemo({ host: "example.invalid" });
   assert.equal(out.ok, true);
   assert.deepEqual(out.pullRequests.map((r) => [r.repo, r.kind]), [
     ["editor-frontend", "conflict"],
+    ["rate-limiter", "conflict"],
     ["web-frontend", "ci"],
     ["worker-jobs", "ci"],
     ["shared-lib", "changes"],
     ["template-generator", "checking"],
   ]);
+  assert.deepEqual(out.pullRequests[1].reasons, ["conflict", "draft"]);
+});
+
+test("--demo: with Show draft PRs off the draft leaves the band", () => {
+  const out = runDemo({ host: "example.invalid", showDraftPrs: false });
+  assert.deepEqual(out.pullRequests.map((r) => r.repo),
+    ["editor-frontend", "web-frontend", "worker-jobs", "shared-lib", "template-generator"]);
 });
 
 const swiftAvailable = spawnSync("swiftc", ["--version"]).status === 0;

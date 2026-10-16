@@ -599,12 +599,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             settingsResult(["errors": ["Not a valid GitHub organization name: letters, digits and single hyphens, at most 39 characters."]])
             return
         }
+        let drafts = (s["showDraftPrs"] as? Bool) ?? true
         cfg["githubOrg"] = org
+        cfg["showDraftPrs"] = drafts
         guard let data = try? JSONSerialization.data(withJSONObject: cfg, options: .prettyPrinted),
               (try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))) != nil else {
             settingsResult(["errors": ["Could not write the config file."]]); return
         }
-        settingsResult(["saved": true, "githubOrg": org])
+        settingsResult(["saved": true, "githubOrg": org, "showDraftPrs": drafts])
     }
 
     func settingsResult(_ res: [String: Any]) {
@@ -1131,6 +1133,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             let mode = (cfg["authMode"] as? String) == "oauth" ? "oauth" : "token"
             let ctx = (try? JSONSerialization.data(withJSONObject: [
                 "email": email, "mode": mode, "githubOrg": (cfg["githubOrg"] as? String) ?? "",
+                "showDraftPrs": (cfg["showDraftPrs"] as? Bool) ?? true,
             ]))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
             w.evaluateJavaScript("window.sbSetupContext && window.sbSetupContext(\(ctx))")

@@ -431,13 +431,20 @@ const isCiBroken = (pr) => !pr?.isDraft && (pr?.ciState === "FAILURE" || pr?.ciS
 const isUnsettled = (pr) => !isConflict(pr) && pr?.mergeable !== "MERGEABLE";
 const isChangesRequested = (pr) => pr?.reviewDecision === "CHANGES_REQUESTED";
 
+/** The "Show draft PRs" setting. A missing key means drafts are shown. */
+export function showDraftPrs(config) {
+  return config?.showDraftPrs !== false;
+}
+
 /**
- * The PRs the MERGE BLOCKED band covers, with the same filter as summarizePrs: a Jira key
- * in the title and not a draft. Conflict notifications and the refresh summary use this
- * set too, so a PR the band does not show never notifies.
+ * The PRs the MERGE BLOCKED band covers: a Jira key in the title, as in summarizePrs, and
+ * drafts only when `includeDrafts` (the "Show draft PRs" setting) is on. Conflict
+ * notifications and the refresh summary use this set too, so a PR the band does not show
+ * never notifies. The WAITING band (summarizePrs) leaves drafts out whatever the setting.
  */
-export function watchedPrs(prs) {
-  return (prs || []).filter((pr) => pr && pr.number && extractIssueKey(pr.title) && !pr.isDraft);
+export function watchedPrs(prs, includeDrafts = false) {
+  return (prs || []).filter((pr) =>
+    pr && pr.number && extractIssueKey(pr.title) && (includeDrafts || !pr.isDraft));
 }
 
 const BLOCK_ORDER = { conflict: 0, ci: 1, changes: 2, checking: 3 };
@@ -447,9 +454,9 @@ const BLOCK_ORDER = { conflict: 0, ci: 1, changes: 2, checking: 3 };
  * then PRs whose merge state GitHub has not settled. Each row names every reason it has;
  * a blocked PR that is also unsettled stays in its blocker group.
  */
-export function mergeBlocked(prs) {
+export function mergeBlocked(prs, includeDrafts = false) {
   const rows = [];
-  watchedPrs(prs).forEach((pr, i) => {
+  watchedPrs(prs, includeDrafts).forEach((pr, i) => {
     const reasons = [];
     if (isConflict(pr)) reasons.push("conflict");
     if (isCiBroken(pr)) reasons.push(`CI: ${(pr.failingRequired || []).join(", ") || "?"}`);
@@ -458,6 +465,7 @@ export function mergeBlocked(prs) {
       : isChangesRequested(pr) ? "changes" : isUnsettled(pr) ? "checking" : null;
     if (!kind) return;
     if (isUnsettled(pr)) reasons.push(kind === "checking" ? "checking" : "merge checking");
+    if (pr.isDraft) reasons.push("draft");
     rows.push({
       row: {
         key: extractIssueKey(pr.title), repo: pr.repo, number: pr.number, url: pr.url,
@@ -474,16 +482,23 @@ export function mergeBlocked(prs) {
 /**
  * The conflicts to remember for the next run. A PR remembered as conflicting whose state
  * GitHub has not settled this time ("UNKNOWN") stays remembered; dropping it would make
- * the same conflict notify again once GitHub settles it. With no PR data at all (GitHub
+ * the same conflict notify again once GitHub settles it. A PR the band hides this run (a
+ * draft while "Show draft PRs" is off) stays remembered while it still conflicts, so
+ * switching the setting back on does not notify it again. With no PR data at all (GitHub
  * unreachable or the search failed) the whole list is kept.
  */
-export function conflictIds(prs, previous = []) {
+export function conflictIds(prs, previous = [], includeDrafts = false) {
   const remembered = Array.isArray(previous) ? previous : [];
   if (!Array.isArray(prs)) return remembered;
-  const watched = watchedPrs(prs);
+  const watched = watchedPrs(prs, includeDrafts);
+  const watchedIds = new Set(watched.map(prId));
+  const open = new Map(prs.filter((pr) => pr && pr.number).map((pr) => [prId(pr), pr]));
   const now = watched.filter(isConflict).map(prId);
-  const unsettled = new Set(watched.filter(isUnsettled).map(prId));
-  const kept = remembered.filter((id) => unsettled.has(id));
+  const kept = remembered.filter((id) => {
+    const pr = open.get(id);
+    if (!pr) return false;
+    return watchedIds.has(id) ? isUnsettled(pr) : isConflict(pr) || isUnsettled(pr);
+  });
   return [...new Set([...now, ...kept])];
 }
 
@@ -492,10 +507,10 @@ export function conflictIds(prs, previous = []) {
  * kept no conflict list (first launch, or a state file written before this field
  * existed), so conflicts that already existed never fire a burst of notifications.
  */
-export function newConflicts(prev, prs) {
+export function newConflicts(prev, prs, includeDrafts = false) {
   if (!prev || prev.initialized !== true || !Array.isArray(prev.conflictIds)) return [];
   const known = new Set(prev.conflictIds);
-  return watchedPrs(prs).filter((pr) => isConflict(pr) && !known.has(prId(pr)));
+  return watchedPrs(prs, includeDrafts).filter((pr) => isConflict(pr) && !known.has(prId(pr)));
 }
 
 /** One macOS notification per new conflict; clicking it opens the PR. */
@@ -513,11 +528,11 @@ export function conflictNotifications(prs) {
  * more than was checked: a failed required-checks query (`ciError`) or a PR GitHub is
  * still computing is said out loud instead of being reported as clean.
  */
-export function refreshSummary(all, ciError = null) {
+export function refreshSummary(all, ciError = null, includeDrafts = false) {
   if (!Array.isArray(all)) {
     return { id: "refresh", title: "PRs not checked", body: "GitHub could not be reached", url: null };
   }
-  const prs = watchedPrs(all);
+  const prs = watchedPrs(all, includeDrafts);
   const count = (n, word) => `${n} ${word}${n > 1 ? "s" : ""}`;
   const conflicts = prs.filter(isConflict);
   const ciBroken = ciError ? [] : prs.filter(isCiBroken);

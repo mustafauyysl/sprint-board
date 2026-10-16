@@ -124,7 +124,8 @@ costs.
 - **⛔ MERGE BLOCKED** lists the PRs that cannot be merged, each with its reasons:
   conflicts first, then failing required checks, then changes requested. A PR whose
   merge state GitHub has not settled shows as "checking". Only PRs with a Jira key in
-  the title count, and drafts do not. A PR in this band that starts conflicting sends
+  the title count. Drafts count and are marked "draft" while **Show draft PRs** (⚙, on
+  by default) is on; the WAITING band never shows drafts. A PR in this band that starts conflicting sends
   a macOS notification (click opens the PR); a refresh you trigger (Refresh now or ⟳)
   always reports its result for the same PRs: "No conflicts, no CI errors" or which
   PRs have a conflict or a failing required check

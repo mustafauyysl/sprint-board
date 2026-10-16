@@ -46,6 +46,8 @@
     color: #ffb0b0; background: transparent; border: 1px solid rgba(255,80,80,.45) }
   #disconnect.armed { color: #06120a; background: #ff6b6b }
   #back { display: none }
+  label.check { display: flex; align-items: center; gap: 6px; cursor: pointer }
+  label.check input { display: inline-block; width: auto; margin: 0 }
   #settings { display: none; margin-top: 14px; padding-top: 6px; border-top: 1px solid rgba(57,255,20,.18) }
 </style>
 
@@ -80,6 +82,8 @@ permissions are read from your account. Nothing is written to a file; it goes to
   <label for="org">GITHUB ORGANIZATION</label>
   <input id="org" placeholder="empty = all your PRs" autocomplete="off" spellcheck="false">
   <div class="hint">Only PRs in this organization are watched. The board uses it at the next refresh.</div>
+  <label class="check"><input id="drafts" type="checkbox"> SHOW DRAFT PRS</label>
+  <div class="hint">Drafts appear in MERGE BLOCKED, marked "draft". They never appear in WAITING.</div>
   <button id="saveSettings" class="alt">SAVE SETTINGS</button>
   <div id="saved" class="hint"></div>
 </div>
@@ -117,6 +121,7 @@ permissions are read from your account. Nothing is written to a file; it goes to
     $("current").style.display = "block";
     $("back").style.display = "block";
     $("org").value = ctx.githubOrg || "";
+    $("drafts").checked = ctx.showDraftPrs !== false;
     $("settings").style.display = "block";
     resize();
   };
@@ -124,13 +129,14 @@ permissions are read from your account. Nothing is written to a file; it goes to
   $("saveSettings").addEventListener("click", () => {
     $("err").style.display = "none";
     $("saved").textContent = "";
-    post({ saveSettings: { githubOrg: $("org").value } });
+    post({ saveSettings: { githubOrg: $("org").value, showDraftPrs: $("drafts").checked } });
   });
   $("org").addEventListener("keydown", (e) => { if (e.key === "Enter") $("saveSettings").click(); });
 
   window.sbSettingsResult = (res) => {
     if (res && res.saved) {
       $("org").value = res.githubOrg || "";
+      $("drafts").checked = res.showDraftPrs !== false;
       $("saved").textContent = "Saved. The board uses it at the next refresh.";
       resize();
       return;

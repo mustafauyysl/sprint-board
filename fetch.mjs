@@ -13,6 +13,7 @@ import {
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
   updateInfo, jiraRequest, ownershipStartedAt,
   mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, reviewIds, conflictIds, newConflicts, conflictNotifications, refreshSummary,
+  showDraftPrs,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -501,7 +502,7 @@ function demoPayload(cfg) {
     ],
     brokenPrs: demoBroken,
     waitingPrs: demoWaiting,
-    pullRequests: mergeBlocked(demoPrs),
+    pullRequests: mergeBlocked(demoPrs, showDraftPrs(cfg)),
     tasks: [...tasks].sort((a, b) =>
       a.done !== b.done ? (a.done ? 1 : -1) : b.ratio - a.ratio || b.daysInStatus - a.daysInStatus),
   };
@@ -642,6 +643,7 @@ async function main() {
   }
 
   const prevState = readJson(STATE_PATH, emptyState());
+  const includeDrafts = showDraftPrs(cfg);
 
   // Critical-event detection: compare against the previous run so only NEW items sound.
   const bossNow = pickBoss(tasks);
@@ -651,10 +653,10 @@ async function main() {
     reviewIds: reviewIds(reviewRequests, prevState.reviewIds),
     // Kept from the previous run when GitHub is unreachable or the search failed: an empty
     // list would make every existing conflict look new on the next successful run.
-    conflictIds: conflictIds(prs, prevState.conflictIds),
+    conflictIds: conflictIds(prs, prevState.conflictIds, includeDrafts),
   };
   const alerts = detectAlerts(prevState, signals);
-  const notify = conflictNotifications(newConflicts(prevState, prs));
+  const notify = conflictNotifications(newConflicts(prevState, prs, includeDrafts));
   const played = playAlert(cfg, alerts);
   // `initialized` is REQUIRED: this is how detectAlerts recognises the first run.
   // Without it every launch counts as "first launch" and every existing boss or
@@ -708,9 +710,9 @@ async function main() {
     requiredError,
     brokenPrs,
     waitingPrs,
-    pullRequests: mergeBlocked(prs),
+    pullRequests: mergeBlocked(prs, includeDrafts),
     notify,
-    summary: refreshSummary(prs, requiredError),
+    summary: refreshSummary(prs, requiredError, includeDrafts),
     update,
   };
 }
