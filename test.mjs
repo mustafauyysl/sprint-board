@@ -35,6 +35,7 @@ import {
   prSearch,
   reviewSearch,
   searchNodes,
+  reviewIds,
   conflictIds,
   newConflicts,
   conflictNotifications,
@@ -1107,6 +1108,24 @@ test("conflictIds + newConflicts: a run without PR data does not make a known co
   let state = { initialized: true, conflictIds: conflictIds(run1, []) };
   state = { initialized: true, conflictIds: conflictIds(null, state.conflictIds) };
   assert.equal(newConflicts(state, run1).length, 0);
+});
+
+test("reviewIds: the review requests of a good run", () => {
+  assert.deepEqual(reviewIds([{ repo: "demo-repo", number: 3 }, { repo: "demo-api", number: 9 }], ["old#1"]),
+    ["demo-repo#3", "demo-api#9"]);
+  assert.deepEqual(reviewIds([], ["old#1"]), []);
+});
+
+test("reviewIds: a failed review search keeps the previous list", () => {
+  assert.deepEqual(reviewIds(null, ["demo-repo#3"]), ["demo-repo#3"]);
+  assert.deepEqual(reviewIds(null, undefined), []);
+});
+
+test("reviewIds + detectAlerts: a failed run does not make known review requests sound on the next good run", () => {
+  const good = [{ repo: "demo-repo", number: 3 }];
+  let state = { initialized: true, reviewIds: reviewIds(good, []) };
+  state = { initialized: true, reviewIds: reviewIds(null, state.reviewIds) };
+  assert.deepEqual(detectAlerts(state, { reviewIds: reviewIds(good, state.reviewIds) }), []);
 });
 
 // --demo returns before any token or keychain read, so a temporary HOME holding only a

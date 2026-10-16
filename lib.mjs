@@ -395,6 +395,15 @@ export function detectAlerts(prev, now) {
 }
 
 /**
+ * The review requests to remember for the next run. A failed review search (null) keeps
+ * the previous list: saving [] would make every existing request sound on the next good run.
+ */
+export function reviewIds(requests, previous = []) {
+  if (!Array.isArray(requests)) return Array.isArray(previous) ? previous : [];
+  return requests.map((r) => `${r.repo}#${r.number}`);
+}
+
+/**
  * Persisted state now serves ONE question: "did we already see this event on the
  * previous run?" — i.e. preventing repeated sounds.
  *

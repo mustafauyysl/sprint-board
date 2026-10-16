@@ -12,7 +12,7 @@ import {
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
   updateInfo, jiraRequest, ownershipStartedAt,
-  mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, conflictIds, newConflicts, conflictNotifications, refreshSummary,
+  mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, reviewIds, conflictIds, newConflicts, conflictNotifications, refreshSummary,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -375,9 +375,11 @@ async function fetchLatestRelease(repo, token) {
 async function fetchReviewRequests(qualifier, now, token) {
   if (!token) return null;
   try {
-    const d = (await ghGraphql(reviewQuery(qualifier), token))?.data;
-    const login = d?.viewer?.login || null;
-    return (d?.search?.nodes ?? []).filter((n) => n && n.number).map((n) => {
+    const res = await ghGraphql(reviewQuery(qualifier), token);
+    const nodes = searchNodes(res);
+    if (!nodes) return null;
+    const login = res.data.viewer?.login || null;
+    return nodes.filter((n) => n && n.number).map((n) => {
       const { requestedAt, days } = reviewWaitInfo(n, login, now);
       return {
         repo: n.repository?.name ?? "?",
@@ -646,7 +648,7 @@ async function main() {
   const signals = {
     bossKey: bossNow ? bossNow.key : null,
     brokenIds: brokenPrs.map((p) => `${p.repo}#${p.number}`),
-    reviewIds: (reviewRequests || []).map((r) => `${r.repo}#${r.number}`),
+    reviewIds: reviewIds(reviewRequests, prevState.reviewIds),
     // Kept from the previous run when GitHub is unreachable or the search failed: an empty
     // list would make every existing conflict look new on the next successful run.
     conflictIds: conflictIds(prs, prevState.conflictIds),
