@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   businessDaysBetween,
   evaluate,
@@ -24,6 +28,11 @@ import {
   sprintHistory,
   ownershipStartedAt,
   emptyState,
+  prList,
+  conflictIds,
+  newConflicts,
+  conflictNotifications,
+  refreshSummary,
 } from "./lib.mjs";
 
 const config = {
@@ -843,4 +852,239 @@ test("jiraRequest: no mode means Basic (older installs)", () => {
   const r = jiraRequest({ token: "B64" }, "legacy.atlassian.net", "/rest/api/3/field");
   assert.equal(r.url, "https://legacy.atlassian.net/rest/api/3/field");
   assert.ok(r.headers.Authorization.startsWith("Basic "));
+});
+
+// --- PR list, conflict notifications, refresh summary ---
+
+const demoPr = (number, extra = {}) => ({
+  repo: "demo-repo", number, url: `https://example.invalid/demo-repo/pull/${number}`,
+  title: `DEMO-${number} | demo change`, isDraft: false, mergeable: "MERGEABLE", ciState: "SUCCESS", ...extra,
+});
+
+test("prList: conflicts first, then still-checking, then clean; input order kept within a group", () => {
+  const rows = prList([
+    demoPr(1),
+    demoPr(2, { mergeable: "UNKNOWN" }),
+    demoPr(3, { mergeable: "CONFLICTING" }),
+    demoPr(4),
+  ]);
+  assert.deepEqual(rows.map((r) => r.number), [3, 2, 1, 4]);
+  assert.deepEqual(rows.map((r) => [r.conflict, r.checked]), [[true, true], [false, false], [false, true], [false, true]]);
+});
+
+test("prList: an unsettled mergeable state is never shown as clean", () => {
+  const [row] = prList([demoPr(5, { mergeable: null })]);
+  assert.equal(row.conflict, false);
+  assert.equal(row.checked, false);
+});
+
+test("prList: drafts are listed and marked", () => {
+  const [row] = prList([demoPr(6, { isDraft: true })]);
+  assert.equal(row.draft, true);
+});
+
+test("prList: no PR data gives an empty list", () => {
+  assert.deepEqual(prList(null), []);
+});
+
+test("conflictIds: only CONFLICTING PRs", () => {
+  assert.deepEqual(conflictIds([demoPr(1), demoPr(2, { mergeable: "CONFLICTING" })]), ["demo-repo#2"]);
+});
+
+test("newConflicts: only conflicts the previous run did not have", () => {
+  const prev = { initialized: true, conflictIds: ["demo-repo#1"] };
+  const prs = [demoPr(1, { mergeable: "CONFLICTING" }), demoPr(2, { mergeable: "CONFLICTING" }), demoPr(3)];
+  assert.deepEqual(newConflicts(prev, prs).map((p) => p.number), [2]);
+});
+
+test("newConflicts: silent on the first run and on a state file without a conflict list", () => {
+  const prs = [demoPr(1, { mergeable: "CONFLICTING" })];
+  assert.deepEqual(newConflicts(emptyState(), prs), []);
+  assert.deepEqual(newConflicts({ initialized: true, brokenIds: [] }, prs), []);
+});
+
+test("conflictNotifications: one per PR, with its link", () => {
+  const [n] = conflictNotifications([demoPr(7, { mergeable: "CONFLICTING" })]);
+  assert.equal(n.title, "Conflict: demo-repo #7");
+  assert.equal(n.url, "https://example.invalid/demo-repo/pull/7");
+  assert.equal(n.id, "conflict-demo-repo#7");
+});
+
+test("conflictNotifications: a PR without a title gets the fallback body", () => {
+  const [n] = conflictNotifications([demoPr(8, { mergeable: "CONFLICTING", title: "" })]);
+  assert.equal(n.body, "This PR no longer merges into its base branch");
+});
+
+test("conflictNotifications: a PR without a url gets a null link", () => {
+  const [n] = conflictNotifications([demoPr(9, { mergeable: "CONFLICTING", url: undefined })]);
+  assert.equal(n.url, null);
+});
+
+test("refreshSummary: all clean", () => {
+  const s = refreshSummary([demoPr(1), demoPr(2)]);
+  assert.equal(s.title, "No conflicts, no CI errors");
+  assert.equal(s.body, "2 open PRs checked");
+});
+
+test("refreshSummary: names conflicts and CI errors, a PR with both once", () => {
+  const s = refreshSummary([
+    demoPr(1, { mergeable: "CONFLICTING", ciState: "FAILURE" }),
+    demoPr(2, { mergeable: "CONFLICTING" }),
+    demoPr(3, { ciState: "ERROR" }),
+    demoPr(4),
+  ]);
+  assert.equal(s.title, "2 conflicts, 2 CI errors");
+  assert.equal(s.body, "demo-repo#1, demo-repo#2, demo-repo#3");
+});
+
+test("refreshSummary: a draft's failing CI is not an error", () => {
+  assert.equal(refreshSummary([demoPr(1, { isDraft: true, ciState: "FAILURE" })]).title, "No conflicts, no CI errors");
+});
+
+test("refreshSummary: no PR data says so instead of reporting clean", () => {
+  assert.equal(refreshSummary(null).title, "PRs not checked");
+});
+
+test("refreshSummary: a failed CI query is not reported as no CI errors", () => {
+  const s = refreshSummary([demoPr(1, { ciState: null })], "GitHub HTTP 502");
+  assert.equal(s.title, "No conflicts found");
+  assert.equal(s.body, "CI not checked · 1 open PRs");
+});
+
+test("refreshSummary: PRs GitHub is still computing are counted, not called clean", () => {
+  const s = refreshSummary([demoPr(1), demoPr(2, { mergeable: "UNKNOWN" })]);
+  assert.equal(s.title, "No conflicts found");
+  assert.equal(s.body, "1 still checking · 2 open PRs");
+});
+
+test("refreshSummary: problems keep their caveats", () => {
+  const s = refreshSummary([demoPr(1, { mergeable: "CONFLICTING" }), demoPr(2, { mergeable: "UNKNOWN" })]);
+  assert.equal(s.title, "1 conflict");
+  assert.equal(s.body, "demo-repo#1 · 1 still checking");
+});
+
+test("conflictIds: a remembered conflict GitHub has not settled this run stays remembered", () => {
+  const prs = [demoPr(1, { mergeable: "UNKNOWN" }), demoPr(2, { mergeable: "CONFLICTING" }), demoPr(3)];
+  assert.deepEqual(conflictIds(prs, ["demo-repo#1", "demo-repo#3"]), ["demo-repo#2", "demo-repo#1"]);
+});
+
+test("conflictIds + newConflicts: a conflict that flickers to UNKNOWN does not notify twice", () => {
+  const run1 = [demoPr(1, { mergeable: "CONFLICTING" })];
+  const run2 = [demoPr(1, { mergeable: "UNKNOWN" })];
+  const run3 = [demoPr(1, { mergeable: "CONFLICTING" })];
+  let state = { initialized: true, conflictIds: [] };
+  assert.equal(newConflicts(state, run1).length, 1);
+  state = { initialized: true, conflictIds: conflictIds(run1, state.conflictIds) };
+  assert.equal(newConflicts(state, run2).length, 0);
+  state = { initialized: true, conflictIds: conflictIds(run2, state.conflictIds) };
+  assert.equal(newConflicts(state, run3).length, 0, "the same conflict must not notify again");
+});
+
+const swiftAvailable = spawnSync("swiftc", ["--version"]).status === 0;
+
+function swiftSource(src, name) {
+  const start = src.indexOf(`\nfunc ${name}(`);
+  const end = src.indexOf("\n}\n", start);
+  assert.ok(start >= 0 && end > start, `${name} not found in SprintBoard.swift`);
+  return src.slice(start + 1, end + 3);
+}
+
+const hostInputs = [
+  "acme.atlassian.net",
+  "https://ACME.atlassian.net/",
+  "other.example?.atlassian.net",
+  "x#.atlassian.net",
+  "evil.com/.atlassian.net",
+  ".atlassian.net",
+  "a..atlassian.net",
+  "user@x.atlassian.net",
+];
+
+const configInputs = {
+  missing: {},
+  notOwned: { tokensOwnedByApp: false },
+  oauthAfterToken: { tokensOwnedByApp: true, authMode: "oauth", keychainService: "sprint-board-jira-token" },
+  oauthLegacy: { tokensOwnedByApp: true, authMode: "oauth", keychainService: "sprint-board-jira" },
+  ownedDefault: { tokensOwnedByApp: true },
+  ownedNamed: { tokensOwnedByApp: true, keychainService: "sprint-board-jira-token" },
+};
+
+let swiftCache;
+function swiftHelpers() {
+  if (swiftCache) return swiftCache;
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const keychainConsts = ["JIRA_KEYCHAIN", "JIRA_TOKEN_KEYCHAIN"].map((name) => {
+    const line = src.match(new RegExp(`^let ${name} = .*$`, "m"));
+    assert.ok(line, `${name} not found in SprintBoard.swift`);
+    return line[0];
+  });
+  const driver = `import Foundation
+${keychainConsts.join("\n")}
+${swiftSource(src, "jiraCloudHost")}
+${swiftSource(src, "appWrittenTokenService")}
+let input = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String: Any]
+let hosts: [Any] = (input["hosts"] as! [String]).map { h in jiraCloudHost(h).map { $0 as Any } ?? NSNull() }
+let configs = input["configs"] as! [String: [String: Any]]
+var services: [String: Any] = [:]
+for (key, cfg) in configs { services[key] = appWrittenTokenService(cfg).map { $0 as Any } ?? NSNull() }
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services]))
+`;
+  const dir = mkdtempSync(join(tmpdir(), "sprint-board-swift-"));
+  try {
+    writeFileSync(join(dir, "main.swift"), driver);
+    execFileSync("swiftc", [join(dir, "main.swift"), "-o", join(dir, "helpers")], { stdio: "pipe" });
+    const out = JSON.parse(
+      execFileSync(join(dir, "helpers"), { input: JSON.stringify({ hosts: hostInputs, configs: configInputs }) }),
+    );
+    swiftCache = {
+      host: Object.fromEntries(hostInputs.map((h, i) => [h, out.hosts[i]])),
+      service: out.services,
+    };
+    return swiftCache;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("jiraCloudHost: a bare atlassian.net host is accepted as-is", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().host["acme.atlassian.net"], "acme.atlassian.net");
+});
+
+test("jiraCloudHost: scheme, upper case and trailing slash are normalised away", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().host["https://ACME.atlassian.net/"], "acme.atlassian.net");
+});
+
+test("jiraCloudHost: a non-host character before the suffix is refused", { skip: !swiftAvailable }, () => {
+  const { host } = swiftHelpers();
+  for (const raw of ["other.example?.atlassian.net", "x#.atlassian.net", "evil.com/.atlassian.net", "user@x.atlassian.net"]) {
+    assert.equal(host[raw], null, raw);
+  }
+});
+
+test("jiraCloudHost: an empty label is refused", { skip: !swiftAvailable }, () => {
+  const { host } = swiftHelpers();
+  assert.equal(host[".atlassian.net"], null);
+  assert.equal(host["a..atlassian.net"], null);
+});
+
+test("appWrittenTokenService: a token the app did not write is left alone", { skip: !swiftAvailable }, () => {
+  const { service } = swiftHelpers();
+  assert.equal(service.missing, null);
+  assert.equal(service.notOwned, null);
+});
+
+test("appWrittenTokenService: after switching from an API token to OAuth, the token entry is still the app's", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().service.oauthAfterToken, "sprint-board-jira-token");
+});
+
+test("appWrittenTokenService: under OAuth an older keychainService name is left alone", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().service.oauthLegacy, null);
+});
+
+test("appWrittenTokenService: an owned token without keychainService is the first version's entry", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().service.ownedDefault, "sprint-board-jira");
+});
+
+test("appWrittenTokenService: an owned token's keychainService names the entry", { skip: !swiftAvailable }, () => {
+  assert.equal(swiftHelpers().service.ownedNamed, "sprint-board-jira-token");
 });

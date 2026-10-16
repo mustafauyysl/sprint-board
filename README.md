@@ -40,6 +40,15 @@ No token is ever stored in plain text in a file.
 written and the tokens go into the keychain. It can be reopened later from
 **⚔ → Settings…** in the menu bar.
 
+When "Sign in with Atlassian" is not available (for example while the Atlassian app is
+still in development mode, which only lets its owner sign in), **Use an API token
+instead** takes a Jira site, email and API token. The token is checked against
+`/rest/api/3/myself`, then stored by the app itself under the keychain service
+`sprint-board-jira-token`, so reading it back opens no permission dialog. Opened from
+Settings while signed in, the screen shows the connected account, **Back to board**,
+and **Disconnect** (two clicks; removes the stored token or refresh token and the
+identity from the config, keeps thresholds, sounds and notes).
+
 ## Installation
 
 ```bash
@@ -99,9 +108,18 @@ costs.
 
 ## Usage
 
-- **⚔** in the menu bar → refresh / bring to front / quit (no Dock icon, `LSUIElement`)
-- Drag by the card's **top strip**; the **⟳** on that same strip refreshes
+- **⚔** in the menu bar → refresh / bring to front / settings / hide or show in Dock / quit
+- The app sits in the Dock and Cmd+Tab (macOS ties the two together); **⚔ → Hide in
+  Dock** removes both and is remembered across launches
+- Drag by the card's **top strip**; the **⟳** on that same strip refreshes. The three
+  dots on the strip close the widget (the app keeps running; the Dock icon, Cmd+Tab or
+  ⚔ → Bring widget to front brings it back), minimise it to the Dock, or make it fill
+  the screen with larger text
 - Refresh runs every 30 minutes and takes ~13 s
+- **🔀 CONFLICT WATCHER** lists every open PR with its merge state. A PR that starts
+  conflicting sends a macOS notification (click opens the PR); a refresh you trigger
+  (Refresh now or ⟳) always reports its result: "No conflicts, no CI errors" or which
+  PRs have a conflict or a failing required check
 
 `view.html` / `fetch.mjs` / `lib.mjs` are read at runtime → after editing them **no
 build is needed**, restarting the app is enough. If Swift changes, `./build-app.sh`.
@@ -165,6 +183,12 @@ build is needed**, restarting the app is enough. If Swift changes, `./build-app.
   was stuck on "loading" and left no trace at all.
 - **An app launched with `open` does not reach the unified log with NSLog** — write
   to a file for diagnosis.
+- **No main menu means no Cmd+C / Cmd+V / Cmd+A.** macOS routes those shortcuts through
+  the Edit menu's key equivalents; an app built in code has none, so a pasted token never
+  reached the setup inputs. `buildMainMenu()` adds one.
+- **A missed notification prompt counts as "Don't Allow".** The first-launch request
+  then fails with "Notifications are not allowed for this application" on every run;
+  the switch is in System Settings → Notifications → Sprint Board.
 
 ## Licence
 

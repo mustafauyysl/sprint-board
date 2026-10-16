@@ -12,6 +12,7 @@ import WebKit
 import Security
 import CommonCrypto
 import Network
+import UserNotifications
 
 /// Homebrew installs under /opt/homebrew on Apple Silicon and /usr/local on Intel.
 /// A GUI app launched from Finder does NOT see the shell PATH (it is limited to
@@ -97,6 +98,40 @@ func keychainGet(service: String, account: String) -> String? {
     return String(data: d, encoding: .utf8)
 }
 
+/// The Jira Cloud host a typed site names, or nil. Basic auth sends the token itself, so it
+/// only ever goes to an *.atlassian.net host. Only host characters are allowed: a suffix
+/// check alone let "other.example?.atlassian.net" send the request to other.example.
+func jiraCloudHost(_ raw: String) -> String? {
+    var site = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    for scheme in ["https://", "http://"] where site.hasPrefix(scheme) { site.removeFirst(scheme.count) }
+    while site.hasSuffix("/") { site.removeLast() }
+    let hostCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789.-")
+    guard site.unicodeScalars.allSatisfy({ hostCharacters.contains($0) }),
+          site.hasSuffix(".atlassian.net"), site.count > ".atlassian.net".count,
+          !site.hasPrefix("."), !site.contains("..") else { return nil }
+    return site
+}
+
+/// The keychain service holding a Jira API token this app wrote, or nil. Only a setup
+/// screen sets `tokensOwnedByApp`. sprint-board-jira-token is only ever written by the
+/// token sign-in, so it is the app's in any mode. Any other name is the app's only in token
+/// mode (the first version wrote sprint-board-jira); under OAuth it can still name an older
+/// hand-made entry, so it is left alone there.
+func appWrittenTokenService(_ cfg: [String: Any]) -> String? {
+    guard cfg["tokensOwnedByApp"] as? Bool == true else { return nil }
+    let service = (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
+    if service == JIRA_TOKEN_KEYCHAIN { return service }
+    return (cfg["authMode"] as? String) == "oauth" ? nil : service
+}
+
+func keychainDelete(service: String, account: String) {
+    SecItemDelete([
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: account,
+    ] as CFDictionary)
+}
+
 /// Writes the token DIRECTLY to the keychain. The `security add-generic-password`
 /// subprocess is deliberately NOT USED: a token in argv would show up in `ps` output.
 @discardableResult
@@ -124,6 +159,11 @@ let OAUTH_SCOPES = "read:jira-work read:jira-user read:me offline_access"
 /// The refresh token lives here. The access token is kept in memory — it lasts an
 /// hour, so writing it to disk is pointless.
 let JIRA_OAUTH_KEYCHAIN = "sprint-board-jira-oauth"
+let HIDE_IN_DOCK_KEY = "hideInDock"
+/// An API token entered on the setup screen. A separate service from JIRA_KEYCHAIN so it
+/// never collides with an entry made by hand with `security`, which this app cannot
+/// read without a permission dialog.
+let JIRA_TOKEN_KEYCHAIN = "sprint-board-jira-token"
 
 /// Diagnostics to a file. OFF BY DEFAULT: it writes only if /tmp/sb-debug.log
 /// ALREADY EXISTS, so `touch /tmp/sb-debug.log` turns it on.
@@ -343,7 +383,8 @@ final class BoardWindow: NSWindow {
     override var canBecomeMain: Bool { false }
 }
 
-final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate {
+final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate,
+    UNUserNotificationCenterDelegate {
     var window: BoardWindow!
     var web: DragWebView!
     var timer: Timer?
@@ -352,6 +393,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var retryCount = 0
     var ready = false
     var pendingJSON: String?
+    /// Set by "Refresh now" and the ⟳ button: the next result is reported as a notification.
+    var manualRefreshPending = false
+    /// The widget's frame before it was made to fill the screen; nil while it is normal size.
+    var restoreFrame: NSRect?
+    var dockItem: NSMenuItem?
 
     // MARK: window
 
@@ -368,7 +414,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         cfg.setValue(false, forKey: "drawsBackground")
 
         let frame = savedFrame()
-        window = BoardWindow(contentRect: frame, styleMask: [.borderless, .resizable],
+        window = BoardWindow(contentRect: frame, styleMask: [.borderless, .resizable, .miniaturizable],
                              backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -406,14 +452,24 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         let mRefresh = NSMenuItem(title: "Refresh now", action: #selector(menuRefresh), keyEquivalent: "r")
         let mFront = NSMenuItem(title: "Bring widget to front", action: #selector(menuFront), keyEquivalent: "")
         let mSetup = NSMenuItem(title: "Settings…", action: #selector(menuSetup), keyEquivalent: "")
-        for m in [mRefresh, mFront, mSetup] { m.target = self; menu.addItem(m) }
+        dockItem = NSMenuItem(title: dockItemTitle(), action: #selector(toggleDock), keyEquivalent: "")
+        for m in [mRefresh, mFront, mSetup, dockItem!] { m.target = self; menu.addItem(m) }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Sprint Board", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
 
+        buildMainMenu()
+
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { granted, err in
+            dbg("notification permission granted=\(granted) \(err?.localizedDescription ?? "")")
+        }
+
         window.orderFront(nil)
         NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification,
                                                object: window, queue: .main) { [weak self] _ in
+            guard self?.restoreFrame == nil else { return }
             self?.saveFrame()
         }
 
@@ -431,18 +487,161 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// Reopens the setup screen — so an expired token or a changed account never
     /// requires editing config by hand.
     @objc func menuSetup() {
+        manualRefreshPending = false
+        setupFromSettings = !needsSetup()
         onSetupScreen = true
         loadPage("setup.html")
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
 
-    @objc func menuRefresh() { reload() }
+    @objc func menuRefresh() {
+        manualRefreshPending = true
+        reload()
+    }
 
-    /// Brings the window back when it has ended up behind other windows.
+    /// Brings the window back when it has ended up behind other windows, was minimised
+    /// to the Dock, or was closed with the widget's own close button.
     @objc func menuFront() {
+        if window.isMiniaturized { window.deminiaturize(nil) }
         window.orderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func dockItemTitle() -> String {
+        UserDefaults.standard.bool(forKey: HIDE_IN_DOCK_KEY) ? "Show in Dock" : "Hide in Dock"
+    }
+
+    /// Without a Dock icon the app also leaves Cmd+Tab (macOS ties the two together);
+    /// the menu bar item stays the way back.
+    @objc func toggleDock() {
+        let hide = !UserDefaults.standard.bool(forKey: HIDE_IN_DOCK_KEY)
+        UserDefaults.standard.set(hide, forKey: HIDE_IN_DOCK_KEY)
+        NSApp.setActivationPolicy(hide ? .accessory : .regular)
+        dockItem?.title = dockItemTitle()
+        if !hide { NSApp.activate(ignoringOtherApps: true) }
+    }
+
+    /// Cmd+Tab back to the app shows the widget even after its close button hid it.
+    func applicationDidBecomeActive(_ note: Notification) {
+        if window != nil, !window.isVisible, !window.isMiniaturized { window.orderFront(nil) }
+    }
+
+    /// Signs this Mac out of Jira: the stored token or refresh token leaves the keychain and
+    /// the identity leaves the config. Thresholds, sounds and notes stay. Only entries this
+    /// app wrote are deleted; touching one made by hand with `security` opens a dialog.
+    func disconnect() {
+        guard let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
+              var cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any] else { return }
+        if cfg["tokensOwnedByApp"] as? Bool == true, let email = cfg["email"] as? String, !email.isEmpty {
+            keychainDelete(service: JIRA_OAUTH_KEYCHAIN, account: email)
+            if let service = appWrittenTokenService(cfg) { keychainDelete(service: service, account: email) }
+        }
+        for key in ["email", "host", "cloudId", "authMode", "tokensOwnedByApp"] { cfg.removeValue(forKey: key) }
+        if let data = try? JSONSerialization.data(withJSONObject: cfg, options: .prettyPrinted) {
+            try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))
+        }
+        jiraAccessToken = nil
+        jiraAccessExpiry = nil
+        setupFromSettings = false
+        manualRefreshPending = false
+        onSetupScreen = true
+        loadPage("setup.html")
+    }
+
+    /// The green button: the widget fills the screen with larger text; again restores it.
+    func toggleFill() {
+        if let frame = restoreFrame {
+            restoreFrame = nil
+            web.pageZoom = 1
+            window.setFrame(frame, display: true, animate: true)
+        } else if let screen = window.screen ?? NSScreen.main {
+            restoreFrame = window.frame
+            web.pageZoom = 1.4
+            window.setFrame(screen.visibleFrame, display: true, animate: true)
+        }
+        applyFillClass()
+    }
+
+    func applyFillClass() {
+        web.evaluateJavaScript("document.body.classList.toggle('filled', \(restoreFrame != nil))") { _, err in
+            if let err { dbg("fill class: \(err.localizedDescription)") }
+        }
+    }
+
+    /// Without an Edit menu macOS has nowhere to route Cmd+C / Cmd+V / Cmd+A, so the
+    /// setup screen's inputs could not be pasted into.
+    func buildMainMenu() {
+        let main = NSMenu()
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Refresh now", action: #selector(menuRefresh), keyEquivalent: "r").target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit Sprint Board", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        main.addItem(editItem)
+
+        NSApp.mainMenu = main
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        menuFront()
+        return false
+    }
+
+    // MARK: notifications
+
+    func notifyUser(id: String, title: String, body: String, url: String?) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        // Silent: a new conflict usually also plays fetch.mjs's alert sound, and two sounds
+        // for one event is noise.
+        if let url { content.userInfo = ["url": url] }
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil)) { err in
+            if let err { dbg("notification failed: \(err.localizedDescription)") }
+        }
+    }
+
+    /// New conflicts always notify; a refresh the user asked for also reports its result.
+    func notifyFromResult(_ obj: [String: Any]?, ok: Bool) {
+        for n in (obj?["notify"] as? [[String: Any]]) ?? [] {
+            guard let id = n["id"] as? String, let title = n["title"] as? String else { continue }
+            notifyUser(id: id, title: title, body: (n["body"] as? String) ?? "", url: n["url"] as? String)
+        }
+        guard manualRefreshPending else { return }
+        manualRefreshPending = false
+        if ok, let s = obj?["summary"] as? [String: Any], let title = s["title"] as? String {
+            notifyUser(id: "refresh", title: title, body: (s["body"] as? String) ?? "", url: nil)
+        } else if !ok {
+            notifyUser(id: "refresh", title: "Refresh failed", body: (obj?["error"] as? String) ?? "unknown error", url: nil)
+        }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list])
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if let s = response.notification.request.content.userInfo["url"] as? String, let url = URL(string: s),
+           url.scheme == "https" {
+            NSWorkspace.shared.open(url)
+        }
+        completionHandler()
     }
 
     func savedFrame() -> NSRect {
@@ -486,6 +685,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// sbRender, so pushing data there fails with "A JavaScript exception occurred" —
     /// and with no config written yet, fetch would fail anyway.
     var onSetupScreen = false
+    /// The setup screen was opened from Settings while signed in, so it offers "Back to board".
+    var setupFromSettings = false
 
     /// Loads an HTML page from the bundle/repo.
     func loadPage(_ name: String) {
@@ -607,6 +808,71 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
     }
 
+    /// The API-token route, for when "Sign in with Atlassian" is not available. The token
+    /// is checked against Jira first, then stored by this app, so reading it back opens no
+    /// keychain permission dialog.
+    func finishTokenLogin(host rawHost: String, email: String, token: String) {
+        guard let host = jiraCloudHost(rawHost), let url = URL(string: "https://\(host)/rest/api/3/myself") else {
+            setupFailed(["Enter your Jira Cloud site, like yourcompany.atlassian.net."]); return
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 25
+        req.setValue("Basic \(Data("\(email):\(token)".utf8).base64EncodedString())", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        let done = DispatchSemaphore(value: 0)
+        var status: Int?
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            status = (resp as? HTTPURLResponse)?.statusCode
+            done.signal()
+        }.resume()
+        done.wait()
+        switch status {
+        case 200: break
+        case 401, 403: setupFailed(["Jira did not accept this email and token."]); return
+        case nil: setupFailed(["Could not reach \(host)."]); return
+        case let code?: setupFailed(["Jira answered HTTP \(code) from \(host)."]); return
+        }
+        guard keychainSet(service: JIRA_TOKEN_KEYCHAIN, account: email, value: token) else {
+            setupFailed(["Could not save the token to the keychain."]); return
+        }
+
+        var cfg = (try? JSONSerialization.jsonObject(with: Data(contentsOf:
+                    URL(fileURLWithPath: "\(APP_DIR)/config.example.json")))) as? [String: Any] ?? [:]
+        if let existing = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
+           let old = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] {
+            cfg = old
+        }
+        // Switching away from "Sign in with Atlassian": its session must not linger.
+        if (cfg["authMode"] as? String) == "oauth", let oldEmail = cfg["email"] as? String, !oldEmail.isEmpty {
+            keychainDelete(service: JIRA_OAUTH_KEYCHAIN, account: oldEmail)
+            jiraAccessToken = nil
+            jiraAccessExpiry = nil
+        }
+        // Nor may the token this replaces (the first version kept it under sprint-board-jira).
+        if let oldService = appWrittenTokenService(cfg), let oldEmail = cfg["email"] as? String, !oldEmail.isEmpty,
+           !(oldService == JIRA_TOKEN_KEYCHAIN && oldEmail == email) {
+            keychainDelete(service: oldService, account: oldEmail)
+        }
+        cfg["host"] = host
+        cfg["email"] = email
+        cfg["keychainService"] = JIRA_TOKEN_KEYCHAIN
+        cfg["tokensOwnedByApp"] = true
+        cfg.removeValue(forKey: "authMode")
+        cfg.removeValue(forKey: "cloudId")
+        if let data = try? JSONSerialization.data(withJSONObject: cfg, options: .prettyPrinted) {
+            try? FileManager.default.createDirectory(
+                atPath: (CONFIG_PATH as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true)
+            try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))
+        }
+
+        DispatchQueue.main.async {
+            self.onSetupScreen = false
+            self.loadPage("view.html")
+            self.reload()
+        }
+    }
+
     /// A valid access token; when expired it is refreshed silently via the Worker.
     /// The browser is NEVER opened — refreshing is purely server-to-server.
     func currentJiraAccessToken(email: String) -> TokenResult {
@@ -698,6 +964,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         DispatchQueue.main.async {
             guard !self.onSetupScreen else { return }
             self.onSetupScreen = true
+            self.setupFromSettings = false
+            self.manualRefreshPending = false
             self.pendingSetupError = reason
             self.loadPage("setup.html")
             NSApp.activate(ignoringOtherApps: true)
@@ -706,7 +974,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     }
 
     func reload() {
-        if onSetupScreen { return }
+        // A refresh asked for on the setup screen never runs, so it must not wait to
+        // report itself on the next automatic one.
+        if onSetupScreen { manualRefreshPending = false; return }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             guard let node = NODE else {
@@ -772,9 +1042,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
 
-            let ok = (try? JSONSerialization.jsonObject(with: Data(json.utf8)))
-                .flatMap { ($0 as? [String: Any])?["ok"] as? Bool } ?? false
+            let obj = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+            let ok = obj?["ok"] as? Bool ?? false
             if ok { self.retryCount = 0; self.retryTimer?.invalidate() } else { self.scheduleRetry() }
+            self.notifyFromResult(obj, ok: ok)
 
             guard self.ready else { self.pendingJSON = json; return }
             let escaped = json.data(using: .utf8).flatMap {
@@ -791,6 +1062,16 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     }
 
     func webView(_ w: WKWebView, didFinish nav: WKNavigation!) {
+        if restoreFrame != nil { applyFillClass() }
+        if onSetupScreen, setupFromSettings,
+           let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
+           let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+           let email = cfg["email"] as? String {
+            let mode = (cfg["authMode"] as? String) == "oauth" ? "oauth" : "token"
+            let ctx = (try? JSONSerialization.data(withJSONObject: ["email": email, "mode": mode]))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            w.evaluateJavaScript("window.sbSetupContext && window.sbSetupContext(\(ctx))")
+        }
         if let msg = pendingSetupError {
             pendingSetupError = nil
             let json = (try? JSONSerialization.data(withJSONObject: ["errors": [msg]]))
@@ -859,13 +1140,38 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
            url.scheme == "https" || url.scheme == "http" {
             NSWorkspace.shared.open(url)
         }
-        if body["refresh"] != nil { reload() }
+        if body["refresh"] != nil {
+            manualRefreshPending = true
+            reload()
+        }
         if body["atlassianLogin"] != nil {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.startAtlassianLogin() }
         }
+        if let t = body["tokenLogin"] as? [String: Any], let host = t["host"] as? String,
+           let email = t["email"] as? String, let token = t["token"] as? String {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.finishTokenLogin(host: host, email: email, token: token)
+            }
+        }
         if let t = body["noteAdd"] as? String { addNote(t) }
         if let i = body["noteDel"] as? String { removeNote(i) }
-        if let h = body["height"] as? Double, h > 60 {
+        if body["disconnect"] != nil, onSetupScreen { disconnect() }
+        if body["backToBoard"] != nil, onSetupScreen {
+            onSetupScreen = false
+            setupFromSettings = false
+            loadPage("view.html")
+            reload()
+        }
+        if let w = body["win"] as? String {
+            switch w {
+            case "close": window.orderOut(nil)
+            case "minimize": window.miniaturize(nil)
+            case "fill": toggleFill()
+            default: break
+            }
+        }
+        // While the widget fills the screen its size is fixed; the page's height reports wait.
+        if let h = body["height"] as? Double, h > 60, restoreFrame == nil {
             var f = window.frame
             let top = f.maxY                    // pin the top edge, grow downwards
             f.size.height = CGFloat(h)
@@ -881,5 +1187,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 let app = NSApplication.shared
 let delegate = App()
 app.delegate = delegate
-app.setActivationPolicy(.accessory)   // no Dock icon
+// A regular app unless the user chose "Hide in Dock": Cmd+Tab only lists apps that have a
+// Dock icon, and the two come together.
+app.setActivationPolicy(UserDefaults.standard.bool(forKey: HIDE_IN_DOCK_KEY) ? .accessory : .regular)
 app.run()
