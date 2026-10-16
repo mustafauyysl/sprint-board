@@ -648,7 +648,7 @@ export function goalRisk(now, start, end, statusCategory) {
 
 const RISK_ORDER = { red: 0, yellow: 1, ok: 2, done: 3 };
 
-/** The SPRINT GOAL band: done/total, the worst colour, and one row per goal task. */
+/** The TEAM SPRINT GOAL band: done/total, the worst colour, and one row per goal task. */
 export function goalBand(issues, sprints, now, host, sprintField) {
   const known = new Map((sprints || []).map((s) => [s.id, s]));
   const rows = (issues || []).map((issue, i) => {

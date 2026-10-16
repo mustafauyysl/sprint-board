@@ -120,8 +120,8 @@ costs.
   means all PRs. Only a valid GitHub organization name is saved, and the board uses it
   at the next refresh. An invalid name typed into the config by hand turns the PR
   bands off with a message; it never widens the search to all PRs
-- **🎯 SPRINT GOAL** (off by default; turn on **Sprint goal tracking** under ⚙) sits at
-  the top of the board. It lists the flagged tasks of your active sprint, whoever owns
+- **🎯 TEAM SPRINT GOAL** (off by default; turn on **Sprint goal tracking** under ⚙) sits
+  under the "cleared" line, above the boss box. It lists the flagged tasks of your active sprint, whoever owns
   them, with done/total. A task counts as done when its status category is done. From
   day 8 of the sprint an open goal task is yellow; in the last 3 business days before
   the sprint end it is red. The header takes the worst colour. Your own tasks that are

@@ -418,7 +418,7 @@ function playAlert(cfg, alerts) {
 }
 
 /**
- * The SPRINT GOAL band: the flagged issues of my active sprints, whoever owns them. Off
+ * The TEAM SPRINT GOAL band: the flagged issues of my active sprints, whoever owns them. Off
  * (null, and no Jira call) unless the setting is on. A failed search is said in the band,
  * never shown as "no goal tasks".
  */

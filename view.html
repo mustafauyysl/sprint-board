@@ -229,7 +229,7 @@
   const GOAL_MARK = { done: "✓", red: "✗", yellow: "!", ok: "·" };
   const goalBand = (g) => g ? `
     <div class="goals ${esc(g.worst)}">
-      <div class="ghdr">🎯 SPRINT GOAL (${g.done}/${g.total})</div>
+      <div class="ghdr">🎯 TEAM SPRINT GOAL (${g.done}/${g.total})</div>
       ${g.error ? `<div class="gnone">Could not read the goal tasks: ${esc(g.error)}</div>`
         : g.rows.length ? g.rows.map((r) => `
         <div class="grow ${esc(r.risk)}" data-url="${esc(r.url)}" title="${esc(r.summary)}">
@@ -312,12 +312,12 @@
         Showing data as of ${hhmm(staleNote.at)}. It will retry shortly; press ⟳
         if you would rather not wait.</div>` : ""}
 
-      ${goalBand(d.sprintGoal)}
-
       <div class="siege">
         <span>${bar(d.total ? d.cleared / d.total : 0, 12)} ${d.cleared}/${d.total} cleared</span>
         <span class="tools"><span class="rf" id="rf" title="refresh now">⟳</span><span class="rf" id="gear" title="settings">⚙</span></span>
       </div>
+
+      ${goalBand(d.sprintGoal)}
 
       ${boss ? `
         <div class="boss" data-url="${esc(boss.url)}">
@@ -327,7 +327,7 @@
           <div class="sum">${esc(clip(boss.summary, 46))}</div>
           <div class="hp">HP ${bar(Math.max(.15, Math.min(1, (boss.ratio - 1) / 2)))}
             ${esc(boss.status)} · ${boss.daysInStatus}d / threshold ${boss.threshold}d</div>
-        </div>` : `<div class="clean">⚔ No boss — sprint is clean</div>`}
+        </div>` : `<div class="clean">⚔ No boss — your sprint is clean</div>`}
 
       ${tasks.map((t) => `
         <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}" data-url="${esc(t.url)}"
