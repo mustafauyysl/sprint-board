@@ -745,9 +745,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// The green button: the widget fills the screen with larger text; again restores it.
     func toggleFill() {
         if let frame = restoreFrame {
-            restoreFrame = nil
             web.pageZoom = 1
+            // The animation runs a nested run loop: height reports must still wait until it ends.
             window.setFrame(frame, display: true, animate: true)
+            restoreFrame = nil
         } else if let screen = window.screen ?? NSScreen.main {
             restoreFrame = window.frame
             web.pageZoom = 1.4
@@ -758,8 +759,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.invalidateShadow()
         applyFillClass()
         if restoreFrame == nil {
-            web.evaluateJavaScript("window.sbReportHeight && window.sbReportHeight()") { _, err in
-                if let err { dbg("report height: \(err.localizedDescription)") }
+            web.evaluateJavaScript("window.sbFit && window.sbFit()") { _, err in
+                if let err { dbg("fit: \(err.localizedDescription)") }
             }
         }
     }
@@ -1380,12 +1381,15 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             }
         }
         // While the widget fills the screen its size is fixed; the page's height reports wait.
-        if let h = body["height"] as? Double, h > 60, restoreFrame == nil,
-           abs(CGFloat(h) - window.frame.height) >= 0.5 {
+        // The window never grows past the screen: it would run under the Dock and be saved so.
+        if let posted = body["height"] as? Double, posted > 60, restoreFrame == nil {
+            let vf = (window.screen ?? NSScreen.main)?.visibleFrame
+            let h = min(CGFloat(posted), vf?.height ?? .greatestFiniteMagnitude)
+            guard abs(h - window.frame.height) >= 0.5 else { return }
             var f = window.frame
             let top = f.maxY                    // pin the top edge, grow downwards
-            f.size.height = CGFloat(h)
-            f.origin.y = top - CGFloat(h)
+            f.size.height = h
+            f.origin.y = max(top - h, vf?.minY ?? -.greatestFiniteMagnitude)
             window.setFrame(f, display: true)
             window.invalidateShadow()
             saveFrame()

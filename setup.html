@@ -127,7 +127,10 @@ permissions are read from your account. Nothing is written to a file; it goes to
   });
 
 
-  const resize = () => requestAnimationFrame(() => post({ height: $("card").offsetHeight }));
+  // The window follows the card, as on the board. Swift calls it too when the widget leaves fill mode.
+  const fit = () => requestAnimationFrame(() => post({ height: $("card").offsetHeight }));
+  window.sbFit = fit;
+  new ResizeObserver(fit).observe($("card"));
 
   document.querySelectorAll("[data-win]").forEach((el) =>
     el.addEventListener("click", () => post({ win: el.dataset.win })));
@@ -148,7 +151,6 @@ permissions are read from your account. Nothing is written to a file; it goes to
     $("drafts").checked = ctx.showDraftPrs !== false;
     $("goals").checked = ctx.sprintGoalTracking === true;
     $("settings").style.display = "block";
-    resize();
   };
 
   $("saveSettings").addEventListener("click", () => {
@@ -164,7 +166,6 @@ permissions are read from your account. Nothing is written to a file; it goes to
       $("drafts").checked = res.showDraftPrs !== false;
       $("goals").checked = res.sprintGoalTracking === true;
       $("saved").textContent = "Saved. The board uses it at the next refresh.";
-      resize();
       return;
     }
     window.sbSetupResult(res);
@@ -195,7 +196,6 @@ permissions are read from your account. Nothing is written to a file; it goes to
     $("tokenForm").style.display = "block";
     $("useToken").style.display = "none";
     $("host").focus();
-    resize();
   });
 
   $("saveToken").addEventListener("click", () => {
@@ -223,9 +223,5 @@ permissions are read from your account. Nothing is written to a file; it goes to
       "<li>" + String(e).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</li>"
     ).join("") + "</ul>";
     $("err").style.display = "block";
-    resize();
   };
-
-  // Size the window to the content (the same bridge view.html uses).
-  requestAnimationFrame(() => post({ height: $("card").offsetHeight }));
 </script>
