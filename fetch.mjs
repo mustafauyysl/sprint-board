@@ -15,6 +15,7 @@ import {
   mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, reviewIds, conflictIds, newConflicts, conflictNotifications, refreshSummary, CONFLICT_SCOPE,
   showDraftPrs, sprintGoalTracking, activeSprints, goalJql, goalBand, withGoalMarks,
   RELEASE_PR_STATES, releasePrSearch, releasePrs, groupByStatus,
+  titleNamesKey, RELEASE_BRANCH, releasePrId, releaseBranchCheck, reachedReleaseBranch,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -346,12 +347,42 @@ async function attachReleasePrs(tasks, qualifier, token) {
   if (!token || wanted.length === 0) return;
   const aliases = wanted.map((w, i) => `
     r${i}: search(query: ${JSON.stringify(w.q)}, type: ISSUE, first: 10) {
-      nodes { ... on PullRequest { number title url state repository { name } } }
+      nodes { ... on PullRequest {
+        number title url state baseRefName mergeCommit { oid } repository { name owner { login } }
+      } }
     }`);
   try {
     const data = (await ghGraphql(`{${aliases.join("\n")}}`, token))?.data ?? {};
-    wanted.forEach((w, i) => { w.t.releasePrs = releasePrs(data[`r${i}`]?.nodes, w.t.key, w.t.release); });
+    const nodesOf = (i) => (Array.isArray(data[`r${i}`]?.nodes) ? data[`r${i}`].nodes : []);
+    const waiting = wanted.flatMap((w, i) =>
+      w.t.release === "pending" ? nodesOf(i).filter((n) => titleNamesKey(n?.title, w.t.key)) : []);
+    const shipped = await shippedPrs(waiting, token);
+    wanted.forEach((w, i) => { w.t.releasePrs = releasePrs(data[`r${i}`]?.nodes, w.t.key, w.t.release, shipped); });
   } catch { /* optional: the column stays empty */ }
+}
+
+/**
+ * The PRs merged into main or develop whose merge commit is already on master, as
+ * releasePrIds, from ONE aliased call. Optional: on failure they all read merged.
+ */
+async function shippedPrs(nodes, token) {
+  const checks = new Map();
+  for (const n of nodes) {
+    const check = releaseBranchCheck(n);
+    if (check) checks.set(releasePrId(n), check);
+  }
+  const shipped = new Set();
+  if (checks.size === 0) return shipped;
+  const list = [...checks];
+  const aliases = list.map(([, c], j) => `
+    c${j}: repository(owner: ${JSON.stringify(c.owner)}, name: ${JSON.stringify(c.name)}) {
+      ref(qualifiedName: ${JSON.stringify(`refs/heads/${RELEASE_BRANCH}`)}) { compare(headRef: ${JSON.stringify(c.oid)}) { status } }
+    }`);
+  try {
+    const data = (await ghGraphql(`{${aliases.join("\n")}}`, token))?.data ?? {};
+    list.forEach(([id], j) => { if (reachedReleaseBranch(data[`c${j}`]?.ref?.compare?.status)) shipped.add(id); });
+  } catch { /* optional: merged stays merged */ }
+  return shipped;
 }
 
 const reviewQuery = (qualifier) => `

@@ -619,30 +619,59 @@ export function titleNamesKey(title, key) {
 }
 
 /**
- * open, merged or deployed; null for a PR closed without merging. GitHub cannot tell a
- * deployed PR (no deployments are recorded, and a merge into main is not a release in every
- * repo), so "deployed" means merged on a task Jira has as finished.
+ * open, merged or deployed; null for a PR closed without merging. GitHub records no
+ * deployments, so "deployed" means merged on a task Jira has as finished, or merged into
+ * main/develop with the merge commit already on master (`shipped`).
  */
-export function releasePrState(pr, release) {
+export function releasePrState(pr, release, shipped = false) {
   if (!pr) return null;
   if (pr.state === "OPEN") return "open";
-  if (pr.state === "MERGED") return release === "finished" ? "deployed" : "merged";
+  if (pr.state === "MERGED") return release === "finished" || shipped ? "deployed" : "merged";
   return null;
 }
 
-/** A task's PR column from its search nodes: open PRs first, closed-unmerged ones dropped. */
-export function releasePrs(nodes, key, release) {
+/** The branch a merge into main or develop has to reach to be live. */
+export const RELEASE_BRANCH = "master";
+const GITHUB_NAME = /^[A-Za-z0-9_.-]+$/;
+const COMMIT_OID = /^[0-9a-f]{40}$/;
+
+/** A PR across orgs and repos. */
+export const releasePrId = (n) => `${n?.repository?.owner?.login ?? "?"}/${n?.repository?.name ?? "?"}#${n?.number}`;
+
+/**
+ * What to ask GitHub to learn whether a merged PR is on master: {owner, name, oid}, or null.
+ * A PR merged straight into master is not asked: there a merge is not always a release
+ * (Terraform, charts), so Jira stays the judge. Every field goes into the query text, so
+ * anything but a plain name or a commit id is refused.
+ */
+export function releaseBranchCheck(node) {
+  if (node?.state !== "MERGED" || node.baseRefName === RELEASE_BRANCH) return null;
+  const owner = node.repository?.owner?.login;
+  const name = node.repository?.name;
+  const oid = node.mergeCommit?.oid;
+  const fits = (value, re) => typeof value === "string" && re.test(value);
+  if (!fits(owner, GITHUB_NAME) || !fits(name, GITHUB_NAME) || !fits(oid, COMMIT_OID)) return null;
+  return { owner, name, oid };
+}
+
+/** master compared with the merge commit: at it or past it means the commit is on master. */
+export const reachedReleaseBranch = (status) => status === "BEHIND" || status === "IDENTICAL";
+
+/**
+ * A task's PR column from its search nodes: open PRs first, closed-unmerged ones dropped.
+ * `shipped` holds the releasePrIds whose merge commit is on master.
+ */
+export function releasePrs(nodes, key, release, shipped = new Set()) {
   if (!Array.isArray(nodes)) return null;
   const seen = new Set();
   const rows = [];
   for (const n of nodes) {
     if (!n || !n.number || !titleNamesKey(n.title, key)) continue;
-    const status = releasePrState(n, release);
+    const status = releasePrState(n, release, shipped.has(releasePrId(n)));
     if (!status) continue;
-    const repo = n.repository?.name ?? "?";
-    if (seen.has(`${repo}#${n.number}`)) continue;
-    seen.add(`${repo}#${n.number}`);
-    rows.push({ repo, number: n.number, url: n.url ?? null, title: n.title ?? "", status });
+    if (seen.has(releasePrId(n))) continue;
+    seen.add(releasePrId(n));
+    rows.push({ repo: n.repository?.name ?? "?", number: n.number, url: n.url ?? null, title: n.title ?? "", status });
   }
   return rows.sort((a, b) => (a.status === "open" ? 0 : 1) - (b.status === "open" ? 0 : 1));
 }
