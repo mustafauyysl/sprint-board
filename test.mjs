@@ -685,6 +685,45 @@ test("both screens: one card radius, and no shadow outside the card", () => {
   }
 });
 
+test("both screens: the window material is rounded with the card's radius", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  const swift = Number(read("./SprintBoard.swift").match(/^let CARD_RADIUS: CGFloat = (\d+)$/m)?.[1]);
+  assert.ok(swift > 0, "CARD_RADIUS not found");
+  for (const f of ["./view.html", "./setup.html"]) {
+    const css = read(f).match(/#card \{([^}]*)\}/)?.[1] ?? "";
+    assert.equal(css.match(/border-radius: ?([^;]+);/)?.[1], `${swift}px`, f);
+  }
+});
+
+test("both screens: the same panel colours and window buttons", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  // Tokens per scheme ("light" before the dark media query, "dark" inside it) and selector.
+  const tokens = (page) => {
+    const [light, dark] = page.split("@media (prefers-color-scheme: dark)");
+    const out = {};
+    for (const [scheme, css] of [["light", light], ["dark", dark.slice(0, dark.indexOf("\n  }"))]]) {
+      for (const [, sel, body] of css.matchAll(/(:root(?:\.glass)?) \{([^}]*)\}/g)) {
+        for (const [, name, value] of body.matchAll(/(--[\w-]+): ?([^;}]+?)\s*(?:;|$)/g)) {
+          out[`${scheme} ${sel} ${name}`] = value;
+        }
+      }
+    }
+    return out;
+  };
+  const buttons = (page) => Object.fromEntries([...page.matchAll(/(?:\.hdr )?(\.tl[\w.:-]*) \{([^}]*)\}/g)]
+    .map(([, sel, body]) => [sel, body.replace(/\s+/g, " ").replace(/\s*([:;])\s*/g, "$1").trim()]));
+  const [view, setup] = [read("./view.html"), read("./setup.html")];
+  const [tv, ts] = [tokens(view), tokens(setup)];
+  for (const key of ["light :root --panel", "light :root --fill", "light :root.glass --panel",
+    "dark :root --panel", "dark :root --fill", "dark :root.glass --panel"]) {
+    assert.ok(key in tv && key in ts, `${key} missing`);
+  }
+  for (const key of Object.keys(ts).filter((k) => k in tv)) assert.equal(ts[key], tv[key], key);
+  const [bv, bs] = [buttons(view), buttons(setup)];
+  assert.deepEqual(Object.keys(bv).sort(), [".tl", ".tl.close", ".tl.fill", ".tl.min", ".tl:hover"]);
+  assert.deepEqual(bs, bv);
+});
+
 test("addNote: every note gets a unique id", () => {
   const t = at("2026-08-20");
   const n = addNote(addNote([], "a", t), "b", t);
