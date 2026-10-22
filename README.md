@@ -38,7 +38,7 @@ No token is ever stored in plain text in a file.
 **First launch:** with no config, or no Jira token in the keychain, the app opens
 `setup.html` instead of `view.html`; you sign in with Atlassian there, the config is
 written and the tokens go into the keychain. It can be reopened later from
-**⚔ → Settings…** in the menu bar.
+**Ring icon → Settings…** in the menu bar.
 
 When "Sign in with Atlassian" is not available (for example while the Atlassian app is
 still in development mode, which only lets its owner sign in), **Use an API token
@@ -108,10 +108,10 @@ costs.
 
 ## Usage
 
-- **⚔** in the menu bar → refresh / bring to front / settings / show in Dock / quit
-- The app is not in the Dock or Cmd+Tab (macOS ties the two together). **⚔ → Show in
+- The **ring icon** (a circle with a check) in the menu bar → refresh / bring to front / settings / show in Dock / quit
+- The app is not in the Dock or Cmd+Tab (macOS ties the two together). **Ring icon → Show in
   Dock** adds both; click it again to remove them. The choice is remembered across launches
-- Drag by the card's **top strip**. The three dots on the strip close the widget (the app keeps running; ⚔ → Bring widget to front
+- Drag by the card's **top strip**. The three dots on the strip close the widget (the app keeps running; ring icon → Bring widget to front
   brings it back, as do the Dock icon and Cmd+Tab when it is in the Dock), minimise it,
   or make it fill the screen with larger text
 - Under the strip, on the right of the "cleared" line, **⟳** refreshes and **⚙** opens the

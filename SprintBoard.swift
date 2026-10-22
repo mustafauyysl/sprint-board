@@ -429,32 +429,35 @@ func symbolStyleSheet() -> String {
 /// nothing in WKWebView — and isMovableByWindowBackground is not enough either,
 /// because the WebView consumes the events.)
 // Menu bar icon — not the drag class's job, it lives at the top level.
-/// The sword for the menu bar. Being a template image it is drawn black and macOS
-/// handles the tinting. Font-independent — the ⚔ glyph can fall back to Apple
-/// Color Emoji.
-func swordIcon(_ side: CGFloat) -> NSImage {
+/// The sprint ring of the app icon for the menu bar: a faint track, a three-quarter
+/// arc and a check. Being a template image it is drawn black (the track as alpha)
+/// and macOS handles the tinting. Drawn paths, not an SF Symbol, so it matches the
+/// app icon on every macOS version.
+func ringIcon(_ side: CGFloat) -> NSImage {
     let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
         func p(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
             NSPoint(x: x * side, y: y * side)
         }
-        let blade = NSBezierPath()
-        blade.move(to: p(0.50, 0.98))
-        blade.line(to: p(0.60, 0.76))
-        blade.line(to: p(0.588, 0.40))
-        blade.line(to: p(0.412, 0.40))
-        blade.line(to: p(0.40, 0.76))
-        blade.close()
+        let center = p(0.5, 0.5), radius = side * 0.38
+        let track = NSBezierPath()
+        track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
+        track.lineWidth = side * 0.11
+        NSColor.black.withAlphaComponent(0.3).setStroke()
+        track.stroke()
 
-        let guardBar = NSBezierPath(roundedRect: NSRect(x: 0.16 * side, y: 0.315 * side,
-                                                       width: 0.68 * side, height: 0.085 * side),
-                                    xRadius: 0.04 * side, yRadius: 0.04 * side)
-        let grip = NSBezierPath(roundedRect: NSRect(x: 0.442 * side, y: 0.115 * side,
-                                                    width: 0.116 * side, height: 0.20 * side),
-                                xRadius: 0.04 * side, yRadius: 0.04 * side)
-        let pommel = NSBezierPath(ovalIn: NSRect(x: 0.40 * side, y: 0.015 * side,
-                                                 width: 0.20 * side, height: 0.13 * side))
-        NSColor.black.setFill()
-        for path in [blade, guardBar, grip, pommel] { path.fill() }
+        let arc = NSBezierPath()
+        arc.appendArc(withCenter: center, radius: radius, startAngle: 90, endAngle: -180, clockwise: true)
+        arc.lineWidth = side * 0.11
+        arc.lineCapStyle = .round
+        let check = NSBezierPath()
+        check.move(to: p(0.34, 0.50))
+        check.line(to: p(0.45, 0.39))
+        check.line(to: p(0.66, 0.62))
+        check.lineWidth = side * 0.10
+        check.lineCapStyle = .round
+        check.lineJoinStyle = .round
+        NSColor.black.setStroke()
+        for path in [arc, check] { path.stroke() }
         return true
     }
     img.isTemplate = true          // adapts itself to a light/dark menu bar
@@ -580,7 +583,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         // A template NSImage, NOT TEXT: `button.title = "⚔"` looked like a tiny character
         // rather than an icon and depended on the menu font. A template image fits the
         // menu height and tints itself for a light/dark menu bar.
-        statusItem.button?.image = swordIcon(18)
+        statusItem.button?.image = ringIcon(18)
         statusItem.button?.toolTip = "Sprint Board"
         let menu = NSMenu()
         let mRefresh = NSMenuItem(title: "Refresh now", action: #selector(menuRefresh), keyEquivalent: "r")

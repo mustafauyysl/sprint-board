@@ -99,7 +99,7 @@ say "→ tests"
 if [ "$BUILD" = "1" ]; then
   say "→ building and installing into /Applications"
   ( cd "$DIR" && ./build-app.sh )
-  say "✓ installed. Managed from the ⚔ icon in the menu bar (there is no Dock icon)."
+  say "✓ installed. Managed from the ring icon in the menu bar (there is no Dock icon)."
   say "  On first launch the setup screen opens — click Sign in with Atlassian."
 else
   say "(--no-build: build skipped)"
