@@ -562,7 +562,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         #if canImport(AppKit, _version: 2600)
         if #available(macOS 26, *) {
             let glass = NSGlassEffectView(frame: NSRect(origin: .zero, size: frame.size))
-            glass.cornerRadius = CARD_RADIUS
             let host = NSView(frame: glass.bounds)
             host.autoresizingMask = [.width, .height]
             glass.contentView = host
@@ -583,10 +582,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             material.material = .popover
             material.blendingMode = .behindWindow
             material.state = .active
-            material.maskImage = roundedMask(CARD_RADIUS)
             window.contentView = material
             pageHost = material
         }
+        applyCornerRadius(CARD_RADIUS)
         // NOTE: the desktop level (desktopIcon) was tried — the window received no mouse
         // events. Normal level: same plane as other windows, clicks/drags work.
         window.level = .normal
@@ -758,6 +757,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         applyCornerRadius(CARD_RADIUS * web.pageZoom)
         window.invalidateShadow()
         applyFillClass()
+        if restoreFrame == nil {
+            web.evaluateJavaScript("window.sbReportHeight && window.sbReportHeight()") { _, err in
+                if let err { dbg("report height: \(err.localizedDescription)") }
+            }
+        }
     }
 
     func applyCornerRadius(_ radius: CGFloat) {
@@ -1377,7 +1381,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
         // While the widget fills the screen its size is fixed; the page's height reports wait.
         if let h = body["height"] as? Double, h > 60, restoreFrame == nil,
-           Int(h) != Int(window.frame.height) {
+           abs(CGFloat(h) - window.frame.height) >= 0.5 {
             var f = window.frame
             let top = f.maxY                    // pin the top edge, grow downwards
             f.size.height = CGFloat(h)

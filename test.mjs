@@ -700,6 +700,7 @@ test("both screens: the same panel colours and window buttons", () => {
   // Tokens per scheme ("light" before the dark media query, "dark" inside it) and selector.
   const tokens = (page) => {
     const [light, dark] = page.split("@media (prefers-color-scheme: dark)");
+    assert.ok(dark !== undefined, "no dark media query");
     const out = {};
     for (const [scheme, css] of [["light", light], ["dark", dark.slice(0, dark.indexOf("\n  }"))]]) {
       for (const [, sel, body] of css.matchAll(/(:root(?:\.glass)?) \{([^}]*)\}/g)) {

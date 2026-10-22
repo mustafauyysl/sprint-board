@@ -179,11 +179,17 @@
   const openUrl = (u) => { if (u && u !== "#") window.webkit?.messageHandlers?.sb?.postMessage({ open: u }); };
   const refresh = () => window.webkit?.messageHandlers?.sb?.postMessage({ refresh: true });
   // The window material covers the whole window. A drawn board sets the window to its height;
-  // a placeholder (loading, error) fills the window instead, so the widget keeps its size.
+  // a placeholder (loading, error) fills the window instead, so the widget keeps its size,
+  // and grows it only when its text does not fit.
   const reportHeight = () => {
     const card = document.getElementById("card");
     window.webkit?.messageHandlers?.sb?.postMessage({ height: card.offsetHeight });
   };
+  const growToFit = () => {
+    if (document.getElementById("card").offsetHeight > window.innerHeight) reportHeight();
+  };
+  // Swift calls this when the widget leaves fill mode, where height reports are ignored.
+  window.sbReportHeight = () => { if (!document.querySelector("#card > .err")) reportHeight(); };
 
   const band = (cls, title, rows, mark) => rows.length ? `
     <hr>
@@ -223,12 +229,15 @@
     return `
     <hr>
     <div class="sec goals ${esc(g.worst)}">
+      ${g.error ? `
+      <div class="top"><span class="lbl">${sym("flag.fill", flag)}Team sprint goal</span></div>
+      <div class="under"><span></span><span>${days(daysLeft)}</span></div>
+      <div class="gnone">Could not read the goal tasks: ${esc(g.error)}</div>` : `
       <div class="top"><span class="lbl">${sym("flag.fill", flag)}Team sprint goal</span>
-        ${g.error ? "" : `<span class="val">${pct(g.done, g.total)}</span>`}</div>
-      ${g.error ? "" : `<progress value="${g.done}" max="${g.total || 1}"></progress>
-      <div class="under"><span>${g.done} of ${g.total} done</span><span>${days(daysLeft)}</span></div>`}
-      ${g.error ? `<div class="gnone">Could not read the goal tasks: ${esc(g.error)}</div>`
-        : g.rows.length ? `
+        <span class="val">${pct(g.done, g.total)}</span></div>
+      <progress value="${g.done}" max="${g.total || 1}"></progress>
+      <div class="under"><span>${g.done} of ${g.total} done</span><span>${days(daysLeft)}</span></div>
+      ${g.rows.length ? `
         <div class="summary">${["red", "yellow", "ok", "done"].map((k) =>
           `<span><span class="dot ${k}"></span>${count[k]} ${RISK_WORD[k]}</span>`).join("")}</div>
         ${g.rows.map((r) => `
@@ -237,7 +246,7 @@
           <span class="gsum"><span class="gkey">${esc(r.key)}</span> ${esc(r.summary)}</span>
           <span class="gside">${esc(r.owner || "Unassigned")} · ${esc(r.status)}</span>
         </div>`).join("")}`
-        : `<div class="gnone">No goal tasks in this sprint.</div>`}
+        : `<div class="gnone">No goal tasks in this sprint.</div>`}`}
     </div>`;
   };
 
@@ -299,6 +308,7 @@
     const card = document.getElementById("card");
     if (!d || !d.ok) {
       card.innerHTML = `<div class="err">${sym("exclamationmark.triangle.fill", "c-red")} ${esc(d && d.error || "No data")}</div>`;
+      growToFit();
       return;
     }
     const { sprint = {}, overdue, tasks = [] } = d;
@@ -427,6 +437,7 @@
              If a permission dialog appeared, choose <b>Always Allow</b>;
              it is one-off — later launches take ~13s.</div>`
         : "") + `</div>`;
+    growToFit();
   }, 1000);
 
   window.sbRender = (d) => {
