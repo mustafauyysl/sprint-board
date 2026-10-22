@@ -567,6 +567,7 @@ function demoPayload(cfg) {
       carriedOver: boss.carriedOver, sprintCount: boss.sprintCount,
     },
     prsAvailable: true,
+    reviewsAvailable: true,
     pendingRelease: [
       { key: "DEMO-107", summary: "Missing font-display setting", status: "Ready For Release",
         url: "https://example.invalid/browse/DEMO-107", sprint: "Demo Team - Sprint#2", days: 17 },
@@ -788,6 +789,7 @@ async function main() {
     pendingRelease: (await pendingReleaseP) || [],
     pendingReleaseError,
     reviewRequests: reviewRequests || [],
+    reviewsAvailable: reviewRequests !== null,
     position: cfg.position || { top: 40, right: 40 },
     alerts,
     played,

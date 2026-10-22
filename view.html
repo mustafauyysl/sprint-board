@@ -91,6 +91,19 @@
   .row.warn .d, .row.critical .d { animation:sbBlink 1.6s ease-in-out infinite }
   .row .goal { flex:none; color:#ffd24a; font-size:9px; letter-spacing:.06em }
 
+  /* Two top-level sections: what Jira says about the sprint, what GitHub says about PRs. */
+  .sec { display:flex; align-items:center; gap:7px; margin:12px 0 4px; color:#9bffb0;
+         font-size:10px; font-weight:700; letter-spacing:.22em }
+  .sec::before, .sec::after { content:""; border-top:3px double rgba(57,255,20,.35) }
+  .sec::before { width:14px } .sec::after { flex:1 }
+  .siege + .sec { margin-top:0 }
+  .sec.gh { color:#c8c8c8 }
+  .sec.gh::before, .sec.gh::after { border-top-color:rgba(200,200,200,.3) }
+  .sec + .band { margin-top:2px; border-top:none; padding-top:0 }
+  .sec + .goals { margin-top:2px }
+  .sec + .off { margin-top:2px }
+  .clear { color:#5f7f6a; font-size:10px }
+
   /* One section per status; the status lives in the header, not on every row. */
   .ghd { display:flex; align-items:center; gap:6px; margin:7px 0 1px; color:#5f8f73;
          font-size:9px; letter-spacing:.14em; text-transform:uppercase }
@@ -292,7 +305,7 @@
   // main list — once a sprint closes the main query stops returning it.
   const relBand = (rows) => rows.length ? `
     <div class="band rel">
-      <div class="bhdr">🚚 AWAITING RELEASE (${rows.length})</div>
+      <div class="bhdr">🚚 PAST SPRINTS · AWAITING RELEASE (${rows.length})</div>
       ${rows.map((r) => `
         <div class="brow" data-url="${esc(r.url)}"
              title="${esc(r.summary)}&#10;${esc(r.status)} · ${r.days} business days">
@@ -364,6 +377,8 @@
         <span class="tools"><span class="rf" id="rf" title="refresh now">⟳</span><span class="rf" id="gear" title="settings">⚙</span></span>
       </div>
 
+      <div class="sec">JIRA</div>
+
       ${goalBand(d.sprintGoal)}
 
       ${boss ? `
@@ -382,9 +397,14 @@
 
       ${relBand(d.pendingRelease || [])}
 
+      <div class="sec gh">GITHUB</div>
+
       ${band("waiting", "⏳ WAITING", waiting, "●")}
       ${band("review", "👀 AWAITING YOUR REVIEW", reviews, "·")}
       ${prBand(d.pullRequests || [])}
+      ${d.prsAvailable !== false && d.reviewsAvailable !== false && !d.requiredError
+        && !waiting.length && !reviews.length && !(d.pullRequests || []).length
+        ? `<div class="clear">✓ No PR waiting, to review or blocked</div>` : ""}
 
       ${d.prsAvailable === false ? `<div class="off">${d.githubOrgError
         ? `PR/CI bands are off — ${esc(d.githubOrgError)}. Fix it from ⚙.`

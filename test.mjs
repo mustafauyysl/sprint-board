@@ -1490,6 +1490,7 @@ globalThis.fetch = async (url, init) => {
       appendFileSync(process.env.SB_FAKE_JIRA + ".gh", query + "\\n");
       return json({ data: fake.releaseSearch || {} });
     }
+    if (fake.failReviews && query.includes("review-requested")) return new Response("boom", { status: 500 });
     return json({ data: { search: { nodes: [] } } });
   }
   if (u.pathname.endsWith("/search/jql")) {
@@ -1503,13 +1504,13 @@ globalThis.fetch = async (url, init) => {
 };
 `;
 
-function runReal(cfg, searches, { releaseSearch = null } = {}) {
+function runReal(cfg, searches, { releaseSearch = null, failReviews = false } = {}) {
   const home = mkdtempSync(join(tmpdir(), "sprint-board-real-"));
   try {
     mkdirSync(join(home, ".config", "sprint-widget"), { recursive: true });
     writeFileSync(join(home, ".config", "sprint-widget", "config.json"), JSON.stringify(cfg));
     writeFileSync(join(home, "fake.mjs"), FAKE_FETCH);
-    writeFileSync(join(home, "fake.json"), JSON.stringify({ searches, releaseSearch }));
+    writeFileSync(join(home, "fake.json"), JSON.stringify({ searches, releaseSearch, failReviews }));
     const out = execFileSync(process.execPath,
       ["--import", join(home, "fake.mjs"), fileURLToPath(new URL("./fetch.mjs", import.meta.url))],
       { env: { ...process.env, HOME: home, SB_FAKE_JIRA: join(home, "fake.json") },
@@ -1652,6 +1653,19 @@ test("real run: release rows get their PRs from one search; merged on a finished
   assert.deepEqual(out.groups.map((g) => g.status), ["In Progress", "Ready For Release", "Released on Prod"]);
   const prs = Object.fromEntries(out.tasks.map((t) => [t.key, (t.releasePrs ?? null) && t.releasePrs.map((p) => p.status)]));
   assert.deepEqual(prs, { "DEMO-101": null, "DEMO-113": ["deployed"], "DEMO-114": ["open", "merged"] });
+});
+
+test("real run: a failed review search is reported, so the board never calls GitHub clear", () => {
+  const searches = [
+    { match: "NOT IN openSprints()", issues: [] },
+    { match: "sprint in openSprints()", issues: [myTask] },
+  ];
+  const ok = runReal({ ...realCfg, githubOrg: "demo-org" }, searches).out;
+  assert.equal(ok.reviewsAvailable, true);
+  const failed = runReal({ ...realCfg, githubOrg: "demo-org" }, searches, { failReviews: true }).out;
+  assert.equal(failed.reviewsAvailable, false);
+  assert.deepEqual(failed.reviewRequests, []);
+  assert.equal(runDemo({ host: "example.invalid" }).reviewsAvailable, true);
 });
 
 const swiftAvailable = spawnSync("swiftc", ["--version"]).status === 0;
