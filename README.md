@@ -1,8 +1,8 @@
 # Sprint Board
 
-A retro-RPG-themed sprint tracking widget that sits on your macOS desktop. Your own
+A native macOS sprint tracking widget that sits on your desktop. Your own
 Jira tasks in the open sprint, the **business days each one has spent in its status**,
-whichever one exceeds its threshold flashing as the BOSS, and PR/CI state.
+the one furthest past its threshold shown as **Most overdue**, and PR/CI state.
 
 A personal tool — not owned by any company, not designed to be distributed.
 
@@ -27,7 +27,7 @@ it can only be derived from the changelog.
 Deliberately kept **outside** the code folder:
 
 - `~/.config/sprint-widget/config.json` — settings (see `config.example.json`)
-- `~/.local/state/sprint-widget/` — `state.json` (the last seen boss / broken CI /
+- `~/.local/state/sprint-widget/` — `state.json` (the last seen most overdue task / broken CI /
   review record, which is what stops a sound repeating) + `notes.json`
 - Jira token — **keychain**, service `sprint-board-jira` (overridable in config)
 - GitHub token — **keychain**, service `sprint-board-github`. Without one it falls
@@ -114,28 +114,28 @@ costs.
 - Drag by the card's **top strip**. The three dots on the strip close the widget (the app keeps running; ring icon → Bring widget to front
   brings it back, as do the Dock icon and Cmd+Tab when it is in the Dock), minimise it,
   or make it fill the screen with larger text
-- Under the strip, on the right of the "cleared" line, **⟳** refreshes and **⚙** opens the
-  settings screen. **GitHub organization** limits the PR
+- Under **Sprint progress**, on the right, the **refresh** button refreshes and the
+  **settings** (gear) button opens the settings screen. **GitHub organization** limits the PR
   searches (your PRs and the reviews you are asked for) to one organization; empty
   means all PRs. Only a valid GitHub organization name is saved, and the board uses it
   at the next refresh. An invalid name typed into the config by hand turns the PR
   bands off with a message; it never widens the search to all PRs
-- **🎯 TEAM SPRINT GOAL** (off by default; turn on **Sprint goal tracking** under ⚙) sits
-  under the "cleared" line, above the boss box. It lists the flagged tasks of your active sprint, whoever owns
+- **Team sprint goal** (off by default; turn on **Sprint goal tracking** in Settings) sits
+  under Sprint progress, above the Most overdue box. It lists the flagged tasks of your active sprint, whoever owns
   them, with done/total. A task counts as done when its status category is done. From
   day 8 of the sprint an open goal task is yellow; in the last 3 business days before
   the sprint end it is red. The header takes the worst colour. Your own tasks that are
-  also goal tasks carry a "🎯 GOAL" mark. The warning is on the board only; there is no
+  also goal tasks carry a "GOAL" mark. The warning is on the board only; there is no
   notification. With the setting off the app makes no extra Jira call
 - Refresh runs every 30 minutes and takes ~13 s
-- **⛔ MERGE BLOCKED** lists the PRs that cannot be merged, each with its reasons:
+- **Merge blocked** lists the PRs that cannot be merged, each with its reasons:
   conflicts first, then failing required checks, then changes requested. A PR whose
   merge state GitHub has not settled shows as "checking". Every PR the search returns
   counts; a Jira key in the title is not needed (the **GitHub organization** setting
   scopes the search). A key in the title still links the PR to its task as the badge
-  on the task row. Drafts count and are marked "draft" while **Show draft PRs** (⚙, on
-  by default) is on; the WAITING band never shows drafts. A PR in this band that starts conflicting sends
-  a macOS notification (click opens the PR); a refresh you trigger (Refresh now or ⟳)
+  on the task row. Drafts count and are marked "draft" while **Show draft PRs** (Settings, on
+  by default) is on; the Waiting band never shows drafts. A PR in this band that starts conflicting sends
+  a macOS notification (click opens the PR); a refresh you trigger (Refresh now or the refresh button)
   always reports its result for the same PRs: "No conflicts, no CI errors" or which
   PRs have a conflict or a failing required check
 
@@ -149,7 +149,7 @@ build is needed**, restarting the app is enough. If Swift changes, `./build-app.
   from the changelog.
 - **The clock belongs to the PERSON, not the ticket.** A card that sat unassigned in
   To Do for 23 days and was handed over today is 1 day of that person's delay, not
-  23 — otherwise it lands on its new owner as an instant boss alert for a queue they
+  23 — otherwise it lands on its new owner as an instant overdue alert for a queue they
   never saw. Time-in-status is measured from the later of the status change, the
   assignment to that person, and entry into the current sprint (`ownershipStartedAt`).
   Sprint membership in the changelog is a COMMA-SEPARATED id list, so an id must be

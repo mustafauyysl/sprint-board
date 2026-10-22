@@ -154,7 +154,7 @@ func disconnectHint(_ cfg: [String: Any]) -> [String: String] {
     ]
 }
 
-/// What the setup screen gets when it opens from Settings or ⚙. nil while nobody is signed in
+/// What the setup screen gets when it opens from Settings or the gear button. nil while nobody is signed in
 /// (first run, after Disconnect): the sign-in block then stays. Otherwise the screen shows the
 /// account, the board settings and the Disconnect hint, and hides the sign-in block.
 func setupContext(_ cfg: [String: Any]) -> [String: Any]? {
@@ -354,12 +354,13 @@ final class CallbackListener {
                 }
 
                 let html = """
-                <!doctype html><meta charset="utf-8">
-                <body style="font-family:system-ui;background:#06120a;color:#9bffb0;
+                <!doctype html><meta charset="utf-8"><title>Sprint Board</title>
+                <body style="color-scheme:light dark;font:15px -apple-system,system-ui,sans-serif;
+                             background:Canvas;color:CanvasText;
                              display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
                 <div style="text-align:center">
-                  <h2 style="letter-spacing:.18em;color:#39ff14">\u{2694} SPRINT BOARD</h2>
-                  <p>Signed in. You can close this tab.</p>
+                  <h2 style="font-size:20px;font-weight:600;margin:0 0 6px">Sprint Board</h2>
+                  <p style="margin:0;opacity:.6">Signed in. You can close this tab.</p>
                 </div>
                 """
                 let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n" +
@@ -476,7 +477,7 @@ final class DragWebView: WKWebView {
             return
         }
 
-        // Calling performDrag UNCONDITIONALLY on the strip made the ⟳ refresh button
+        // Calling performDrag UNCONDITIONALLY on the strip made the refresh button
         // unclickable: the event went to the drag and never reached the page. We
         // inspect the next event to tell them apart — drag or plain click.
         // dequeue:false => the event stays queued, normal handling is unaffected.
@@ -507,7 +508,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var retryCount = 0
     var ready = false
     var pendingJSON: String?
-    /// Set by "Refresh now" and the ⟳ button: the next result is reported as a notification.
+    /// Set by "Refresh now" and the refresh button: the next result is reported as a notification.
     var manualRefreshPending = false
     /// The widget's frame before it was made to fill the screen; nil while it is normal size.
     var restoreFrame: NSRect?
@@ -597,8 +598,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         // Menu bar item: with no Dock icon (LSUIElement) this is the ONLY UI route to
         // quitting the app. Without it you would need pkill from a terminal.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // A template NSImage, NOT TEXT: `button.title = "⚔"` looked like a tiny character
-        // rather than an icon and depended on the menu font. A template image fits the
+        // A template NSImage, NOT TEXT: a text glyph as `button.title` looked like a tiny
+        // character rather than an icon and depended on the menu font. A template image fits the
         // menu height and tints itself for a light/dark menu bar.
         statusItem.button?.image = ringIcon(18)
         statusItem.button?.toolTip = "Sprint Board"

@@ -61,7 +61,7 @@
   progress::-webkit-progress-bar { background:rgba(128,128,128,.2); background:color-mix(in srgb, -apple-system-label 12%, transparent); border-radius:3px }
   progress::-webkit-progress-value { background:-apple-system-control-accent; border-radius:3px }
   .yellow progress::-webkit-progress-value { background:-apple-system-yellow }
-  .red progress::-webkit-progress-value, .boss progress::-webkit-progress-value { background:-apple-system-red }
+  .red progress::-webkit-progress-value, .overdue progress::-webkit-progress-value { background:-apple-system-red }
 
   .tools { display:inline-flex; gap:2px }
   .rf { display:inline-flex; align-items:center; justify-content:center; width:22px; height:20px;
@@ -89,13 +89,13 @@
   .grow.done .gkey { text-decoration:line-through }
   .goals .gnone { font-size:11px; color:-apple-system-secondary-label }
 
-  .boss { display:flex; gap:8px; align-items:flex-start; padding:8px 10px; border-radius:8px; cursor:pointer;
+  .overdue { display:flex; gap:8px; align-items:flex-start; padding:8px 10px; border-radius:8px; cursor:pointer;
           background:rgba(255,59,48,.14); background:color-mix(in srgb, -apple-system-red 14%, transparent) }
-  .boss .body { flex:1; min-width:0 }
-  .boss .tag { font-weight:700 }
-  .boss .sum { white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
-  .boss .hp { font-size:11px; color:-apple-system-secondary-label }
-  .clean { display:flex; align-items:center; gap:7px; white-space:nowrap; overflow:hidden }
+  .overdue .body { flex:1; min-width:0 }
+  .overdue .tag { font-weight:700 }
+  .overdue .sum { white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  .overdue .meta { font-size:11px; color:-apple-system-secondary-label }
+  .all-clear { display:flex; align-items:center; gap:7px; white-space:nowrap; overflow:hidden }
 
   .h { display:flex; align-items:center; gap:6px; margin-bottom:4px;
        font-size:11px; font-weight:600; color:-apple-system-secondary-label }
@@ -297,11 +297,11 @@
     if (prevInput) keepInput = prevInput.value;
     const card = document.getElementById("card");
     if (!d || !d.ok) {
-      card.innerHTML = `<div class="err">${sym("exclamationmark.triangle.fill", "c-red")} ${esc(d && d.error || "veri yok")}</div>`;
+      card.innerHTML = `<div class="err">${sym("exclamationmark.triangle.fill", "c-red")} ${esc(d && d.error || "No data")}</div>`;
       reportHeight();
       return;
     }
-    const { sprint = {}, boss, tasks = [] } = d;
+    const { sprint = {}, overdue, tasks = [] } = d;
     const waiting = d.waitingPrs || [], reviews = d.reviewRequests || [];
 
     card.innerHTML = `
@@ -317,26 +317,26 @@
         if you would rather not wait.</div></div>` : ""}
 
       <div class="sec">
-        <div class="top"><span class="lbl">Sprint progress</span><span class="val">${pct(d.cleared, d.total)}</span></div>
-        <progress value="${d.cleared}" max="${d.total || 1}"></progress>
-        <div class="under"><span>${d.cleared} of ${d.total} done</span>
+        <div class="top"><span class="lbl">Sprint progress</span><span class="val">${pct(d.done, d.total)}</span></div>
+        <progress value="${d.done}" max="${d.total || 1}"></progress>
+        <div class="under"><span>${d.done} of ${d.total} done</span>
           <span class="tools"><span class="rf" id="rf" title="Refresh now">${sym("arrow.clockwise")}</span><span class="rf" id="gear" title="Settings">${sym("gearshape")}</span></span></div>
       </div>
 
       ${goalBand(d.sprintGoal, sprint.daysLeft)}
       <hr>
 
-      ${boss ? `
-        <div class="boss" data-url="${esc(boss.url)}">
+      ${overdue ? `
+        <div class="overdue" data-url="${esc(overdue.url)}">
           ${sym("exclamationmark.triangle.fill", "c-red")}
           <div class="body">
-            <div class="tag">Most overdue · ${esc(boss.key)}</div>
-            <div class="sum">${esc(boss.summary)}</div>
-            <progress value="${Math.max(.15, Math.min(1, (boss.ratio - 1) / 2))}" max="1"></progress>
-            <div class="hp">${esc(boss.status)} · ${boss.daysInStatus} days, limit ${boss.threshold} · ${boss.ratio}× over${boss.carriedOver
-              ? " · carried over, sprint " + boss.sprintCount : ""}</div>
+            <div class="tag">Most overdue · ${esc(overdue.key)}</div>
+            <div class="sum">${esc(overdue.summary)}</div>
+            <progress value="${Math.max(.15, Math.min(1, (overdue.ratio - 1) / 2))}" max="1"></progress>
+            <div class="meta">${esc(overdue.status)} · ${overdue.daysInStatus} days, limit ${overdue.threshold} · ${overdue.ratio}× over${overdue.carriedOver
+              ? " · carried over, sprint " + overdue.sprintCount : ""}</div>
           </div>
-        </div>` : `<div class="clean">${sym("checkmark.seal.fill", "c-green")}<span>Nothing overdue</span><span class="c-2">— every task is within its limit</span></div>`}
+        </div>` : `<div class="all-clear">${sym("checkmark.seal.fill", "c-green")}<span>Nothing overdue</span><span class="c-2">— every task is within its limit</span></div>`}
       <hr>
 
       <div class="h">My tasks <span class="n">${tasks.length}</span></div>
