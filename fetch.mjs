@@ -14,6 +14,7 @@ import {
   updateInfo, jiraRequest, ownershipStartedAt,
   mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, reviewIds, conflictIds, newConflicts, conflictNotifications, refreshSummary, CONFLICT_SCOPE,
   showDraftPrs, sprintGoalTracking, activeSprints, goalJql, goalBand, withGoalMarks,
+  RELEASE_PR_STATES, releasePrSearch, releasePrs, groupByStatus,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -332,6 +333,27 @@ async function attachRequiredChecks(prs, token) {
   }
 }
 
+/**
+ * The PRs of the tasks that are waiting to ship or have shipped, one aliased search per task
+ * in a SINGLE call. Optional like the other GitHub layers: on failure the column stays empty
+ * (null) and the board carries on.
+ */
+async function attachReleasePrs(tasks, qualifier, token) {
+  const wanted = tasks
+    .filter((t) => RELEASE_PR_STATES.includes(t.release))
+    .map((t) => ({ t, q: releasePrSearch(qualifier, t.key) }))
+    .filter((w) => w.q);
+  if (!token || wanted.length === 0) return;
+  const aliases = wanted.map((w, i) => `
+    r${i}: search(query: ${JSON.stringify(w.q)}, type: ISSUE, first: 10) {
+      nodes { ... on PullRequest { number title url state repository { name } } }
+    }`);
+  try {
+    const data = (await ghGraphql(`{${aliases.join("\n")}}`, token))?.data ?? {};
+    wanted.forEach((w, i) => { w.t.releasePrs = releasePrs(data[`r${i}`]?.nodes, w.t.key, w.t.release); });
+  } catch { /* optional: the column stays empty */ }
+}
+
 const reviewQuery = (qualifier) => `
 {
   viewer { login }
@@ -462,6 +484,7 @@ function demoPayload(cfg) {
     { key: "DEMO-104", summary: "Rate limit alarm regressed again", status: "IN AUTO TESTING", daysInStatus: 2, ageDays: 6, priority: "2 High", carriedOver: false, sprintCount: 1, qa: "Kerem Demir" },
     { key: "DEMO-105", summary: "Editor endpoint returns 404", status: "To Do", daysInStatus: 0, ageDays: 3, priority: "2 High", carriedOver: false, sprintCount: 1 },
     { key: "DEMO-106", summary: "Upgrade vulnerable dependencies", status: "Ready For Release", daysInStatus: 1, ageDays: 17, priority: "3 Medium", carriedOver: false, sprintCount: 1, qa: "Zeynep Aksu", done: true },
+    { key: "DEMO-112", summary: "Retry window for failed exports", status: "Released on Prod", daysInStatus: 2, ageDays: 9, priority: "3 Medium", carriedOver: false, sprintCount: 1, qa: "Ada Yilmaz", done: true },
   ];
 
   const tasks = seed.map((t) => {
@@ -496,6 +519,21 @@ function demoPayload(cfg) {
     t.pr = p ? { count: p.count, state: p.state } : null;
   }
 
+  // Search answers per task; releasePrs drops the closed one exactly as it does live.
+  const demoReleaseNodes = {
+    "DEMO-106": [
+      { number: 288, title: "DEMO-106 | Dependency upgrade", url: "#", state: "OPEN", repository: { name: "worker-jobs" } },
+      { number: 96, title: "DEMO-106 | Lockfile refresh", url: "#", state: "MERGED", repository: { name: "shared-lib" } },
+      { number: 95, title: "DEMO-106 | First attempt", url: "#", state: "CLOSED", repository: { name: "shared-lib" } },
+    ],
+    "DEMO-112": [
+      { number: 4590, title: "DEMO-112 | Export retry window", url: "#", state: "MERGED", repository: { name: "web-frontend" } },
+    ],
+  };
+  for (const t of tasks) {
+    if (RELEASE_PR_STATES.includes(t.release)) t.releasePrs = releasePrs(demoReleaseNodes[t.key] || [], t.key, t.release);
+  }
+
   const boss = pickBoss(tasks);
 
   // Two sprints so every colour shows: one ends tomorrow (red), one is in its second week
@@ -514,11 +552,14 @@ function demoPayload(cfg) {
       ], activeSprints([{ fields: { sprint: [endingSprint, runningSprint] } }], "sprint"), now, cfg.host, "sprint")
     : null;
 
+  const visible = withGoalMarks([...tasks].sort((a, b) =>
+    a.done !== b.done ? (a.done ? 1 : -1) : b.ratio - a.ratio || b.daysInStatus - a.daysInStatus), sprintGoal);
+
   return {
     ok: true, demo: true, generatedAt: now.toISOString(), apiCalls: 0,
     sprintGoal,
     sprint: { name: "Demo Team - Sprint#4", endDate: null, daysLeft: 2 },
-    cleared: 1, total: tasks.length,
+    cleared: tasks.filter((t) => t.done).length, total: tasks.length,
     boss: boss && {
       key: boss.key, summary: boss.summary, status: boss.status,
       daysInStatus: boss.daysInStatus, threshold: boss.threshold,
@@ -540,8 +581,8 @@ function demoPayload(cfg) {
     brokenPrs: demoBroken,
     waitingPrs: demoWaiting,
     pullRequests: mergeBlocked(demoPrs, showDraftPrs(cfg)),
-    tasks: withGoalMarks([...tasks].sort((a, b) =>
-      a.done !== b.done ? (a.done ? 1 : -1) : b.ratio - a.ratio || b.daysInStatus - a.daysInStatus), sprintGoal),
+    tasks: visible,
+    groups: groupByStatus(visible),
   };
 }
 
@@ -670,9 +711,11 @@ async function main() {
   const orgQualifier = githubOrgQualifier(cfg.githubOrg);
   const githubOrgError = orgQualifier === null ? "GitHub organization in config is not valid" : null;
   const ghToken = piped.githubToken || githubToken(cfg);
+  const releasePrsP = githubOrgError ? null : attachReleasePrs(tasks, orgQualifier, ghToken);
   const prs = githubOrgError ? null : await fetchPrs(orgQualifier, ghToken);
   const reviewRequests = githubOrgError ? null : await fetchReviewRequests(orgQualifier, new Date(), ghToken);
   await attachRequiredChecks(prs, ghToken);
+  await releasePrsP;
   const { byKey: prByKey, broken: brokenPrs, waiting: waitingPrs } = summarizePrs(prs);
   for (const t of tasks) {
     const p = prByKey[t.key];
@@ -738,6 +781,7 @@ async function main() {
         }
       : null,
     tasks: visible,
+    groups: groupByStatus(visible),
     sprintGoal,
     prsAvailable: prs !== null,
     githubOrgError,

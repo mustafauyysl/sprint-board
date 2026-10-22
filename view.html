@@ -91,6 +91,25 @@
   .row.warn .d, .row.critical .d { animation:sbBlink 1.6s ease-in-out infinite }
   .row .goal { flex:none; color:#ffd24a; font-size:9px; letter-spacing:.06em }
 
+  /* One section per status; the status lives in the header, not on every row. */
+  .ghd { display:flex; align-items:center; gap:6px; margin:7px 0 1px; color:#5f8f73;
+         font-size:9px; letter-spacing:.14em; text-transform:uppercase }
+  .ghd::after { content:""; flex:1; border-top:1px dashed rgba(57,255,20,.18) }
+  .ghd.p0 { color:#7fa894 } .ghd.p1 { color:#7CFFAE } .ghd.p3 { color:#6b6b80 }
+
+  /* PR column of waiting-to-ship and shipped rows. The row's fade stays off the column. */
+  .row .rp { flex:1; min-width:0; text-align:right; font-size:10px }
+  .row .rp .g + .g { margin-left:8px }
+  .row .rp .c, .row .rp .w { white-space:nowrap }
+  .row .rp .c { cursor:pointer }
+  .row .rp .c:hover { text-decoration:underline }
+  .row .rp .open { color:#3fb950; text-shadow:0 0 6px rgba(63,185,80,.55) }
+  .row .rp .merged, .row .rp .deployed { color:#a371f7; text-shadow:0 0 6px rgba(163,113,247,.55) }
+  .row .rp .none { color:#44607d }
+  .row.done.rel { opacity:1 }
+  .row.done.rel > span:not(.rp) { opacity:.5 }
+  .row.done.pending.rel > span:not(.rp) { opacity:.78 }
+
   .goals { border:1px solid rgba(120,200,255,.35); border-radius:7px; padding:6px 9px;
            margin:10px 0; background:rgba(120,200,255,.05) }
   .goals .ghdr { color:#9fd4ff; font-size:10px; letter-spacing:.12em; font-weight:700; margin-bottom:3px }
@@ -214,6 +233,34 @@
         </div>`).join("")}
     </div>` : "";
 
+  // Waiting-to-ship and shipped rows trade the CI badge for their PRs, one label per state
+  // ("#12 #34 open") so a task with several PRs still fits the narrow column.
+  const PR_COLUMN = new Set(["pending", "finished"]);
+  const relChips = (prs) => !Array.isArray(prs) ? ""
+    : !prs.length ? `<span class="none">no PR</span>`
+    : ["open", "merged", "deployed"].map((st) => {
+        const of = prs.filter((p) => p.status === st);
+        return of.length ? `<span class="g ${st}">${of.map((p) => `<span class="c" data-url="${esc(p.url)}"
+          title="${esc(p.repo)}#${esc(p.number)} · ${esc(p.title)}">#${esc(p.number)}</span> `).join("")}<span class="w">${st}</span></span>` : "";
+      }).join("");
+
+  const taskRow = (t) => {
+    const rel = PR_COLUMN.has(t.release);
+    return `
+        <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}${rel ? " rel" : ""}" data-url="${esc(t.url)}"
+             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (threshold ${t.threshold}d) · age ${t.ageDays}d">
+          <span class="k">${icon(t)} ${esc(t.key)}</span>
+          ${rel ? "" : `<span class="s"></span>`}
+          ${t.goal ? `<span class="goal">🎯 GOAL</span>` : ""}
+          <span class="qa">${t.qaShort ? "🧪" + esc(t.qaShort) : ""}</span>
+          ${rel ? `<span class="rp">${relChips(t.releasePrs)}</span>` : `
+          <span class="carry">${t.carriedOver ? "×" + t.sprintCount : ""}</span>
+          <span class="pr ${t.pr ? prClass(t.pr.state) : ""}">${t.pr ? "⚙" + t.pr.count + prMark(t.pr.state) : ""}</span>`}
+          <span class="d">${t.daysInStatus}g</span>
+          <span class="age">/${t.ageDays}</span>
+        </div>`;
+  };
+
   // Every PR that cannot be merged, with its reasons; a PR GitHub has not settled reads "checking".
   const prBand = (rows) => rows.length ? `
     <div class="band prs">
@@ -298,7 +345,7 @@
       card.innerHTML = `<div class="err">⚠ ${esc(d && d.error || "veri yok")}</div>`;
       return;
     }
-    const { sprint = {}, boss, tasks = [] } = d;
+    const { sprint = {}, boss, groups = [] } = d;
     const waiting = d.waitingPrs || [], reviews = d.reviewRequests || [];
 
     card.innerHTML = `
@@ -329,18 +376,9 @@
             ${esc(boss.status)} · ${boss.daysInStatus}d / threshold ${boss.threshold}d</div>
         </div>` : `<div class="clean">⚔ No boss — your sprint is clean</div>`}
 
-      ${tasks.map((t) => `
-        <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}" data-url="${esc(t.url)}"
-             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (threshold ${t.threshold}d) · age ${t.ageDays}d">
-          <span class="k">${icon(t)} ${esc(t.key)}</span>
-          <span class="s">${esc(clip(t.status, 14))}</span>
-          ${t.goal ? `<span class="goal">🎯 GOAL</span>` : ""}
-          <span class="qa">${t.qaShort ? "🧪" + esc(t.qaShort) : ""}</span>
-          <span class="carry">${t.carriedOver ? "×" + t.sprintCount : ""}</span>
-          <span class="pr ${t.pr ? prClass(t.pr.state) : ""}">${t.pr ? "⚙" + t.pr.count + prMark(t.pr.state) : ""}</span>
-          <span class="d">${t.daysInStatus}g</span>
-          <span class="age">/${t.ageDays}</span>
-        </div>`).join("")}
+      ${groups.map((g) => `
+        <div class="ghd p${esc(g.phase)}">${esc(g.status)} (${g.tasks.length})</div>
+        ${g.tasks.map(taskRow).join("")}`).join("")}
 
       ${relBand(d.pendingRelease || [])}
 
@@ -359,8 +397,9 @@
       ${notesHtml()}
     `;
 
+    // A PR inside a task row opens the PR, not the task as well.
     card.querySelectorAll("[data-url]").forEach((el) =>
-      el.addEventListener("click", () => openUrl(el.getAttribute("data-url"))));
+      el.addEventListener("click", (e) => { e.stopPropagation(); openUrl(el.getAttribute("data-url")); }));
     card.querySelectorAll("[data-del]").forEach((el) =>
       el.addEventListener("click", (e) => {
         e.stopPropagation();

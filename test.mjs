@@ -50,6 +50,11 @@ import {
   newConflicts,
   conflictNotifications,
   refreshSummary,
+  releasePrSearch,
+  titleNamesKey,
+  releasePrState,
+  releasePrs,
+  groupByStatus,
 } from "./lib.mjs";
 
 const config = {
@@ -1377,6 +1382,84 @@ test("withGoalMarks: my task that is also a goal task gets the GOAL mark", () =>
   assert.deepEqual(withGoalMarks([{ key: "DEMO-1" }], null).map((t) => t.goal), [false]);
 });
 
+test("releasePrSearch: one task's PRs by key, open and merged, scoped to the org", () => {
+  assert.equal(releasePrSearch("org:demo-org ", "DEMO-101"), "org:demo-org is:pr DEMO-101 in:title");
+});
+
+test("releasePrSearch: without an org it stays on PRs that involve me", () => {
+  assert.equal(releasePrSearch("", "DEMO-101"), "involves:@me is:pr DEMO-101 in:title");
+});
+
+test("releasePrSearch: anything but a Jira key, or an invalid org, never reaches the query", () => {
+  assert.equal(releasePrSearch("org:demo-org ", 'DEMO-1" OR is:pr'), null);
+  assert.equal(releasePrSearch("org:demo-org ", "demo-101"), null);
+  assert.equal(releasePrSearch(null, "DEMO-101"), null);
+});
+
+test("titleNamesKey: the key as a whole token — DEMO-10 does not claim DEMO-101", () => {
+  assert.equal(titleNamesKey("DEMO-10 | Template gate", "DEMO-10"), true);
+  assert.equal(titleNamesKey("[DEMO-10] Template gate", "DEMO-10"), true);
+  assert.equal(titleNamesKey("DEMO-101 | Template gate", "DEMO-10"), false);
+  assert.equal(titleNamesKey("XDEMO-10 | Template gate", "DEMO-10"), false);
+  assert.equal(titleNamesKey(null, "DEMO-10"), false);
+});
+
+test("releasePrState: open, merged on a waiting task, deployed on a finished one", () => {
+  assert.equal(releasePrState({ state: "OPEN" }, "pending"), "open");
+  assert.equal(releasePrState({ state: "OPEN" }, "finished"), "open");
+  assert.equal(releasePrState({ state: "MERGED" }, "pending"), "merged");
+  assert.equal(releasePrState({ state: "MERGED" }, "finished"), "deployed");
+});
+
+test("releasePrState: a PR closed without merging is not shown", () => {
+  assert.equal(releasePrState({ state: "CLOSED" }, "finished"), null);
+  assert.equal(releasePrState(null, "finished"), null);
+});
+
+test("releasePrs: drops closed PRs, other keys and duplicates; open PRs first", () => {
+  const node = (number, title, state, repo = "demo-repo") =>
+    ({ number, title, state, url: `https://example.invalid/${repo}/${number}`, repository: { name: repo } });
+  const rows = releasePrs([
+    node(1, "DEMO-101 | Merged first", "MERGED"),
+    node(2, "DEMO-101 | Abandoned", "CLOSED"),
+    node(3, "DEMO-1010 | Another task", "OPEN"),
+    node(4, "DEMO-101 | Still open", "OPEN", "other-repo"),
+    node(1, "DEMO-101 | Merged first", "MERGED"),
+    null,
+  ], "DEMO-101", "pending");
+  assert.deepEqual(rows.map((r) => [r.repo, r.number, r.status]),
+    [["other-repo", 4, "open"], ["demo-repo", 1, "merged"]]);
+  assert.equal(rows[0].url, "https://example.invalid/other-repo/4");
+});
+
+test("releasePrs: no PRs found is an empty column, a failed search is null", () => {
+  assert.deepEqual(releasePrs([], "DEMO-101", "finished"), []);
+  assert.equal(releasePrs(undefined, "DEMO-101", "finished"), null);
+});
+
+test("groupByStatus: one section per status — active, then waiting, then shipped, then cancelled", () => {
+  const t = (key, status, done = false, release = null) => ({ key, status, done, release });
+  const groups = groupByStatus([
+    t("DEMO-1", "Ready To Test"),
+    t("DEMO-2", "In Review"),
+    t("DEMO-3", "Ready To Test"),
+    t("DEMO-4", "Released on Prod", true, "finished"),
+    t("DEMO-5", "Rejected", true, "cancelled"),
+    t("DEMO-6", "Ready For Release", true, "pending"),
+    t("DEMO-7", "Awaiting Release", true, "pending"),
+    t("DEMO-8", "Released on Prod", true, "finished"),
+  ]);
+  assert.deepEqual(groups.map((g) => [g.status, g.tasks.map((x) => x.key)]), [
+    ["Ready To Test", ["DEMO-1", "DEMO-3"]],
+    ["In Review", ["DEMO-2"]],
+    ["Ready For Release", ["DEMO-6"]],
+    ["Awaiting Release", ["DEMO-7"]],
+    ["Released on Prod", ["DEMO-4", "DEMO-8"]],
+    ["Rejected", ["DEMO-5"]],
+  ]);
+  assert.deepEqual(groupByStatus(undefined), []);
+});
+
 // --demo returns before any token or keychain read, so a temporary HOME holding only a
 // config keeps the real config and keychain out of the test.
 function runDemo(cfg) {
@@ -1399,9 +1482,16 @@ const FAKE_FETCH = `
 import { appendFileSync, readFileSync } from "node:fs";
 const fake = JSON.parse(readFileSync(process.env.SB_FAKE_JIRA, "utf8"));
 const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, init) => {
   const u = new URL(String(url));
-  if (u.hostname === "api.github.com") return json({ data: { search: { nodes: [] } } });
+  if (u.hostname === "api.github.com") {
+    const query = JSON.parse(init?.body || "{}").query || "";
+    if (query.includes("r0: search(")) {
+      appendFileSync(process.env.SB_FAKE_JIRA + ".gh", query + "\\n");
+      return json({ data: fake.releaseSearch || {} });
+    }
+    return json({ data: { search: { nodes: [] } } });
+  }
   if (u.pathname.endsWith("/search/jql")) {
     const jql = u.searchParams.get("jql");
     appendFileSync(process.env.SB_FAKE_JIRA + ".jql", jql + "\\n");
@@ -1413,20 +1503,22 @@ globalThis.fetch = async (url) => {
 };
 `;
 
-function runReal(cfg, searches) {
+function runReal(cfg, searches, { releaseSearch = null } = {}) {
   const home = mkdtempSync(join(tmpdir(), "sprint-board-real-"));
   try {
     mkdirSync(join(home, ".config", "sprint-widget"), { recursive: true });
     writeFileSync(join(home, ".config", "sprint-widget", "config.json"), JSON.stringify(cfg));
     writeFileSync(join(home, "fake.mjs"), FAKE_FETCH);
-    writeFileSync(join(home, "fake.json"), JSON.stringify({ searches }));
+    writeFileSync(join(home, "fake.json"), JSON.stringify({ searches, releaseSearch }));
     const out = execFileSync(process.execPath,
       ["--import", join(home, "fake.mjs"), fileURLToPath(new URL("./fetch.mjs", import.meta.url))],
       { env: { ...process.env, HOME: home, SB_FAKE_JIRA: join(home, "fake.json") },
         input: JSON.stringify({ jiraToken: "demo-token", githubToken: "demo-token" }), encoding: "utf8" });
     let jql = "";
     try { jql = readFileSync(join(home, "fake.json.jql"), "utf8"); } catch { /* no search made */ }
-    return { out: JSON.parse(out), jql: jql.split("\n").filter(Boolean) };
+    let gh = "";
+    try { gh = readFileSync(join(home, "fake.json.gh"), "utf8"); } catch { /* no release search made */ }
+    return { out: JSON.parse(out), jql: jql.split("\n").filter(Boolean), gh };
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -1520,6 +1612,46 @@ test("--demo: with Show draft PRs off the draft leaves the band", () => {
   const out = runDemo({ host: "example.invalid", showDraftPrs: false });
   assert.deepEqual(out.pullRequests.map((r) => r.repo),
     ["editor-frontend", "web-frontend", "worker-jobs", "shared-lib", "template-generator"]);
+});
+
+test("--demo: the board is grouped by status and release rows carry their PRs", () => {
+  const out = runDemo({ host: "example.invalid" });
+  assert.deepEqual(out.groups.map((g) => g.status).slice(-2), ["Ready For Release", "Released on Prod"]);
+  const prs = Object.fromEntries(out.tasks.filter((t) => t.releasePrs)
+    .map((t) => [t.key, t.releasePrs.map((p) => `${p.repo}#${p.number} ${p.status}`)]));
+  assert.deepEqual(prs, {
+    "DEMO-106": ["worker-jobs#288 open", "shared-lib#96 merged"],
+    "DEMO-112": ["web-frontend#4590 deployed"],
+  });
+  assert.equal(out.cleared, out.tasks.filter((t) => t.done).length);
+});
+
+const sprintIssue = (key, status, category) => ({
+  key,
+  fields: { ...myTask.fields, summary: `Task ${key}`, status: { name: status, statusCategory: { key: category } } },
+  changelog: { total: 0, histories: [] },
+});
+
+test("real run: release rows get their PRs from one search; merged on a finished task reads deployed", () => {
+  const prNode = (number, title, state) =>
+    ({ number, title, state, url: `https://example.invalid/pr/${number}`, repository: { name: "demo-repo" } });
+  const { out, gh } = runReal({ ...realCfg, githubOrg: "demo-org" }, [
+    { match: "NOT IN openSprints()", issues: [] },
+    { match: "sprint in openSprints()", issues: [
+      myTask,
+      sprintIssue("DEMO-113", "Released on Prod", "done"),
+      sprintIssue("DEMO-114", "Ready For Release", "done"),
+    ] },
+  ], { releaseSearch: {
+    r0: { nodes: [prNode(41, "DEMO-113 | Export retry", "MERGED")] },
+    r1: { nodes: [prNode(7, "DEMO-114 | Font fix", "OPEN"), prNode(8, "DEMO-114 | Font fix, part 2", "MERGED")] },
+  } });
+  assert.match(gh, /"org:demo-org is:pr DEMO-113 in:title"/);
+  assert.match(gh, /"org:demo-org is:pr DEMO-114 in:title"/);
+  assert.doesNotMatch(gh, /DEMO-101/, "an active task gets no release search");
+  assert.deepEqual(out.groups.map((g) => g.status), ["In Progress", "Ready For Release", "Released on Prod"]);
+  const prs = Object.fromEntries(out.tasks.map((t) => [t.key, (t.releasePrs ?? null) && t.releasePrs.map((p) => p.status)]));
+  assert.deepEqual(prs, { "DEMO-101": null, "DEMO-113": ["deployed"], "DEMO-114": ["open", "merged"] });
 });
 
 const swiftAvailable = spawnSync("swiftc", ["--version"]).status === 0;

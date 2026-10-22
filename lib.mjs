@@ -594,6 +594,77 @@ export function searchNodes(response) {
 export const prSearch = (qualifier) => `${qualifier}author:@me is:pr is:open`;
 export const reviewSearch = (qualifier) => `${qualifier}is:open is:pr review-requested:@me`;
 
+// --- PRs of tasks that are waiting to ship or have shipped ---------------------------
+// The open-PR search above never returns a merged PR, so a released task needs its own.
+
+const JIRA_KEY = /^[A-Z][A-Z0-9]+-\d+$/;
+
+/** Release states whose rows show the PR column. */
+export const RELEASE_PR_STATES = ["pending", "finished"];
+
+/**
+ * The search for one task's PRs, open and merged, by the key in the title. Without an org it
+ * stays on PRs that involve me rather than every public PR naming the key. null when the key
+ * is not a Jira key, so nothing else can reach the query text.
+ */
+export function releasePrSearch(qualifier, key) {
+  if (typeof qualifier !== "string" || !JIRA_KEY.test(String(key))) return null;
+  return `${qualifier || "involves:@me "}is:pr ${key} in:title`;
+}
+
+/** The key as a whole token: DEMO-10 must not claim "DEMO-101 | …". */
+export function titleNamesKey(title, key) {
+  if (!JIRA_KEY.test(String(key))) return false;
+  return new RegExp(`(?<![A-Z0-9-])${key}(?![0-9])`).test(String(title ?? ""));
+}
+
+/**
+ * open, merged or deployed; null for a PR closed without merging. GitHub cannot tell a
+ * deployed PR (no deployments are recorded, and a merge into main is not a release in every
+ * repo), so "deployed" means merged on a task Jira has as finished.
+ */
+export function releasePrState(pr, release) {
+  if (!pr) return null;
+  if (pr.state === "OPEN") return "open";
+  if (pr.state === "MERGED") return release === "finished" ? "deployed" : "merged";
+  return null;
+}
+
+/** A task's PR column from its search nodes: open PRs first, closed-unmerged ones dropped. */
+export function releasePrs(nodes, key, release) {
+  if (!Array.isArray(nodes)) return null;
+  const seen = new Set();
+  const rows = [];
+  for (const n of nodes) {
+    if (!n || !n.number || !titleNamesKey(n.title, key)) continue;
+    const status = releasePrState(n, release);
+    if (!status) continue;
+    const repo = n.repository?.name ?? "?";
+    if (seen.has(`${repo}#${n.number}`)) continue;
+    seen.add(`${repo}#${n.number}`);
+    rows.push({ repo, number: n.number, url: n.url ?? null, title: n.title ?? "", status });
+  }
+  return rows.sort((a, b) => (a.status === "open" ? 0 : 1) - (b.status === "open" ? 0 : 1));
+}
+
+const PHASE = { pending: 1, finished: 2, cancelled: 3 };
+
+/**
+ * The board's sections, one per status: active work, then waiting to ship, then shipped,
+ * then cancelled. Within a phase a status sits where the sorted list first reaches it, so
+ * the section holding the hottest task comes first.
+ */
+export function groupByStatus(tasks) {
+  const groups = new Map();
+  for (const t of tasks || []) {
+    if (!groups.has(t.status)) {
+      groups.set(t.status, { status: t.status, phase: t.done ? PHASE[t.release] ?? 2 : 0, tasks: [] });
+    }
+    groups.get(t.status).tasks.push(t);
+  }
+  return [...groups.values()].sort((a, b) => a.phase - b.phase);
+}
+
 // --- Sprint goal ----------------------------------------------------------
 // The goal tasks of a sprint are its flagged issues. One that does not reach release in the
 // sprint fails the sprint goal, so the band warns from the second week on.
