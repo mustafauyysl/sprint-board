@@ -388,6 +388,41 @@ let REFRESH_SECONDS: TimeInterval = 30 * 60
 let NOTES_PATH = ("~/.local/state/sprint-widget/notes.json" as NSString).expandingTildeInPath
 let MAX_NOTES = 6
 let NOTE_LIMIT = 500
+/// The corner radius of the board card in view.html and setup.html; the window material follows it.
+let CARD_RADIUS: CGFloat = 10
+
+/// The SF Symbols the page uses. A page cannot load them itself, so each one goes in as a
+/// CSS mask image on `.s-<name>` (dots become dashes) and takes the text colour.
+let PAGE_SYMBOLS = [
+    "arrow.clockwise", "gearshape", "flag.fill", "checkmark.seal.fill", "exclamationmark.triangle.fill",
+    "checkmark.circle.fill", "xmark.circle", "xmark.circle.fill", "xmark.octagon.fill", "shippingbox",
+    "shippingbox.fill", "flame.fill", "arrow.uturn.forward.circle", "arrow.uturn.forward", "circle",
+    "circle.lefthalf.filled", "testtube.2", "arrow.triangle.pull", "checkmark", "xmark", "clock", "eye",
+    "hourglass", "ellipsis.circle", "info.circle", "arrow.down.circle",
+]
+
+func symbolStyleSheet() -> String {
+    var css = ""
+    for name in PAGE_SYMBOLS {
+        guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 40, weight: .regular)),
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(img.size.width * 2),
+                                         pixelsHigh: Int(img.size.height * 2), bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
+            dbg("symbol not found: \(name)")
+            continue
+        }
+        rep.size = img.size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        img.draw(in: NSRect(origin: .zero, size: img.size))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let png = rep.representation(using: .png, properties: [:]) else { continue }
+        css += ".s-\(name.replacingOccurrences(of: ".", with: "-")){-webkit-mask-image:url(data:image/png;base64,\(png.base64EncodedString()))}\n"
+    }
+    return css
+}
 
 /// Dragging the top strip moves the window; everything else reaches the WebView
 /// as a normal click. (CSS -webkit-app-region is Electron-specific and does
@@ -488,14 +523,37 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         cfg.userContentController.add(self, name: "sb")
         // Transparent backing: show the card's own background, not a window rectangle.
         cfg.setValue(false, forKey: "drawsBackground")
+        if let css = try? JSONSerialization.data(withJSONObject: symbolStyleSheet(), options: .fragmentsAllowed),
+           let literal = String(data: css, encoding: .utf8) {
+            let js = "(() => { const s = document.createElement('style'); s.textContent = \(literal); document.head.appendChild(s); })()"
+            cfg.userContentController.addUserScript(
+                WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        }
 
         let frame = savedFrame()
         window = BoardWindow(contentRect: frame, styleMask: [.borderless, .resizable, .miniaturizable],
                              backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.hasShadow = false
+        // The shadow follows the window's alpha, so it bends round the clear corners of the card.
+        window.hasShadow = true
         window.isMovableByWindowBackground = true
+
+        // The system material behind the transparent page. Always active: following the
+        // window's key state would turn the panel flat whenever another app has focus.
+        let material = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
+        material.material = .popover
+        material.blendingMode = .behindWindow
+        material.state = .active
+        let side = CARD_RADIUS * 2 + 1
+        let mask = NSImage(size: NSSize(width: side, height: side), flipped: false) { r in
+            NSBezierPath(roundedRect: r, xRadius: CARD_RADIUS, yRadius: CARD_RADIUS).fill()
+            return true
+        }
+        mask.capInsets = NSEdgeInsets(top: CARD_RADIUS, left: CARD_RADIUS, bottom: CARD_RADIUS, right: CARD_RADIUS)
+        mask.resizingMode = .stretch
+        material.maskImage = mask
+        window.contentView = material
         // NOTE: the desktop level (desktopIcon) was tried — the window received no mouse
         // events. Normal level: same plane as other windows, clicks/drags work.
         window.level = .normal
@@ -663,6 +721,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             web.pageZoom = 1.4
             window.setFrame(screen.visibleFrame, display: true, animate: true)
         }
+        window.invalidateShadow()
         applyFillClass()
     }
 
@@ -1278,6 +1337,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             f.size.height = CGFloat(h)
             f.origin.y = top - CGFloat(h)
             window.setFrame(f, display: true)
+            window.invalidateShadow()
             saveFrame()
         }
     }
