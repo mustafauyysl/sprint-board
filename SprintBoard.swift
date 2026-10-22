@@ -542,21 +542,38 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.hasShadow = true
         window.isMovableByWindowBackground = true
 
-        // The system material behind the transparent page. Always active: following the
-        // window's key state would turn the panel flat whenever another app has focus.
-        let material = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
-        material.material = .popover
-        material.blendingMode = .behindWindow
-        material.state = .active
-        let side = CARD_RADIUS * 2 + 1
-        let mask = NSImage(size: NSSize(width: side, height: side), flipped: false) { r in
-            NSBezierPath(roundedRect: r, xRadius: CARD_RADIUS, yRadius: CARD_RADIUS).fill()
-            return true
+        // The system material behind the transparent page. macOS 26 and later: Liquid Glass,
+        // and the page's "glass" class gives it a lighter panel tint to match.
+        let pageHost: NSView
+        if #available(macOS 26, *) {
+            let glass = NSGlassEffectView(frame: NSRect(origin: .zero, size: frame.size))
+            glass.cornerRadius = CARD_RADIUS
+            let host = NSView(frame: glass.bounds)
+            host.autoresizingMask = [.width, .height]
+            glass.contentView = host
+            window.contentView = glass
+            pageHost = host
+            cfg.userContentController.addUserScript(
+                WKUserScript(source: "document.documentElement.classList.add('glass')",
+                             injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        } else {
+            // Always active: following the window's key state would turn the panel flat
+            // whenever another app has focus.
+            let material = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
+            material.material = .popover
+            material.blendingMode = .behindWindow
+            material.state = .active
+            let side = CARD_RADIUS * 2 + 1
+            let mask = NSImage(size: NSSize(width: side, height: side), flipped: false) { r in
+                NSBezierPath(roundedRect: r, xRadius: CARD_RADIUS, yRadius: CARD_RADIUS).fill()
+                return true
+            }
+            mask.capInsets = NSEdgeInsets(top: CARD_RADIUS, left: CARD_RADIUS, bottom: CARD_RADIUS, right: CARD_RADIUS)
+            mask.resizingMode = .stretch
+            material.maskImage = mask
+            window.contentView = material
+            pageHost = material
         }
-        mask.capInsets = NSEdgeInsets(top: CARD_RADIUS, left: CARD_RADIUS, bottom: CARD_RADIUS, right: CARD_RADIUS)
-        mask.resizingMode = .stretch
-        material.maskImage = mask
-        window.contentView = material
         // NOTE: the desktop level (desktopIcon) was tried — the window received no mouse
         // events. Normal level: same plane as other windows, clicks/drags work.
         window.level = .normal
@@ -564,11 +581,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         // widget on top of full-screen apps. Keep it on the desktop Space.
         window.collectionBehavior = [.stationary, .ignoresCycle, .fullScreenNone]
 
-        web = DragWebView(frame: window.contentView!.bounds, configuration: cfg)
+        web = DragWebView(frame: pageHost.bounds, configuration: cfg)
         web.autoresizingMask = [.width, .height]
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
-        window.contentView!.addSubview(web)
+        pageHost.addSubview(web)
 
         if needsSetup() {
             onSetupScreen = true
