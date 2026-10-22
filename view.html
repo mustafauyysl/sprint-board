@@ -46,7 +46,7 @@
   .hdr .tl:hover { filter:brightness(1.15) }
   .hdr .name { flex:1; min-width:0; font-weight:700; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
   .hdr .right { font-size:11px; color:-apple-system-secondary-label; white-space:nowrap }
-  body.filled #card { min-height:100vh }
+  body.filled #card, #card:has(> .err) { min-height:100vh }
 
   /* A section: label left, bold value right, a bar, grey text on both sides under it */
   .sec .top { display:flex; justify-content:space-between; align-items:baseline }
@@ -178,7 +178,8 @@
   // Opening links is delegated to the Swift side (a WKWebView cannot do it itself).
   const openUrl = (u) => { if (u && u !== "#") window.webkit?.messageHandlers?.sb?.postMessage({ open: u }); };
   const refresh = () => window.webkit?.messageHandlers?.sb?.postMessage({ refresh: true });
-  // The window material covers the whole window, so it must fit the card in every state.
+  // The window material covers the whole window. A drawn board sets the window to its height;
+  // a placeholder (loading, error) fills the window instead, so the widget keeps its size.
   const reportHeight = () => {
     const card = document.getElementById("card");
     window.webkit?.messageHandlers?.sb?.postMessage({ height: card.offsetHeight });
@@ -213,7 +214,7 @@
     </div>` : "";
 
   // The flagged tasks of the sprint, whoever owns them. null = the setting is off.
-  const RISK_WORD = { red: "critical", yellow: "at risk", ok: "on track", done: "released" };
+  const RISK_WORD = { red: "critical", yellow: "at risk", ok: "on track", done: "done" };
   const goalBand = (g, daysLeft) => {
     if (!g) return "";
     const count = { red: 0, yellow: 0, ok: 0, done: 0 };
@@ -223,9 +224,9 @@
     <hr>
     <div class="sec goals ${esc(g.worst)}">
       <div class="top"><span class="lbl">${sym("flag.fill", flag)}Team sprint goal</span>
-        <span class="val">${pct(g.done, g.total)}</span></div>
-      <progress value="${g.done}" max="${g.total || 1}"></progress>
-      <div class="under"><span>${g.done} of ${g.total} released</span><span>${days(daysLeft)}</span></div>
+        ${g.error ? "" : `<span class="val">${pct(g.done, g.total)}</span>`}</div>
+      ${g.error ? "" : `<progress value="${g.done}" max="${g.total || 1}"></progress>
+      <div class="under"><span>${g.done} of ${g.total} done</span><span>${days(daysLeft)}</span></div>`}
       ${g.error ? `<div class="gnone">Could not read the goal tasks: ${esc(g.error)}</div>`
         : g.rows.length ? `
         <div class="summary">${["red", "yellow", "ok", "done"].map((k) =>
@@ -298,7 +299,6 @@
     const card = document.getElementById("card");
     if (!d || !d.ok) {
       card.innerHTML = `<div class="err">${sym("exclamationmark.triangle.fill", "c-red")} ${esc(d && d.error || "No data")}</div>`;
-      reportHeight();
       return;
     }
     const { sprint = {}, overdue, tasks = [] } = d;
@@ -333,7 +333,8 @@
             <div class="tag">Most overdue · ${esc(overdue.key)}</div>
             <div class="sum">${esc(overdue.summary)}</div>
             <progress value="${Math.max(.15, Math.min(1, (overdue.ratio - 1) / 2))}" max="1"></progress>
-            <div class="meta">${esc(overdue.status)} · ${overdue.daysInStatus} days, limit ${overdue.threshold} · ${overdue.ratio}× over${overdue.carriedOver
+            <div class="meta">${esc(overdue.status)} · ${overdue.daysInStatus} days, ${overdue.threshold > 0
+              ? `${overdue.ratio}× the ${overdue.threshold}-day limit` : "limit 0"}${overdue.carriedOver
               ? " · carried over, sprint " + overdue.sprintCount : ""}</div>
           </div>
         </div>` : `<div class="all-clear">${sym("checkmark.seal.fill", "c-green")}<span>Nothing overdue</span><span class="c-2">— every task is within its limit</span></div>`}
@@ -426,7 +427,6 @@
              If a permission dialog appeared, choose <b>Always Allow</b>;
              it is one-off — later launches take ~13s.</div>`
         : "") + `</div>`;
-    reportHeight();
   }, 1000);
 
   window.sbRender = (d) => {

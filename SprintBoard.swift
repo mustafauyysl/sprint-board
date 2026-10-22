@@ -392,6 +392,18 @@ let NOTE_LIMIT = 500
 /// The corner radius of the board card in view.html and setup.html; the window material follows it.
 let CARD_RADIUS: CGFloat = 10
 
+/// A stretchable mask that rounds the popover material's corners to `radius`.
+func roundedMask(_ radius: CGFloat) -> NSImage {
+    let side = radius * 2 + 1
+    let mask = NSImage(size: NSSize(width: side, height: side), flipped: false) { r in
+        NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
+        return true
+    }
+    mask.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+    mask.resizingMode = .stretch
+    return mask
+}
+
 /// The SF Symbols the page uses. A page cannot load them itself, so each one goes in as a
 /// CSS mask image on `.s-<name>` (dots become dashes) and takes the text colour.
 let PAGE_SYMBOLS = [
@@ -544,8 +556,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.isMovableByWindowBackground = true
 
         // The system material behind the transparent page. macOS 26 and later: Liquid Glass,
-        // and the page's "glass" class gives it a lighter panel tint to match.
-        let pageHost: NSView
+        // and the page's "glass" class gives it a lighter panel tint to match. #available is a
+        // run-time check only: an SDK older than macOS 26 (AppKit 2600) has no glass to compile.
+        var glassHost: NSView?
+        #if canImport(AppKit, _version: 2600)
         if #available(macOS 26, *) {
             let glass = NSGlassEffectView(frame: NSRect(origin: .zero, size: frame.size))
             glass.cornerRadius = CARD_RADIUS
@@ -553,10 +567,15 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             host.autoresizingMask = [.width, .height]
             glass.contentView = host
             window.contentView = glass
-            pageHost = host
+            glassHost = host
             cfg.userContentController.addUserScript(
                 WKUserScript(source: "document.documentElement.classList.add('glass')",
                              injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
+        #endif
+        let pageHost: NSView
+        if let glassHost {
+            pageHost = glassHost
         } else {
             // Always active: following the window's key state would turn the panel flat
             // whenever another app has focus.
@@ -564,14 +583,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             material.material = .popover
             material.blendingMode = .behindWindow
             material.state = .active
-            let side = CARD_RADIUS * 2 + 1
-            let mask = NSImage(size: NSSize(width: side, height: side), flipped: false) { r in
-                NSBezierPath(roundedRect: r, xRadius: CARD_RADIUS, yRadius: CARD_RADIUS).fill()
-                return true
-            }
-            mask.capInsets = NSEdgeInsets(top: CARD_RADIUS, left: CARD_RADIUS, bottom: CARD_RADIUS, right: CARD_RADIUS)
-            mask.resizingMode = .stretch
-            material.maskImage = mask
+            material.maskImage = roundedMask(CARD_RADIUS)
             window.contentView = material
             pageHost = material
         }
@@ -742,8 +754,20 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             web.pageZoom = 1.4
             window.setFrame(screen.visibleFrame, display: true, animate: true)
         }
+        // The zoom scales the card's CSS corners; the material must follow them.
+        applyCornerRadius(CARD_RADIUS * web.pageZoom)
         window.invalidateShadow()
         applyFillClass()
+    }
+
+    func applyCornerRadius(_ radius: CGFloat) {
+        #if canImport(AppKit, _version: 2600)
+        if #available(macOS 26, *), let glass = window.contentView as? NSGlassEffectView {
+            glass.cornerRadius = radius
+            return
+        }
+        #endif
+        (window.contentView as? NSVisualEffectView)?.maskImage = roundedMask(radius)
     }
 
     func applyFillClass() {
@@ -1352,7 +1376,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             }
         }
         // While the widget fills the screen its size is fixed; the page's height reports wait.
-        if let h = body["height"] as? Double, h > 60, restoreFrame == nil {
+        if let h = body["height"] as? Double, h > 60, restoreFrame == nil,
+           Int(h) != Int(window.frame.height) {
             var f = window.frame
             let top = f.maxY                    // pin the top edge, grow downwards
             f.size.height = CGFloat(h)
