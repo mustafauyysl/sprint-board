@@ -15,7 +15,7 @@ import {
   mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, reviewIds, conflictIds, newConflicts, conflictNotifications, refreshSummary, CONFLICT_SCOPE,
   showDraftPrs, sprintGoalTracking, activeSprints, goalJql, goalBand, withGoalMarks,
   RELEASE_PR_STATES, releasePrSearch, releasePrs, groupByStatus,
-  titleNamesKey, RELEASE_BRANCH, releasePrId, releaseBranchCheck, reachedReleaseBranch,
+  titleNamesKey, RELEASE_BRANCH, releasePrId, releaseBranchCheck, reachedReleaseBranch, isReleasedStatus,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -334,15 +334,17 @@ async function attachRequiredChecks(prs, token) {
   }
 }
 
+let releasePrsError = null;
+
 /**
  * The PRs of the tasks that are waiting to ship or have shipped, one aliased search per task
- * in a SINGLE call. Optional like the other GitHub layers: on failure the column stays empty
- * (null) and the board carries on.
+ * in a SINGLE call. Optional like the other GitHub layers: on failure the column reads
+ * unknown (null), releasePrsError says why, and the board carries on.
  */
-async function attachReleasePrs(tasks, qualifier, token) {
+async function attachReleasePrs(tasks, qualifier, token, cfg) {
   const wanted = tasks
     .filter((t) => RELEASE_PR_STATES.includes(t.release))
-    .map((t) => ({ t, q: releasePrSearch(qualifier, t.key) }))
+    .map((t) => ({ t, q: releasePrSearch(qualifier, t.key), released: isReleasedStatus(t.status, cfg) }))
     .filter((w) => w.q);
   if (!token || wanted.length === 0) return;
   const aliases = wanted.map((w, i) => `
@@ -354,16 +356,19 @@ async function attachReleasePrs(tasks, qualifier, token) {
   try {
     const data = (await ghGraphql(`{${aliases.join("\n")}}`, token))?.data ?? {};
     const nodesOf = (i) => (Array.isArray(data[`r${i}`]?.nodes) ? data[`r${i}`].nodes : []);
-    const waiting = wanted.flatMap((w, i) =>
-      w.t.release === "pending" ? nodesOf(i).filter((n) => titleNamesKey(n?.title, w.t.key)) : []);
-    const shipped = await shippedPrs(waiting, token);
-    wanted.forEach((w, i) => { w.t.releasePrs = releasePrs(data[`r${i}`]?.nodes, w.t.key, w.t.release, shipped); });
-  } catch { /* optional: the column stays empty */ }
+    const unproven = wanted.flatMap((w, i) =>
+      w.released ? [] : nodesOf(i).filter((n) => titleNamesKey(n?.title, w.t.key)));
+    const shipped = await shippedPrs(unproven, token);
+    wanted.forEach((w, i) => { w.t.releasePrs = releasePrs(data[`r${i}`]?.nodes, w.t.key, w.released, shipped); });
+  } catch (err) {
+    releasePrsError = String(err && err.message ? err.message : err).slice(0, 200);
+    wanted.forEach((w) => { w.t.releasePrs = null; });
+  }
 }
 
 /**
- * The PRs merged into main or develop whose merge commit is already on master, as
- * releasePrIds, from ONE aliased call. Optional: on failure they all read merged.
+ * The PRs merged into a branch other than master whose merge commit is already on master,
+ * as releasePrIds, from ONE aliased call. Optional: on failure they all read merged.
  */
 async function shippedPrs(nodes, token) {
   const checks = new Map();
@@ -562,7 +567,9 @@ function demoPayload(cfg) {
     ],
   };
   for (const t of tasks) {
-    if (RELEASE_PR_STATES.includes(t.release)) t.releasePrs = releasePrs(demoReleaseNodes[t.key] || [], t.key, t.release);
+    if (RELEASE_PR_STATES.includes(t.release)) {
+      t.releasePrs = releasePrs(demoReleaseNodes[t.key] || [], t.key, isReleasedStatus(t.status, cfg));
+    }
   }
 
   const boss = pickBoss(tasks);
@@ -743,7 +750,7 @@ async function main() {
   const orgQualifier = githubOrgQualifier(cfg.githubOrg);
   const githubOrgError = orgQualifier === null ? "GitHub organization in config is not valid" : null;
   const ghToken = piped.githubToken || githubToken(cfg);
-  const releasePrsP = githubOrgError ? null : attachReleasePrs(tasks, orgQualifier, ghToken);
+  const releasePrsP = githubOrgError ? null : attachReleasePrs(tasks, orgQualifier, ghToken, cfg);
   const prs = githubOrgError ? null : await fetchPrs(orgQualifier, ghToken);
   const reviewRequests = githubOrgError ? null : await fetchReviewRequests(orgQualifier, new Date(), ghToken);
   await attachRequiredChecks(prs, ghToken);
@@ -825,6 +832,7 @@ async function main() {
     alerts,
     played,
     requiredError,
+    releasePrsError,
     brokenPrs,
     waitingPrs,
     pullRequests: mergeBlocked(prs, includeDrafts),

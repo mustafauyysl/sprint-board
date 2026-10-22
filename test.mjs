@@ -56,6 +56,9 @@ import {
   releasePrs,
   releaseBranchCheck,
   reachedReleaseBranch,
+  releasedStatuses,
+  isReleasedStatus,
+  DEFAULT_RELEASED_STATUSES,
   groupByStatus,
 } from "./lib.mjs";
 
@@ -1406,16 +1409,28 @@ test("titleNamesKey: the key as a whole token — DEMO-10 does not claim DEMO-10
   assert.equal(titleNamesKey(null, "DEMO-10"), false);
 });
 
-test("releasePrState: open, merged on a waiting task, deployed on a finished one", () => {
-  assert.equal(releasePrState({ state: "OPEN" }, "pending"), "open");
-  assert.equal(releasePrState({ state: "OPEN" }, "finished"), "open");
-  assert.equal(releasePrState({ state: "MERGED" }, "pending"), "merged");
-  assert.equal(releasePrState({ state: "MERGED" }, "finished"), "deployed");
+test("releasePrState: open, merged, and deployed only on a task whose status says released", () => {
+  assert.equal(releasePrState({ state: "OPEN" }, false), "open");
+  assert.equal(releasePrState({ state: "OPEN" }, true), "open");
+  assert.equal(releasePrState({ state: "MERGED" }, false), "merged");
+  assert.equal(releasePrState({ state: "MERGED" }, true), "deployed");
 });
 
-test("releasePrState: merged on a waiting task reads deployed once it has reached master", () => {
-  assert.equal(releasePrState({ state: "MERGED" }, "pending", true), "deployed");
-  assert.equal(releasePrState({ state: "OPEN" }, "pending", true), "open");
+test("releasePrState: merged reads deployed once it has reached master, whatever the status", () => {
+  assert.equal(releasePrState({ state: "MERGED" }, false, true), "deployed");
+  assert.equal(releasePrState({ state: "OPEN" }, false, true), "open");
+});
+
+test("isReleasedStatus: only a status on the released list proves a release; Closed or Done do not", () => {
+  assert.equal(isReleasedStatus("Released on Prod", {}), true);
+  assert.equal(isReleasedStatus(" released on prod ", {}), true);
+  assert.equal(isReleasedStatus("Closed", {}), false);
+  assert.equal(isReleasedStatus("Done", {}), false);
+  assert.equal(isReleasedStatus(undefined, {}), false);
+  assert.equal(isReleasedStatus("Shipped", { releasedStatuses: ["Shipped"] }), true);
+  assert.equal(isReleasedStatus("Released on Prod", { releasedStatuses: ["Shipped"] }), false);
+  assert.deepEqual(releasedStatuses({ releasedStatuses: "Shipped" }), DEFAULT_RELEASED_STATUSES);
+  assert.deepEqual(releasedStatuses(null), DEFAULT_RELEASED_STATUSES);
 });
 
 test("releaseBranchCheck: a PR merged into main or develop is asked about master; one merged into master is not", () => {
@@ -1448,8 +1463,8 @@ test("reachedReleaseBranch: master at the merge commit or past it", () => {
 });
 
 test("releasePrState: a PR closed without merging is not shown", () => {
-  assert.equal(releasePrState({ state: "CLOSED" }, "finished"), null);
-  assert.equal(releasePrState(null, "finished"), null);
+  assert.equal(releasePrState({ state: "CLOSED" }, true), null);
+  assert.equal(releasePrState(null, true), null);
 });
 
 test("releasePrs: drops closed PRs, other keys and duplicates; open PRs first", () => {
@@ -1462,7 +1477,7 @@ test("releasePrs: drops closed PRs, other keys and duplicates; open PRs first", 
     node(4, "DEMO-101 | Still open", "OPEN", "other-repo"),
     node(1, "DEMO-101 | Merged first", "MERGED"),
     null,
-  ], "DEMO-101", "pending");
+  ], "DEMO-101", false);
   assert.deepEqual(rows.map((r) => [r.repo, r.number, r.status]),
     [["other-repo", 4, "open"], ["demo-repo", 1, "merged"]]);
   assert.equal(rows[0].url, "https://example.invalid/other-repo/4");
@@ -1471,15 +1486,15 @@ test("releasePrs: drops closed PRs, other keys and duplicates; open PRs first", 
 test("releasePrs: a merged PR that has reached master reads deployed, the others merged", () => {
   const node = (number, owner) => ({ number, title: `DEMO-101 | Part ${number}`, url: "#", state: "MERGED",
     repository: { name: "demo-repo", owner: { login: owner } } });
-  const rows = releasePrs([node(1, "demo-org"), node(2, "demo-org"), node(1, "other-org")], "DEMO-101", "pending",
+  const rows = releasePrs([node(1, "demo-org"), node(2, "demo-org"), node(1, "other-org")], "DEMO-101", false,
     new Set(["demo-org/demo-repo#1"]));
   assert.deepEqual(rows.map((r) => `${r.repo}#${r.number} ${r.status}`),
     ["demo-repo#1 deployed", "demo-repo#2 merged", "demo-repo#1 merged"]);
 });
 
 test("releasePrs: no PRs found is an empty column, a failed search is null", () => {
-  assert.deepEqual(releasePrs([], "DEMO-101", "finished"), []);
-  assert.equal(releasePrs(undefined, "DEMO-101", "finished"), null);
+  assert.deepEqual(releasePrs([], "DEMO-101", true), []);
+  assert.equal(releasePrs(undefined, "DEMO-101", true), null);
 });
 
 test("groupByStatus: one section per status — active, then waiting, then shipped, then cancelled", () => {
@@ -1531,6 +1546,7 @@ globalThis.fetch = async (url, init) => {
   const u = new URL(String(url));
   if (u.hostname === "api.github.com") {
     const query = JSON.parse(init?.body || "{}").query || "";
+    if (fake.failReleaseSearch && query.includes("r0: search(")) return new Response("boom", { status: 500 });
     if (query.includes("r0: search(")) {
       appendFileSync(process.env.SB_FAKE_JIRA + ".gh", query + "\\n");
       return json({ data: fake.releaseSearch || {} });
@@ -1553,13 +1569,13 @@ globalThis.fetch = async (url, init) => {
 };
 `;
 
-function runReal(cfg, searches, { releaseSearch = null, releaseCompare = null, failReviews = false } = {}) {
+function runReal(cfg, searches, { releaseSearch = null, releaseCompare = null, failReviews = false, failReleaseSearch = false } = {}) {
   const home = mkdtempSync(join(tmpdir(), "sprint-board-real-"));
   try {
     mkdirSync(join(home, ".config", "sprint-widget"), { recursive: true });
     writeFileSync(join(home, ".config", "sprint-widget", "config.json"), JSON.stringify(cfg));
     writeFileSync(join(home, "fake.mjs"), FAKE_FETCH);
-    writeFileSync(join(home, "fake.json"), JSON.stringify({ searches, releaseSearch, releaseCompare, failReviews }));
+    writeFileSync(join(home, "fake.json"), JSON.stringify({ searches, releaseSearch, releaseCompare, failReviews, failReleaseSearch }));
     const out = execFileSync(process.execPath,
       ["--import", join(home, "fake.mjs"), fileURLToPath(new URL("./fetch.mjs", import.meta.url))],
       { env: { ...process.env, HOME: home, SB_FAKE_JIRA: join(home, "fake.json") },
@@ -1749,6 +1765,46 @@ test("real run: when the master check fails, merged PRs stay merged and the boar
     { match: "sprint in openSprints()", issues: [myTask, sprintIssue("DEMO-114", "Ready For Release", "done")] },
   ], { releaseSearch: { r0: { nodes: [prNode] } }, releaseCompare: { c0: { ref: null } } });
   assert.deepEqual(out.tasks.find((t) => t.key === "DEMO-114").releasePrs.map((p) => p.status), ["merged"]);
+});
+
+test("real run: a task closed without a released status reads merged unless master has the commit", () => {
+  const prNode = (number, title, commit) => ({ number, title, state: "MERGED", baseRefName: "develop",
+    mergeCommit: { oid: commit.repeat(40) }, url: "#", repository: { name: "demo-repo", owner: { login: "demo-org" } } });
+  const { out, gh } = runReal({ ...realCfg, githubOrg: "demo-org" }, [
+    { match: "NOT IN openSprints()", issues: [] },
+    { match: "sprint in openSprints()", issues: [
+      myTask,
+      sprintIssue("DEMO-115", "Closed", "done"),
+      sprintIssue("DEMO-116", "Done", "done"),
+    ] },
+  ], {
+    releaseSearch: {
+      r0: { nodes: [prNode(51, "DEMO-115 | Cleanup", "d")] },
+      r1: { nodes: [prNode(52, "DEMO-116 | Copy fix", "e")] },
+    },
+    releaseCompare: {
+      c0: { ref: { compare: { status: "BEHIND" } } },
+      c1: { ref: { compare: { status: "DIVERGED" } } },
+    },
+  });
+  assert.match(gh, new RegExp(`c0: [^]*compare\\(headRef: "${"d".repeat(40)}"\\)`));
+  assert.match(gh, new RegExp(`c1: [^]*compare\\(headRef: "${"e".repeat(40)}"\\)`));
+  const prs = Object.fromEntries(out.tasks.filter((t) => t.releasePrs)
+    .map((t) => [t.key, t.releasePrs.map((p) => `#${p.number} ${p.status}`)]));
+  assert.deepEqual(prs, { "DEMO-115": ["#51 deployed"], "DEMO-116": ["#52 merged"] });
+});
+
+test("real run: a failed release search marks the PR column unknown and says why", () => {
+  const searches = [
+    { match: "NOT IN openSprints()", issues: [] },
+    { match: "sprint in openSprints()", issues: [myTask, sprintIssue("DEMO-114", "Ready For Release", "done")] },
+  ];
+  const ok = runReal({ ...realCfg, githubOrg: "demo-org" }, searches, { releaseSearch: { r0: { nodes: [] } } }).out;
+  assert.equal(ok.releasePrsError, null);
+  assert.deepEqual(ok.tasks.find((t) => t.key === "DEMO-114").releasePrs, []);
+  const failed = runReal({ ...realCfg, githubOrg: "demo-org" }, searches, { failReleaseSearch: true }).out;
+  assert.equal(failed.tasks.find((t) => t.key === "DEMO-114").releasePrs, null);
+  assert.match(failed.releasePrsError, /HTTP 500/);
 });
 
 test("real run: a failed review search is reported, so the board never calls GitHub clear", () => {

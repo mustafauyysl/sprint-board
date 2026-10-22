@@ -213,6 +213,24 @@ export function pendingReleaseStatuses(config) {
 }
 
 /**
+ * Statuses that mean the task is live. An allow list for the same reason as the pending one:
+ * "finished" also holds Closed, Done, Resolved and every unknown status, which prove nothing
+ * about a release, so a merged PR on them reads merged, not deployed.
+ */
+export const DEFAULT_RELEASED_STATUSES = ["Released on Prod"];
+
+/** Falls back to the default when the configured list is malformed (not an array). */
+export function releasedStatuses(config) {
+  const c = config && config.releasedStatuses;
+  return Array.isArray(c) ? c : DEFAULT_RELEASED_STATUSES;
+}
+
+export function isReleasedStatus(status, config) {
+  const norm = typeof status === "string" ? status.trim().toLowerCase() : "";
+  return norm !== "" && releasedStatuses(config).some((s) => String(s).trim().toLowerCase() === norm);
+}
+
+/**
  * Splits a done-category status three ways: finished / cancelled / waiting to ship.
  *
  * An unknown status counts as "finished" (fail-closed) — see the allow list above.
@@ -620,13 +638,13 @@ export function titleNamesKey(title, key) {
 
 /**
  * open, merged or deployed; null for a PR closed without merging. GitHub records no
- * deployments, so "deployed" means merged on a task Jira has as finished, or merged into
- * main/develop with the merge commit already on master (`shipped`).
+ * deployments, so "deployed" needs proof: the task's status is on the released list
+ * (`released`), or the merge commit is already on master (`shipped`).
  */
-export function releasePrState(pr, release, shipped = false) {
+export function releasePrState(pr, released, shipped = false) {
   if (!pr) return null;
   if (pr.state === "OPEN") return "open";
-  if (pr.state === "MERGED") return release === "finished" || shipped ? "deployed" : "merged";
+  if (pr.state === "MERGED") return released || shipped ? "deployed" : "merged";
   return null;
 }
 
@@ -661,13 +679,13 @@ export const reachedReleaseBranch = (status) => status === "BEHIND" || status ==
  * A task's PR column from its search nodes: open PRs first, closed-unmerged ones dropped.
  * `shipped` holds the releasePrIds whose merge commit is on master.
  */
-export function releasePrs(nodes, key, release, shipped = new Set()) {
+export function releasePrs(nodes, key, released, shipped = new Set()) {
   if (!Array.isArray(nodes)) return null;
   const seen = new Set();
   const rows = [];
   for (const n of nodes) {
     if (!n || !n.number || !titleNamesKey(n.title, key)) continue;
-    const status = releasePrState(n, release, shipped.has(releasePrId(n)));
+    const status = releasePrState(n, released, shipped.has(releasePrId(n)));
     if (!status) continue;
     if (seen.has(releasePrId(n))) continue;
     seen.add(releasePrId(n));

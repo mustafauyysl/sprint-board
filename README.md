@@ -164,6 +164,9 @@ build is needed**, restarting the app is enough. If Swift changes, `./build-app.
   was tried and was wrong — a "finished" list showed every unrecognised status as
   "waiting" forever (Closed, Resolved, Problem Solved, Epic is Done, Question and
   Unresolved, all six at once). An unknown status fails closed.
+  For the same reason "finished" never proves a release: a merged PR reads **deployed**
+  only when its task's status is on a second allow list (`releasedStatuses`, default
+  `Released on Prod`) or its merge commit is already on `master`.
 - **`searchIssues` cuts off at maxResults=100 and DOES NOT PAGINATE.** Filtering a
   broad JQL on the client means silent data loss; move the filter into the JQL. The
   pending-release query is also sorted `updated ASC` — the stalest items are the
