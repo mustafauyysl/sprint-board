@@ -715,8 +715,8 @@ test("both screens: the same panel colours and window buttons", () => {
     .map(([, sel, body]) => [sel, body.replace(/\s+/g, " ").replace(/\s*([:;])\s*/g, "$1").trim()]));
   const [view, setup] = [read("./view.html"), read("./setup.html")];
   const [tv, ts] = [tokens(view), tokens(setup)];
-  for (const key of ["light :root --panel", "light :root --fill", "light :root.glass --panel",
-    "dark :root --panel", "dark :root --fill", "dark :root.glass --panel"]) {
+  for (const key of ["light :root --panel", "light :root --fill",
+    "dark :root --panel", "dark :root --fill"]) {
     assert.ok(key in tv && key in ts, `${key} missing`);
   }
   for (const key of Object.keys(ts).filter((k) => k in tv)) assert.equal(ts[key], tv[key], key);

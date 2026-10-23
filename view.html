@@ -4,12 +4,9 @@
 <style>
   :root { color-scheme: light dark;
           --panel: rgba(250,250,250,.62); --hover: rgba(0,0,0,.05); --fill: rgba(0,0,0,.035); }
-  /* Liquid Glass (macOS 26 and later, the "glass" class) needs a lighter tint to stay glass. */
-  :root.glass { --panel: rgba(250,250,250,.35); }
   /* The window material sits behind the page; this tint keeps the dark panel dark, not grey. */
   @media (prefers-color-scheme: dark) {
     :root { --panel: rgba(28,28,30,.80); --hover: rgba(255,255,255,.07); --fill: rgba(255,255,255,.05); }
-    :root.glass { --panel: rgba(28,28,30,.45); }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }

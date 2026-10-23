@@ -555,36 +555,13 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.hasShadow = true
         window.isMovableByWindowBackground = true
 
-        // The system material behind the transparent page. macOS 26 and later: Liquid Glass,
-        // and the page's "glass" class gives it a lighter panel tint to match. #available is a
-        // run-time check only: an SDK older than macOS 26 (AppKit 2600) has no glass to compile.
-        var glassHost: NSView?
-        #if canImport(AppKit, _version: 2600)
-        if #available(macOS 26, *) {
-            let glass = NSGlassEffectView(frame: NSRect(origin: .zero, size: frame.size))
-            let host = NSView(frame: glass.bounds)
-            host.autoresizingMask = [.width, .height]
-            glass.contentView = host
-            window.contentView = glass
-            glassHost = host
-            cfg.userContentController.addUserScript(
-                WKUserScript(source: "document.documentElement.classList.add('glass')",
-                             injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        }
-        #endif
-        let pageHost: NSView
-        if let glassHost {
-            pageHost = glassHost
-        } else {
-            // Always active: following the window's key state would turn the panel flat
-            // whenever another app has focus.
-            let material = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
-            material.material = .popover
-            material.blendingMode = .behindWindow
-            material.state = .active
-            window.contentView = material
-            pageHost = material
-        }
+        // The system material behind the transparent page. Always active: following the
+        // window's key state would turn the panel flat whenever another app has focus.
+        let material = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
+        material.material = .popover
+        material.blendingMode = .behindWindow
+        material.state = .active
+        window.contentView = material
         applyCornerRadius(CARD_RADIUS)
         // NOTE: the desktop level (desktopIcon) was tried — the window received no mouse
         // events. Normal level: same plane as other windows, clicks/drags work.
@@ -593,11 +570,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         // widget on top of full-screen apps. Keep it on the desktop Space.
         window.collectionBehavior = [.stationary, .ignoresCycle, .fullScreenNone]
 
-        web = DragWebView(frame: pageHost.bounds, configuration: cfg)
+        web = DragWebView(frame: material.bounds, configuration: cfg)
         web.autoresizingMask = [.width, .height]
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
-        pageHost.addSubview(web)
+        material.addSubview(web)
 
         if needsSetup() {
             onSetupScreen = true
@@ -766,12 +743,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     }
 
     func applyCornerRadius(_ radius: CGFloat) {
-        #if canImport(AppKit, _version: 2600)
-        if #available(macOS 26, *), let glass = window.contentView as? NSGlassEffectView {
-            glass.cornerRadius = radius
-            return
-        }
-        #endif
         (window.contentView as? NSVisualEffectView)?.maskImage = roundedMask(radius)
     }
 
