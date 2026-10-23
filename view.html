@@ -10,8 +10,9 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-  /* Swift keeps the window on the screen; a board taller than the screen scrolls instead. */
-  html { overflow-y: auto; }
+  /* Swift keeps the window on the screen; a board taller than the screen scrolls instead,
+     without the trackpad bounce that would pull the card off the window material. */
+  html { overflow-y: auto; overscroll-behavior: none; }
   body {
     font: 12px -apple-system, system-ui; line-height: 1.35;
     color: -apple-system-label; font-variant-numeric: tabular-nums;

@@ -392,10 +392,12 @@ let NOTE_LIMIT = 500
 /// The corner radius of the board card in view.html and setup.html; the window material follows it.
 let CARD_RADIUS: CGFloat = 10
 
-/// `frame` moved, and shortened if needed, to lie inside the visible area of its own screen
-/// (the screen it overlaps most; the main screen when it is on none, e.g. a display was unplugged).
-func onScreen(_ frame: NSRect) -> NSRect {
-    let area = { (s: NSScreen) in s.frame.intersection(frame).width * s.frame.intersection(frame).height }
+/// `frame` moved, and shortened if needed, to lie inside the visible area of its own screen: the
+/// screen `current` overlaps most (the main screen when it is on none, e.g. a display was unplugged).
+/// Pass the window's frame before a resize, so a tall board cannot pick the screen below.
+func onScreen(_ frame: NSRect, near current: NSRect? = nil) -> NSRect {
+    let at = current ?? frame
+    let area = { (s: NSScreen) in s.frame.intersection(at).width * s.frame.intersection(at).height }
     guard let screen = NSScreen.screens.filter({ area($0) > 0 }).max(by: { area($0) < area($1) })
             ?? NSScreen.main else { return frame }
     let vf = screen.visibleFrame
@@ -1373,7 +1375,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             let top = f.maxY                    // pin the top edge, grow downwards
             f.size.height = CGFloat(posted)
             f.origin.y = top - f.height
-            f = onScreen(f)
+            f = onScreen(f, near: window.frame)
             let now = window.frame
             guard abs(f.minX - now.minX) >= 0.5 || abs(f.minY - now.minY) >= 0.5
                     || abs(f.height - now.height) >= 0.5 else { return }
