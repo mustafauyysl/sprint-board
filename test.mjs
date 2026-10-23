@@ -703,7 +703,7 @@ test("both screens: the same panel colours and window buttons", () => {
     assert.ok(dark !== undefined, "no dark media query");
     const out = {};
     for (const [scheme, css] of [["light", light], ["dark", dark.slice(0, dark.indexOf("\n  }"))]]) {
-      for (const [, sel, body] of css.matchAll(/(:root(?:\.glass)?) \{([^}]*)\}/g)) {
+      for (const [, sel, body] of css.matchAll(/(:root) \{([^}]*)\}/g)) {
         for (const [, name, value] of body.matchAll(/(--[\w-]+): ?([^;}]+?)\s*(?:;|$)/g)) {
           out[`${scheme} ${sel} ${name}`] = value;
         }
@@ -723,6 +723,13 @@ test("both screens: the same panel colours and window buttons", () => {
   const [bv, bs] = [buttons(view), buttons(setup)];
   assert.deepEqual(Object.keys(bv).sort(), [".tl", ".tl.close", ".tl.fill", ".tl.min", ".tl:hover"]);
   assert.deepEqual(bs, bv);
+});
+
+test("both screens: the page function Swift calls after fill mode exists", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  // Swift guards the call with `&&`, so a renamed function would fail silently.
+  assert.match(read("./SprintBoard.swift"), /evaluateJavaScript\("window\.sbFit && window\.sbFit\(\)"\)/);
+  for (const f of ["./view.html", "./setup.html"]) assert.match(read(f), /^\s*window\.sbFit = /m, f);
 });
 
 test("addNote: every note gets a unique id", () => {

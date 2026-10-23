@@ -392,6 +392,21 @@ let NOTE_LIMIT = 500
 /// The corner radius of the board card in view.html and setup.html; the window material follows it.
 let CARD_RADIUS: CGFloat = 10
 
+/// `frame` moved, and shortened if needed, to lie inside the visible area of its own screen
+/// (the screen it overlaps most; the main screen when it is on none, e.g. a display was unplugged).
+func onScreen(_ frame: NSRect) -> NSRect {
+    let area = { (s: NSScreen) in s.frame.intersection(frame).width * s.frame.intersection(frame).height }
+    guard let screen = NSScreen.screens.filter({ area($0) > 0 }).max(by: { area($0) < area($1) })
+            ?? NSScreen.main else { return frame }
+    let vf = screen.visibleFrame
+    var f = frame
+    f.size.height = min(f.height, vf.height)
+    f.size.width = min(f.width, vf.width)
+    f.origin.x = min(max(f.minX, vf.minX), vf.maxX - f.width)
+    f.origin.y = min(max(f.minY, vf.minY), vf.maxY - f.height)
+    return f
+}
+
 /// A stretchable mask that rounds the popover material's corners to `radius`.
 func roundedMask(_ radius: CGFloat) -> NSImage {
     let side = radius * 2 + 1
@@ -832,9 +847,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
         // Default: top-left corner (on macOS y is measured from the bottom up).
         let vf = screen.visibleFrame
-        return NSRect(x: x ?? (vf.minX + 40),
-                      y: y ?? (vf.maxY - h - 40),
-                      width: 430, height: h)
+        return onScreen(NSRect(x: x ?? (vf.minX + 40),
+                               y: y ?? (vf.maxY - h - 40),
+                               width: 430, height: h))
     }
 
     func saveFrame() {
@@ -1352,15 +1367,16 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             }
         }
         // While the widget fills the screen its size is fixed; the page's height reports wait.
-        // The window never grows past the screen: it would run under the Dock and be saved so.
+        // The window never leaves the screen: it would run under the Dock and be saved so.
         if let posted = body["height"] as? Double, posted > 60, restoreFrame == nil {
-            let vf = (window.screen ?? NSScreen.main)?.visibleFrame
-            let h = min(CGFloat(posted), vf?.height ?? .greatestFiniteMagnitude)
-            guard abs(h - window.frame.height) >= 0.5 else { return }
             var f = window.frame
             let top = f.maxY                    // pin the top edge, grow downwards
-            f.size.height = h
-            f.origin.y = max(top - h, vf?.minY ?? -.greatestFiniteMagnitude)
+            f.size.height = CGFloat(posted)
+            f.origin.y = top - f.height
+            f = onScreen(f)
+            let now = window.frame
+            guard abs(f.minX - now.minX) >= 0.5 || abs(f.minY - now.minY) >= 0.5
+                    || abs(f.height - now.height) >= 0.5 else { return }
             window.setFrame(f, display: true)
             window.invalidateShadow()
             saveFrame()

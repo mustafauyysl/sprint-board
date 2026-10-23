@@ -10,6 +10,8 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  /* Swift keeps the window on the screen; a board taller than the screen scrolls instead. */
+  html { overflow-y: auto; }
   body {
     font: 12px -apple-system, system-ui; line-height: 1.35;
     color: -apple-system-label; font-variant-numeric: tabular-nums;
@@ -177,13 +179,14 @@
   const refresh = () => window.webkit?.messageHandlers?.sb?.postMessage({ refresh: true });
   // The window material covers the whole window, so the window follows the card. A drawn board
   // sets the window to its height; a placeholder (loading, error) fills the window and only grows
-  // it when its text does not fit. Swift calls it too when the widget leaves fill mode.
-  const fit = () => requestAnimationFrame(() => {
+  // it when its text does not fit. It posts at once: a closed widget pauses animation frames.
+  const fit = () => {
     const card = document.getElementById("card");
     if (card.querySelector(":scope > .err") && card.offsetHeight <= window.innerHeight) return;
     window.webkit?.messageHandlers?.sb?.postMessage({ height: card.offsetHeight });
-  });
-  window.sbFit = fit;
+  };
+  // Swift calls this after fill mode; the next frame has the restored zoom and width.
+  window.sbFit = () => requestAnimationFrame(fit);
   new ResizeObserver(fit).observe(document.getElementById("card"));
 
   const band = (cls, title, rows, mark) => rows.length ? `
@@ -411,6 +414,8 @@
       e.stopPropagation();
       window.webkit?.messageHandlers?.sb?.postMessage({ settings: true });
     });
+    // A window resized by hand, or moved off a smaller screen, has the same card: fit it anyway.
+    fit();
   }
 
   // fetch.mjs normally takes ~13 s; on the FIRST launch after a rebuild it can
