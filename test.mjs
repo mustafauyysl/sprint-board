@@ -732,6 +732,13 @@ test("both screens: the page function Swift calls after fill mode exists", () =>
   for (const f of ["./view.html", "./setup.html"]) assert.match(read(f), /^\s*window\.sbFit = /m, f);
 });
 
+test("both screens: a trackpad swipe does not pull the card off the window", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  for (const f of ["./view.html", "./setup.html"]) {
+    assert.match(read(f), /^\s*html \{[^}]*\boverscroll-behavior: none;/m, f);
+  }
+});
+
 test("addNote: every note gets a unique id", () => {
   const t = at("2026-08-20");
   const n = addNote(addNote([], "a", t), "b", t);
