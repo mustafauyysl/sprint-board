@@ -69,23 +69,18 @@
   .row { display:flex; gap:7px; align-items:baseline; padding:2px 0; cursor:pointer; border-radius:3px }
   .row:hover { background:rgba(57,255,20,.07) }
   .row .k { color:#cfe9ff; width:92px; flex:none; white-space:nowrap }
-  .row .s { flex:1; color:#8fa9c9; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
   .row .qa { flex:none; width:62px; color:#5fb3c4; overflow:hidden; white-space:nowrap }
   .row .carry { flex:none; width:26px; text-align:right; color:#b98bff }
-  .row .pr { flex:none; width:34px; text-align:right; color:#55708c }
-  .row .pr.bad { color:#ff6b6b } .row .pr.wait { color:#ffb000 } .row .pr.good { color:#4a8f6a }
   .row .d { flex:none; color:#6f8aa8 }
   .row .age { flex:none; width:30px; text-align:right; color:#44607d }
   .row.done { opacity:.5 }
   .row.done .k { color:#7ea88a }
-  .row.done .s { color:#5d7a68 }
   /* Struck through = work finished. Jira's "done" category alone does not say
      that: some of the 15 statuses mean "waiting to ship to prod". */
   .row.done.finished .k, .row.done.cancelled .k { text-decoration:line-through }
   /* Awaiting release is still being tracked — less faded, keep it green. */
   .row.done.pending { opacity:.78 }
   .row.done.pending .k { color:#7CFFAE; text-decoration:none }
-  .row.done.pending .s { color:#6f9d81 }
   .row.warn .d, .row.warn .k { color:#ffb000 }
   .row.critical .d, .row.critical .k { color:#ff6b6b }
   .row.warn .d, .row.critical .d { animation:sbBlink 1.6s ease-in-out infinite }
@@ -110,7 +105,7 @@
   .ghd::after { content:""; flex:1; border-top:1px dashed rgba(57,255,20,.18) }
   .ghd.p0 { color:#7fa894 } .ghd.p1 { color:#7CFFAE } .ghd.p3 { color:#6b6b80 }
 
-  /* PR column of waiting-to-ship and shipped rows. The row's fade stays off the column. */
+  /* Every row's PR column. On waiting-to-ship and shipped rows the row's fade stays off it. */
   .row .rp { flex:1; min-width:0; text-align:right; font-size:10px }
   .row .rp .g + .g { margin-left:8px }
   .row .rp .c, .row .rp .w { white-space:nowrap }
@@ -119,6 +114,10 @@
   .row .rp .open { color:#3fb950; text-shadow:0 0 6px rgba(63,185,80,.55) }
   .row .rp .merged, .row .rp .deployed { color:#a371f7; text-shadow:0 0 6px rgba(163,113,247,.55) }
   .row .rp .none { color:#44607d }
+  .row .rp .c.bad { color:#ff6b6b; text-shadow:0 0 6px rgba(255,107,107,.55) }
+  .row .rp .c.wait { color:#ffb000; text-shadow:0 0 6px rgba(255,176,0,.45) }
+  .row .rp .badge { color:#55708c } .row .rp .badge.bad { color:#ff6b6b }
+  .row .rp .badge.wait { color:#ffb000 } .row .rp .badge.good { color:#4a8f6a }
   .row.done.rel { opacity:1 }
   .row.done.rel > span:not(.rp) { opacity:.5 }
   .row.done.pending.rel > span:not(.rp) { opacity:.78 }
@@ -220,9 +219,8 @@
     : t.alert ? "🔥" : t.carriedOver ? "👻" : t.statusCategory === "new" ? "🛡" : "🗡";
   const PR_MARK = { FAILURE:"✗", ERROR:"✗", PENDING:"●", EXPECTED:"●", SUCCESS:"✓" };
   const prMark = (s) => PR_MARK[s] || "·";
-  // When the state is unknown (draft PR, or the CI query failed) ASSIGN NO CLASS:
-  // the base .row .pr colour is already neutral. The old "good" here painted a
-  // stateless PR green — that read as "passed" when in fact nothing is known.
+  // When the state is unknown (draft PR, or the CI query failed) ASSIGN NO CLASS and no mark:
+  // painting a stateless PR as passed reads "green" when in fact nothing is known.
   const prClass = (s) => (s === "FAILURE" || s === "ERROR") ? "bad"
     : (s === "PENDING" || s === "EXPECTED") ? "wait" : s ? "good" : "";
   const hhmm = (iso) => { try { const d = new Date(iso);
@@ -246,34 +244,39 @@
         </div>`).join("")}
     </div>` : "";
 
-  // Waiting-to-ship and shipped rows trade the CI badge for their PRs, one label per state
-  // ("#12 #34 open") so a task with several PRs still fits the narrow column.
-  const PR_COLUMN = new Set(["pending", "finished"]);
-  const relChips = (prs) => prs === null ? `<span class="none" title="the GitHub PR search failed">PRs ?</span>`
+  // Every row lists its PRs, one label per state ("#12 #34 open") so a task with several PRs
+  // still fits the narrow column. An open PR's number carries the state the task badge used to
+  // show (CI, conflict, review), and its tooltip says why.
+  const prNumber = (p) => {
+    const why = (p.checks || []).length ? " · " + p.checks.join(", ") : "";
+    return `<span class="c${p.ci ? " " + prClass(p.ci) : ""}" data-url="${esc(p.url)}"
+      title="${esc(p.repo)}#${esc(p.number)} · ${esc(p.title)}${esc(why)}">#${esc(p.number)}${p.ci ? prMark(p.ci) : ""}</span>`;
+  };
+  // When the PR search failed, the open-PR search may still have given the task its badge.
+  const searchFailed = (t) => t.pr
+    ? `<span class="badge ${prClass(t.pr.state)}" title="the GitHub PR search failed: ${t.pr.count} open PR(s), CI from the open-PR search">⚙${t.pr.count}${prMark(t.pr.state)}</span>`
+    : `<span class="none" title="the GitHub PR search failed">PRs ?</span>`;
+  const relChips = (t, prs = t.releasePrs) => prs === null ? searchFailed(t)
     : !Array.isArray(prs) ? ""
     : !prs.length ? `<span class="none">no PR</span>`
     : ["open", "merged", "deployed"].map((st) => {
         const of = prs.filter((p) => p.status === st);
-        return of.length ? `<span class="g ${st}">${of.map((p) => `<span class="c" data-url="${esc(p.url)}"
-          title="${esc(p.repo)}#${esc(p.number)} · ${esc(p.title)}">#${esc(p.number)}</span> `).join("")}<span class="w">${st}</span></span>` : "";
+        return of.length ? `<span class="g ${st}">${of.map((p) => prNumber(p) + " ").join("")}<span class="w">${st}</span></span>` : "";
       }).join("");
 
-  const taskRow = (t) => {
-    const rel = PR_COLUMN.has(t.release);
-    return `
-        <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}${rel ? " rel" : ""}" data-url="${esc(t.url)}"
+  // Waiting-to-ship and shipped rows fade, but their PR column stays lit.
+  const PRS_STAY_LIT = new Set(["pending", "finished"]);
+  const taskRow = (t) => `
+        <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}${PRS_STAY_LIT.has(t.release) ? " rel" : ""}" data-url="${esc(t.url)}"
              title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (threshold ${t.threshold}d) · age ${t.ageDays}d">
           <span class="k">${icon(t)} ${esc(t.key)}</span>
-          ${rel ? "" : `<span class="s"></span>`}
           ${t.goal ? `<span class="goal">🎯 GOAL</span>` : ""}
           <span class="qa">${t.qaShort ? "🧪" + esc(t.qaShort) : ""}</span>
-          ${rel ? `<span class="rp">${relChips(t.releasePrs)}</span>` : `
-          <span class="carry">${t.carriedOver ? "×" + t.sprintCount : ""}</span>
-          <span class="pr ${t.pr ? prClass(t.pr.state) : ""}">${t.pr ? "⚙" + t.pr.count + prMark(t.pr.state) : ""}</span>`}
-          <span class="d">${t.daysInStatus}g</span>
-          <span class="age">/${t.ageDays}</span>
+          <span class="carry"${t.carriedOver ? ` title="carried over: this is its sprint #${t.sprintCount}"` : ""}>${t.carriedOver ? "×" + t.sprintCount : ""}</span>
+          <span class="rp">${relChips(t)}</span>
+          <span class="d" title="${t.daysInStatus} business days in ${esc(t.status)} (threshold ${t.threshold}d)">${t.daysInStatus}g</span>
+          <span class="age" title="opened ${t.ageDays} business days ago">/${t.ageDays}</span>
         </div>`;
-  };
 
   // Every PR that cannot be merged, with its reasons; a PR GitHub has not settled reads "checking".
   const prBand = (rows) => rows.length ? `

@@ -14,7 +14,7 @@ import {
   updateInfo, jiraRequest, ownershipStartedAt,
   mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, reviewIds, conflictIds, newConflicts, conflictNotifications, refreshSummary, CONFLICT_SCOPE,
   showDraftPrs, sprintGoalTracking, activeSprints, goalJql, goalBand, withGoalMarks,
-  RELEASE_PR_STATES, releasePrSearch, releasePrs, groupByStatus,
+  releasePrSearch, releasePrs, withOpenPrState, groupByStatus,
   titleNamesKey, RELEASE_BRANCH, releasePrId, releaseBranchCheck, reachedReleaseBranch, isReleasedStatus,
 } from "./lib.mjs";
 
@@ -337,13 +337,12 @@ async function attachRequiredChecks(prs, token) {
 let releasePrsError = null;
 
 /**
- * The PRs of the tasks that are waiting to ship or have shipped, one aliased search per task
- * in a SINGLE call. Optional like the other GitHub layers: on failure the column reads
- * unknown (null), releasePrsError says why, and the board carries on.
+ * Every task's PRs, open and merged, one aliased search per task in a SINGLE call. Optional
+ * like the other GitHub layers: on failure the column reads unknown (null), releasePrsError
+ * says why, and the board carries on.
  */
 async function attachReleasePrs(tasks, qualifier, token, cfg) {
   const wanted = tasks
-    .filter((t) => RELEASE_PR_STATES.includes(t.release))
     .map((t) => ({ t, q: releasePrSearch(qualifier, t.key), released: isReleasedStatus(t.status, cfg) }))
     .filter((w) => w.q);
   if (!token || wanted.length === 0) return;
@@ -555,10 +554,10 @@ function demoPayload(cfg) {
     t.pr = p ? { count: p.count, state: p.state } : null;
   }
 
-  // Search answers per task; releasePrs drops the closed one exactly as it does live.
+  // Search answers per task: merged and closed PRs here, the open ones come from demoPrs below.
+  // releasePrs drops the closed one exactly as it does live.
   const demoReleaseNodes = {
     "DEMO-106": [
-      { number: 288, title: "DEMO-106 | Dependency upgrade", url: "#", state: "OPEN", repository: { name: "worker-jobs" } },
       { number: 96, title: "DEMO-106 | Lockfile refresh", url: "#", state: "MERGED", repository: { name: "shared-lib" } },
       { number: 95, title: "DEMO-106 | First attempt", url: "#", state: "CLOSED", repository: { name: "shared-lib" } },
     ],
@@ -566,10 +565,12 @@ function demoPayload(cfg) {
       { number: 4590, title: "DEMO-112 | Export retry window", url: "#", state: "MERGED", repository: { name: "web-frontend" } },
     ],
   };
+  for (const pr of demoPrs) {
+    const key = pr.title.split(" ")[0];
+    (demoReleaseNodes[key] ||= []).push({ number: pr.number, title: pr.title, url: pr.url, state: "OPEN", repository: { name: pr.repo } });
+  }
   for (const t of tasks) {
-    if (RELEASE_PR_STATES.includes(t.release)) {
-      t.releasePrs = releasePrs(demoReleaseNodes[t.key] || [], t.key, isReleasedStatus(t.status, cfg));
-    }
+    t.releasePrs = withOpenPrState(releasePrs(demoReleaseNodes[t.key] || [], t.key, isReleasedStatus(t.status, cfg)), demoPrs);
   }
 
   const boss = pickBoss(tasks);
@@ -759,6 +760,7 @@ async function main() {
   for (const t of tasks) {
     const p = prByKey[t.key];
     t.pr = p ? { count: p.count, state: p.state } : null;
+    t.releasePrs = withOpenPrState(t.releasePrs, prs);
   }
 
   const prevState = readJson(STATE_PATH, emptyState());

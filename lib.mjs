@@ -612,13 +612,10 @@ export function searchNodes(response) {
 export const prSearch = (qualifier) => `${qualifier}author:@me is:pr is:open`;
 export const reviewSearch = (qualifier) => `${qualifier}is:open is:pr review-requested:@me`;
 
-// --- PRs of tasks that are waiting to ship or have shipped ---------------------------
-// The open-PR search above never returns a merged PR, so a released task needs its own.
+// --- Every task's PRs, open and merged ------------------------------------------------
+// The open-PR search above never returns a merged PR, so the PR column needs its own.
 
 const JIRA_KEY = /^[A-Z][A-Z0-9]+-\d+$/;
-
-/** Release states whose rows show the PR column. */
-export const RELEASE_PR_STATES = ["pending", "finished"];
 
 /**
  * The search for one task's PRs, open and merged, by the key in the title. Without an org it
@@ -692,6 +689,25 @@ export function releasePrs(nodes, key, released, shipped = new Set()) {
     rows.push({ repo: n.repository?.name ?? "?", number: n.number, url: n.url ?? null, title: n.title ?? "", status });
   }
   return rows.sort((a, b) => (a.status === "open" ? 0 : 1) - (b.status === "open" ? 0 : 1));
+}
+
+/**
+ * Open PRs in the column take the state the task badge used to show, per PR: FAILURE when
+ * something needs action (CI, conflict, changes requested), PENDING while waiting (CI
+ * running, review required), else CI's own state. Only the open-PR search knows it, so a PR
+ * that search did not return, or a draft, gets null. `checks` says why.
+ */
+export function withOpenPrState(rows, prs) {
+  if (!Array.isArray(rows)) return rows;
+  const byId = new Map();
+  for (const pr of prs || []) if (pr && pr.number) byId.set(`${pr.repo}#${pr.number}`, pr);
+  return rows.map((r) => {
+    if (r.status !== "open") return r;
+    const pr = byId.get(`${r.repo}#${r.number}`);
+    if (!pr || pr.isDraft) return { ...r, ci: null, checks: [] };
+    const { rank, reasons } = prBlockers(pr);
+    return { ...r, ci: rank === 3 ? "FAILURE" : rank === 2 ? "PENDING" : pr.ciState || null, checks: reasons };
+  });
 }
 
 const PHASE = { pending: 1, finished: 2, cancelled: 3 };
