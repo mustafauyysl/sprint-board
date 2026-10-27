@@ -1657,6 +1657,7 @@ globalThis.fetch = async (url, init) => {
     if (fake.failReviews && query.includes("review-requested")) return new Response("boom", { status: 500 });
     if (query.includes("c0: repository(")) {
       appendFileSync(process.env.SB_FAKE_JIRA + ".gh", query + "\\n");
+      if (fake.failReleaseCompare) return new Response("boom", { status: 500 });
       const data = {};
       for (const m of query.matchAll(/(c[0-9]+): repository[(][^]*?compare[(]headRef: "([0-9a-f]{40})"/g)) {
         data[m[1]] = (fake.releaseCompare || {})[m[2]] ?? null;
@@ -1677,13 +1678,13 @@ globalThis.fetch = async (url, init) => {
 };
 `;
 
-function runReal(cfg, searches, { releaseSearch = null, releaseCompare = null, failReviews = false, failReleaseSearch = false, openPrs = null } = {}) {
+function runReal(cfg, searches, { releaseSearch = null, releaseCompare = null, failReviews = false, failReleaseSearch = false, failReleaseCompare = false, openPrs = null } = {}) {
   const home = mkdtempSync(join(tmpdir(), "sprint-board-real-"));
   try {
     mkdirSync(join(home, ".config", "sprint-widget"), { recursive: true });
     writeFileSync(join(home, ".config", "sprint-widget", "config.json"), JSON.stringify(cfg));
     writeFileSync(join(home, "fake.mjs"), FAKE_FETCH);
-    writeFileSync(join(home, "fake.json"), JSON.stringify({ searches, releaseSearch, releaseCompare, failReviews, failReleaseSearch, openPrs }));
+    writeFileSync(join(home, "fake.json"), JSON.stringify({ searches, releaseSearch, releaseCompare, failReviews, failReleaseSearch, failReleaseCompare, openPrs }));
     const out = execFileSync(process.execPath,
       ["--import", join(home, "fake.mjs"), fileURLToPath(new URL("./fetch.mjs", import.meta.url))],
       { env: { ...process.env, HOME: home, SB_FAKE_JIRA: join(home, "fake.json") },
@@ -1878,6 +1879,18 @@ test("real run: when the master check fails, merged PRs stay merged and the boar
     { match: "sprint in openSprints()", issues: [myTask, sprintIssue("DEMO-114", "Ready For Release", "done")] },
   ], { releaseSearch: { "DEMO-114": { nodes: [prNode] } }, releaseCompare: { ["a".repeat(40)]: { ref: null } } });
   assert.deepEqual(out.tasks.find((t) => t.key === "DEMO-114").releasePrs.map((p) => p.status), ["merged"]);
+});
+
+test("real run: when the master check request fails with HTTP 500, merged PRs stay merged and no error is shown", () => {
+  const prNode = { number: 8, title: "DEMO-114 | Font fix", state: "MERGED", baseRefName: "main",
+    mergeCommit: { oid: "a".repeat(40) }, url: "#", repository: { name: "demo-repo", owner: { login: "demo-org" } } };
+  const { out, gh } = runReal({ ...realCfg, githubOrg: "demo-org" }, [
+    { match: "NOT IN openSprints()", issues: [] },
+    { match: "sprint in openSprints()", issues: [myTask, sprintIssue("DEMO-114", "Ready For Release", "done")] },
+  ], { releaseSearch: { "DEMO-114": { nodes: [prNode] } }, failReleaseCompare: true });
+  assert.match(gh, /c0: repository\(owner: "demo-org", name: "demo-repo"\)/, "the master check was asked");
+  assert.deepEqual(out.tasks.find((t) => t.key === "DEMO-114").releasePrs.map((p) => p.status), ["merged"]);
+  assert.equal(out.releasePrsError, null);
 });
 
 test("real run: a task closed without a released status reads merged unless master has the commit", () => {
