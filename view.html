@@ -2,192 +2,170 @@
 <meta charset="utf-8">
 <title>Sprint Board</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: light dark;
+          --panel: rgba(250,250,250,.62); --hover: rgba(0,0,0,.05); --fill: rgba(0,0,0,.035); }
+  /* The window material sits behind the page; this tint keeps the dark panel dark, not grey. */
+  @media (prefers-color-scheme: dark) {
+    :root { --panel: rgba(28,28,30,.80); --hover: rgba(255,255,255,.07); --fill: rgba(255,255,255,.05); }
+  }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  /* Swift keeps the window on the screen; a board taller than the screen scrolls instead,
+     without the trackpad bounce that would pull the card off the window material. */
+  html { overflow-y: auto; overscroll-behavior: none; }
   body {
-    font-family: ui-monospace, Menlo, "SF Mono", monospace;
-    font-size: 11px; line-height: 1.5; color: #39ff14;
+    font: 12px -apple-system, system-ui; line-height: 1.35;
+    color: -apple-system-label; font-variant-numeric: tabular-nums;
     -webkit-user-select: none; user-select: none; cursor: default;
   }
 
   #card {
-    position: relative; margin: 0; padding: 14px 16px 12px;
-    background: linear-gradient(180deg, rgba(13,11,26,.96), rgba(9,8,18,.96));
-    border: 1px solid rgba(57,255,20,.35); border-radius: 10px;
-    box-shadow: inset 0 0 60px rgba(57,255,20,.04);
-    overflow: hidden;
-  }
-  /* CRT scanline */
-  #card::after {
-    content: ""; position: absolute; inset: 0; pointer-events: none;
-    background: repeating-linear-gradient(180deg, rgba(255,255,255,.035) 0 1px, transparent 1px 3px);
+    position: relative; margin: 0; padding: 12px 14px;
+    background: var(--panel); border-radius: 10px; overflow: hidden;
   }
 
-  @keyframes sbBlink { 0%,100% { opacity: 1 } 50% { opacity: .28 } }
-  @keyframes sbPulse {
-    0%,100% { border-color:#ff3b3b; box-shadow:0 0 0 rgba(255,59,59,0); background:rgba(255,59,59,.06) }
-    50%     { border-color:#ff9c9c; box-shadow:0 0 16px rgba(255,59,59,.5); background:rgba(255,59,59,.14) }
-  }
+  /* SF Symbols: Swift injects each one as a mask image on .s-<name> */
+  .sym { display:inline-block; width:13px; height:13px; flex:none; vertical-align:-2px;
+         background-color:currentColor; -webkit-mask-size:contain;
+         -webkit-mask-repeat:no-repeat; -webkit-mask-position:center }
+  .sym.sm { width:11px; height:11px; vertical-align:-1px }
+  .c-red { color:-apple-system-red } .c-orange { color:-apple-system-orange }
+  .c-yellow { color:-apple-system-yellow } .c-green { color:-apple-system-green }
+  .c-blue { color:-apple-system-blue } .c-purple { color:-apple-system-purple }
+  .c-gray { color:-apple-system-gray } .c-2 { color:-apple-system-secondary-label }
+
+  hr { border:0; border-top:1px solid -apple-system-separator; margin:10px 0 }
 
   /* Title drag handle — the Swift side uses this strip to move the window */
-  .hdr { display:flex; justify-content:space-between; align-items:baseline;
-         letter-spacing:.06em; text-shadow:0 0 8px rgba(57,255,20,.45);
-         cursor: grab; }   /* dragging lives in Swift: the top 34px */
-  .hdr:active { cursor: grabbing; }
-  .hdr .name { font-weight:700 }
-  .hdr .lights { display:inline-flex; gap:6px; margin-right:8px; vertical-align:-1px }
-  .hdr .tl { width:10px; height:10px; border-radius:50%; cursor:pointer; display:inline-block }
+  .hdr { display:flex; align-items:center; gap:8px; cursor:grab }   /* dragging lives in Swift: the top 34px */
+  .hdr:active { cursor:grabbing }
+  .hdr .lights { display:inline-flex; gap:8px; margin-right:4px }
+  .hdr .tl { width:12px; height:12px; border-radius:50%; cursor:pointer; display:inline-block;
+             box-shadow: inset 0 0 0 .5px rgba(0,0,0,.18) }
   .hdr .tl.close { background:#ff5f57 } .hdr .tl.min { background:#febc2e } .hdr .tl.fill { background:#28c840 }
-  .hdr .tl:hover { filter:brightness(1.25) }
-  body.filled #card { min-height:calc(100vh - 2px) }
-  .hdr .right { color:#9bffb0; font-size:10px; opacity:.85 }
-  .rf { cursor:pointer; margin-left:9px; color:#7CFFAE; font-size:12px }
-  .rf:hover { color:#fff; text-shadow:0 0 8px rgba(57,255,20,.8) }
-  /* fetch.mjs takes ~13 s; a ⟳ that did not spin felt like the click had not landed */
-  .rf.spin { display:inline-block; color:#fff; animation:sbSpin 1s linear infinite }
+  .hdr .tl:hover { filter:brightness(1.15) }
+  .hdr .name { flex:1; min-width:0; font-weight:700; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  .hdr .right { font-size:11px; color:-apple-system-secondary-label; white-space:nowrap }
+  body.filled #card, #card:has(> .err) { min-height:100vh }
+
+  /* A section: label left, bold value right, a bar, grey text on both sides under it */
+  .sec .top { display:flex; justify-content:space-between; align-items:baseline }
+  .sec .lbl { display:flex; align-items:center; gap:6px; font-weight:600 }
+  .sec .val { font-weight:700 }
+  .sec .under { display:flex; justify-content:space-between; align-items:center;
+                font-size:11px; color:-apple-system-secondary-label }
+  /* Drawn in CSS: WebKit paints a native progress bar grey whenever the window is not key,
+     and the widget is seldom the key window. */
+  progress { -webkit-appearance:none; appearance:none; display:block; width:100%; height:6px;
+             margin:6px 0 3px; border:0 }
+  progress::-webkit-progress-bar { background:rgba(128,128,128,.2); background:color-mix(in srgb, -apple-system-label 12%, transparent); border-radius:3px }
+  progress::-webkit-progress-value { background:-apple-system-control-accent; border-radius:3px }
+  .yellow progress::-webkit-progress-value { background:-apple-system-yellow }
+  .red progress::-webkit-progress-value, .overdue progress::-webkit-progress-value { background:-apple-system-red }
+
+  .tools { display:inline-flex; gap:2px }
+  .rf { display:inline-flex; align-items:center; justify-content:center; width:22px; height:20px;
+        border-radius:5px; cursor:pointer; color:-apple-system-secondary-label }
+  .rf:hover { background:var(--hover); color:-apple-system-label }
+  /* fetch.mjs takes ~13 s; a refresh button that did not spin felt like the click had not landed */
+  .rf.spin .sym { animation:sbSpin 1s linear infinite; color:-apple-system-control-accent }
   @keyframes sbSpin { to { transform:rotate(360deg) } }
   @media (prefers-reduced-motion: reduce) {
-    .rf.spin { animation:none; opacity:.45 }
+    .rf.spin .sym { animation:none; opacity:.45 }
   }
 
-  .siege { margin:6px 0 10px; color:#7CFFAE; font-size:10px; letter-spacing:.1em;
-           display:flex; justify-content:space-between; align-items:baseline }
-  .siege .tools { letter-spacing:0 }
+  /* The flagged tasks of the sprint */
+  .goals .summary { display:flex; gap:12px; font-size:11px; color:-apple-system-secondary-label; margin:6px 0 4px }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; flex:none }
+  .dot.red { background:-apple-system-red } .dot.yellow { background:-apple-system-yellow }
+  .dot.ok { background:-apple-system-gray } .dot.done { background:-apple-system-green }
+  .grow, .brow { display:flex; align-items:center; gap:6px; padding:2px 4px; margin:0 -4px;
+                 border-radius:5px; white-space:nowrap; cursor:pointer }
+  .grow:hover, .brow:hover, .row:hover { background:var(--hover) }
+  .grow .gsum { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis }
+  .grow .gkey { font-weight:600 }
+  .grow .gside { flex:none; max-width:46%; overflow:hidden; text-overflow:ellipsis; color:-apple-system-secondary-label }
+  .grow.done { opacity:.55 }
+  .grow.done .gkey { text-decoration:line-through }
+  .goals .gnone { font-size:11px; color:-apple-system-secondary-label }
 
-  .boss { border:1px solid #ff3b3b; border-radius:7px; padding:8px 10px; margin-bottom:10px;
-          background:rgba(255,59,59,.07); animation:sbPulse 1.2s ease-in-out infinite; cursor:pointer }
-  .boss .tag { color:#ff6b6b; letter-spacing:.22em; font-weight:700; font-size:10px }
-  .boss .ghost { color:#b98bff; letter-spacing:.06em }
-  .boss .key { color:#fff; font-weight:700 }
-  .boss .sum { color:#ffb3b3; font-size:10px; opacity:.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
-  .boss .hp { color:#ff3b3b; letter-spacing:.06em; margin-top:3px }
+  .overdue { display:flex; gap:8px; align-items:flex-start; padding:8px 10px; border-radius:8px; cursor:pointer;
+          background:rgba(255,59,48,.14); background:color-mix(in srgb, -apple-system-red 14%, transparent) }
+  .overdue .body { flex:1; min-width:0 }
+  .overdue .tag { font-weight:700 }
+  .overdue .sum { white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  .overdue .meta { font-size:11px; color:-apple-system-secondary-label }
+  .all-clear { display:flex; align-items:center; gap:7px; white-space:nowrap; overflow:hidden }
 
-  .clean { border:1px solid rgba(57,255,20,.3); border-radius:7px; padding:8px 10px;
-           margin-bottom:10px; background:rgba(57,255,20,.05); color:#7CFFAE }
+  .h { display:flex; align-items:center; gap:6px; margin-bottom:4px;
+       font-size:11px; font-weight:600; color:-apple-system-secondary-label }
+  .h .n { font-weight:500; color:-apple-system-tertiary-label }
 
-  .row { display:flex; gap:7px; align-items:baseline; padding:2px 0; cursor:pointer; border-radius:3px }
-  .row:hover { background:rgba(57,255,20,.07) }
-  .row .k { color:#cfe9ff; width:92px; flex:none; white-space:nowrap }
-  .row .s { flex:1; color:#8fa9c9; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-  .row .qa { flex:none; width:62px; color:#5fb3c4; overflow:hidden; white-space:nowrap }
-  .row .carry { flex:none; width:26px; text-align:right; color:#b98bff }
-  .row .pr { flex:none; width:34px; text-align:right; color:#55708c }
-  .row .pr.bad { color:#ff6b6b } .row .pr.wait { color:#ffb000 } .row .pr.good { color:#4a8f6a }
-  .row .d { flex:none; color:#6f8aa8 }
-  .row .age { flex:none; width:30px; text-align:right; color:#44607d }
+  .row { display:flex; gap:6px; align-items:center; padding:2px 4px; margin:0 -4px; cursor:pointer;
+         border-radius:5px; white-space:nowrap }
+  .row .k { min-width:68px; flex:none; font-weight:500 }
+  .row .s { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; color:-apple-system-secondary-label }
+  .row .qa { flex:none; width:66px; overflow:hidden; text-overflow:ellipsis; color:-apple-system-secondary-label }
+  .row .carry { flex:none; width:28px; text-align:right; color:-apple-system-purple }
+  .row .pr { flex:none; width:40px; text-align:right; color:-apple-system-secondary-label }
+  .row .pr.bad { color:-apple-system-red } .row .pr.wait { color:-apple-system-orange } .row .pr.good { color:-apple-system-green }
+  .row .d { flex:none; width:24px; text-align:right }
+  .row .age { flex:none; width:34px; text-align:right; color:-apple-system-tertiary-label }
   .row.done { opacity:.5 }
-  .row.done .k { color:#7ea88a }
-  .row.done .s { color:#5d7a68 }
   /* Struck through = work finished. Jira's "done" category alone does not say
      that: some of the 15 statuses mean "waiting to ship to prod". */
   .row.done.finished .k, .row.done.cancelled .k { text-decoration:line-through }
-  /* Awaiting release is still being tracked — less faded, keep it green. */
+  /* Awaiting release is still being tracked — less faded, not struck. */
   .row.done.pending { opacity:.78 }
-  .row.done.pending .k { color:#7CFFAE; text-decoration:none }
-  .row.done.pending .s { color:#6f9d81 }
-  .row.warn .d, .row.warn .k { color:#ffb000 }
-  .row.critical .d, .row.critical .k { color:#ff6b6b }
-  .row.warn .d, .row.critical .d { animation:sbBlink 1.6s ease-in-out infinite }
-  .row .goal { flex:none; color:#ffd24a; font-size:9px; letter-spacing:.06em }
+  .row.done.pending .k { color:-apple-system-green }
+  .row.warn .d, .row.warn .k { color:-apple-system-orange }
+  .row.critical .d, .row.critical .k { color:-apple-system-red }
+  .goal { flex:none; font-size:9px; font-weight:600; color:-apple-system-blue; border:1px solid currentColor;
+          border-radius:4px; padding:0 3px; line-height:13px }
 
-  .goals { border:1px solid rgba(120,200,255,.35); border-radius:7px; padding:6px 9px;
-           margin:10px 0; background:rgba(120,200,255,.05) }
-  .goals .ghdr { color:#9fd4ff; font-size:10px; letter-spacing:.12em; font-weight:700; margin-bottom:3px }
-  .goals .grow { display:flex; gap:7px; font-size:10px; color:#cfe9ff; cursor:pointer; border-radius:3px }
-  .goals .grow:hover { background:rgba(255,255,255,.06) }
-  .goals .grow .gkey { flex:none; white-space:nowrap }
-  .goals .grow .gsum { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity:.85 }
-  .goals .grow .gown { flex:none; max-width:26%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#8fa9c9 }
-  .goals .grow .gst { flex:none; max-width:22%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#8fa9c9 }
-  .goals .gnone { font-size:10px; color:#8fa9c9 }
-  .goals .grow.done { opacity:.55; color:#7CFFAE }
-  .goals .grow.done .gkey { text-decoration:line-through }
-  .goals .grow.yellow, .goals .grow.yellow .gst { color:#ffb000 }
-  .goals .grow.red, .goals .grow.red .gst { color:#ff6b6b }
-  .goals.yellow { border-color:rgba(255,176,0,.55); background:rgba(255,176,0,.06) }
-  .goals.yellow .ghdr { color:#ffb000 }
-  .goals.red { border-color:rgba(255,59,59,.6); background:rgba(255,59,59,.07) }
-  .goals.red .ghdr { color:#ff6b6b; animation:sbBlink 1.6s ease-in-out infinite }
-
-  .band { margin-top:9px; border-top:1px dashed rgba(255,59,59,.4); padding-top:6px }
+  .band .brow .brepo { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis }
+  .band .brow .bchecks { flex:none; max-width:58%; overflow:hidden; text-overflow:ellipsis; color:-apple-system-secondary-label }
+  .band.prs .brow.bad .bchecks { color:-apple-system-red }
+  .band.review .brow.stale .bchecks { color:-apple-system-orange }
 
   /* Staying silent when the PR layer is off is the worst option: the user cannot
      tell why the band is missing. A dim but visible row. */
-  .off { margin-top:9px; padding:4px 8px; border-radius:6px; font-size:9px;
-         line-height:1.5; color:#8a7fb8; background:rgba(138,127,184,.10);
-         border:1px solid rgba(138,127,184,.28) }
+  .off, .upd, .stale { display:flex; gap:7px; align-items:flex-start; margin-top:9px; padding:6px 8px;
+                       border-radius:7px; font-size:11px; background:var(--fill) }
+  .off { color:-apple-system-secondary-label }
+  /* Update row: should draw the eye, but not as hard as the most overdue task. */
+  .upd { cursor:pointer; background:rgba(0,122,255,.12); background:color-mix(in srgb, -apple-system-blue 12%, transparent) }
+  .upd:hover { background:rgba(0,122,255,.2); background:color-mix(in srgb, -apple-system-blue 20%, transparent) }
+  .stale { margin:0 0 8px; background:rgba(255,204,0,.16); background:color-mix(in srgb, -apple-system-yellow 16%, transparent) }
 
-  /* Update row: should draw the eye, but not as hard as the BOSS — nothing urgent. */
-  .upd { margin-top:9px; padding:5px 8px; border-radius:6px; cursor:pointer;
-         font-size:10px; letter-spacing:.04em; color:#ffd34d;
-         background:rgba(255,211,77,.08); border:1px solid rgba(255,211,77,.35) }
-  .upd:hover { background:rgba(255,211,77,.16) }
-  .band .bhdr { color:#ff6b6b; font-size:10px; letter-spacing:.12em; margin-bottom:3px }
-  .band .brow { color:#ffa3a3; font-size:10px; display:flex; gap:8px; cursor:pointer; border-radius:3px }
-  .band .brow:hover { background:rgba(255,255,255,.06) }
-  .band .brow .brepo { flex:none }
-  .band .brow .bchecks { margin-left:auto; color:#c98a8a; max-width:58%;
-                         overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-  .band.rel { border-top-color:rgba(124,255,174,.35) }
-  .band.rel .bhdr { color:#7CFFAE }
-  .band.rel .brow { color:#a8e6c0 }
-  .band.rel .brow .bchecks { color:#6f9d81 }
-  .band.waiting { border-top-color:rgba(255,176,0,.4) }
-  .band.waiting .bhdr { color:#ffb000 } .band.waiting .brow { color:#ffd88a }
-  .band.waiting .brow .bchecks { color:#c9a86a }
-  .band.review { border-top-color:rgba(120,170,255,.45) }
-  .band.review .bhdr { color:#7fb0ff } .band.review .brow { color:#bcd6ff }
-  .band.review .brow .bchecks { color:#7f97bd }
-  .band.review .brow.stale { color:#ffb0b0 }
-  .band.prs { border-top-color:rgba(200,200,200,.3) }
-  .band.prs .bhdr { color:#c8c8c8 } .band.prs .brow { color:#b8c4b8 }
-  .band.prs .brow .bchecks { color:#7c8c7c }
-  .band.prs .brow.bad, .band.prs .brow.bad .bchecks { color:#ff6b6b }
-
-  .notes { margin-top:9px; padding-top:7px; border-top:1px solid rgba(57,255,20,.18) }
-  .notes .nhdr { color:#44607d; font-size:9px; letter-spacing:.16em; margin-bottom:3px }
-  .notes .nrow { display:flex; gap:6px; align-items:baseline; font-size:10px; color:#cfe9d8; padding:1px 0 }
+  .notes .nrow { display:flex; gap:6px; align-items:baseline; padding:1px 0 }
   .notes .ntext { flex:1; min-width:0; white-space:pre-wrap; overflow-wrap:anywhere }
-  .notes .ndel { flex:none; color:#4d6b5a; cursor:pointer }
-  .notes .ndel:hover { color:#ff6b6b }
-  .notes .ninput { width:100%; margin-top:4px; background:rgba(57,255,20,.05);
-                   border:1px solid rgba(57,255,20,.2); border-radius:4px; color:#9bffb0;
-                   font-family:inherit; font-size:10px; padding:3px 6px; outline:none;
+  .notes .ndel { flex:none; color:-apple-system-tertiary-label; cursor:pointer }
+  .notes .ndel:hover { color:-apple-system-red }
+  .notes .ninput { width:100%; margin-top:4px; font:12px -apple-system, system-ui;
                    -webkit-user-select:text; user-select:text }
-  .notes .ninput::placeholder { color:#3f6b52 }
-  .notes .ninput:focus { border-color:rgba(57,255,20,.5); background:rgba(57,255,20,.09) }
 
-  .stale { margin-bottom:8px; padding:5px 8px; border-radius:6px; font-size:9px;
-           line-height:1.5; letter-spacing:0; color:#ffd88a;
-           background:rgba(255,176,0,.10); border:1px solid rgba(255,176,0,.35) }
-  .stale b { color:#ffb000 }
-
-  .err .hint { margin-top:6px; color:#8a7fb8; font-size:9px; line-height:1.5;
-               letter-spacing:0; text-transform:none }
-
-  .err { color:#ff6b6b; font-size:10px; white-space:pre-wrap }
-
-  @media (prefers-reduced-motion: reduce) {
-    .boss, .row.warn .d, .row.critical .d { animation:none !important }
-  }
+  .err .hint { margin-top:6px; color:-apple-system-secondary-label; font-size:11px }
+  .err { min-height:44px; font-size:12px; white-space:pre-wrap }
 </style>
 
-<div id="card"><div class="err">⏳ fetching data…</div></div>
+<div id="card"><div class="err">Fetching data…</div></div>
 
 <script>
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
-  const bar = (f, w = 10) => {
-    const n = Math.max(0, Math.min(w, Math.round((f || 0) * w)));
-    return "█".repeat(n) + "░".repeat(w - n);
-  };
   const clip = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
-  const DONE_ICON = { finished: "✅", cancelled: "✖", pending: "🟢" };
-  const icon = (t) => t.done ? (DONE_ICON[t.release] || "🟢")
-    : t.alert ? "🔥" : t.carriedOver ? "👻" : t.statusCategory === "new" ? "🛡" : "🗡";
-  const PR_MARK = { FAILURE:"✗", ERROR:"✗", PENDING:"●", EXPECTED:"●", SUCCESS:"✓" };
-  const prMark = (s) => PR_MARK[s] || "·";
+  const sym = (name, cls = "") => `<i class="sym s-${name.replace(/\./g, "-")}${cls ? " " + cls : ""}"></i>`;
+  const pct = (a, b) => b ? Math.round(a / b * 100) + "%" : "—";
+  const days = (n) => n == null ? "" : n === 1 ? "1 day left" : n + " days left";
+  const DONE_ICON = { finished: sym("checkmark.circle.fill", "c-green"), cancelled: sym("xmark.circle", "c-gray"),
+                      pending: sym("shippingbox.fill", "c-green") };
+  const icon = (t) => t.done ? (DONE_ICON[t.release] || DONE_ICON.pending)
+    : t.alert ? sym("flame.fill", "c-red")
+    : t.carriedOver ? sym("arrow.uturn.forward.circle", "c-purple")
+    : t.statusCategory === "new" ? sym("circle", "c-gray") : sym("circle.lefthalf.filled", "c-blue");
+  const PR_MARK = { FAILURE: "xmark", ERROR: "xmark", PENDING: "clock", EXPECTED: "clock", SUCCESS: "checkmark" };
+  const prMark = (s) => PR_MARK[s] ? sym(PR_MARK[s], "sm") : "";
   // When the state is unknown (draft PR, or the CI query failed) ASSIGN NO CLASS:
   // the base .row .pr colour is already neutral. The old "good" here painted a
   // stateless PR green — that read as "passed" when in fact nothing is known.
@@ -200,58 +178,89 @@
   // Opening links is delegated to the Swift side (a WKWebView cannot do it itself).
   const openUrl = (u) => { if (u && u !== "#") window.webkit?.messageHandlers?.sb?.postMessage({ open: u }); };
   const refresh = () => window.webkit?.messageHandlers?.sb?.postMessage({ refresh: true });
+  // The window material covers the whole window, so the window follows the card. A drawn board
+  // sets the window to its height; a placeholder (loading, error) fills the window and only grows
+  // it when its text does not fit. It posts at once: a closed widget pauses animation frames.
+  const fit = () => {
+    const card = document.getElementById("card");
+    if (card.querySelector(":scope > .err") && card.offsetHeight <= window.innerHeight) return;
+    window.webkit?.messageHandlers?.sb?.postMessage({ height: card.offsetHeight });
+  };
+  // Swift calls this after fill mode; the next frame has the restored zoom and width.
+  window.sbFit = () => requestAnimationFrame(fit);
+  new ResizeObserver(fit).observe(document.getElementById("card"));
 
   const band = (cls, title, rows, mark) => rows.length ? `
+    <hr>
     <div class="band ${cls}">
-      <div class="bhdr">${title} (${rows.length})</div>
+      <div class="h">${title} <span class="n">${rows.length}</span></div>
       ${rows.map((p) => `
         <div class="brow ${cls === "review" && p.days >= 2 ? "stale" : ""}"
              data-url="${esc(p.url)}" title="${esc(p.key || p.title || "")}">
-          <span class="brepo">${cls === "review" ? (p.days >= 2 ? "⏰" : "·") : mark} ${esc(p.repo)}#${p.number}</span>
+          ${cls === "review" ? (p.days >= 2 ? sym("clock", "c-orange") : sym("arrow.triangle.pull", "c-blue")) : mark}
+          <span class="brepo">${esc(p.repo)}#${p.number}</span>
           <span class="bchecks">${cls === "review"
-            ? esc(p.author) + " · " + p.days + "g"
+            ? esc(p.author) + " · " + p.days + "d"
             : esc((p.checks || []).join(", ") || "?")}</span>
         </div>`).join("")}
     </div>` : "";
 
   // Every PR that cannot be merged, with its reasons; a PR GitHub has not settled reads "checking".
   const prBand = (rows) => rows.length ? `
+    <hr>
     <div class="band prs">
-      <div class="bhdr">⛔ MERGE BLOCKED (${rows.length})</div>
+      <div class="h">${sym("xmark.octagon.fill", "sm c-red")}Merge blocked <span class="n">${rows.length}</span></div>
       ${rows.map((p) => `
         <div class="brow ${p.kind === "checking" ? "" : "bad"}" data-url="${esc(p.url)}" title="${esc(p.title)}">
-          <span class="brepo">${p.kind === "checking" ? "·" : "✗"} ${esc(p.repo)}#${p.number}</span>
+          ${p.kind === "checking" ? sym("ellipsis.circle", "c-gray") : sym("xmark.circle.fill", "c-red")}
+          <span class="brepo">${esc(p.repo)}#${p.number}</span>
           <span class="bchecks">${esc((p.reasons || []).join(" · "))}</span>
         </div>`).join("")}
     </div>` : "";
 
   // The flagged tasks of the sprint, whoever owns them. null = the setting is off.
-  const GOAL_MARK = { done: "✓", red: "✗", yellow: "!", ok: "·" };
-  const goalBand = (g) => g ? `
-    <div class="goals ${esc(g.worst)}">
-      <div class="ghdr">🎯 TEAM SPRINT GOAL (${g.done}/${g.total})</div>
-      ${g.error ? `<div class="gnone">Could not read the goal tasks: ${esc(g.error)}</div>`
-        : g.rows.length ? g.rows.map((r) => `
+  const RISK_WORD = { red: "critical", yellow: "at risk", ok: "on track", done: "done" };
+  const goalBand = (g, daysLeft) => {
+    if (!g) return "";
+    const count = { red: 0, yellow: 0, ok: 0, done: 0 };
+    (g.rows || []).forEach((r) => { count[r.risk] = (count[r.risk] || 0) + 1; });
+    const flag = { red: "c-red", yellow: "c-yellow" }[g.worst] || "c-blue";
+    // A failed goal search has no counts; the sprint's days left still show when known.
+    const ok = !g.error;
+    return `
+    <hr>
+    <div class="sec goals ${esc(g.worst)}">
+      <div class="top"><span class="lbl">${sym("flag.fill", flag)}Team sprint goal</span>
+        ${ok ? `<span class="val">${pct(g.done, g.total)}</span>` : ""}</div>
+      ${ok ? `<progress value="${g.done}" max="${g.total || 1}"></progress>` : ""}
+      ${ok || daysLeft != null ? `<div class="under"><span>${ok ? `${g.done} of ${g.total} done` : ""}</span><span>${days(daysLeft)}</span></div>` : ""}
+      ${!ok ? `<div class="gnone">Could not read the goal tasks: ${esc(g.error)}</div>`
+        : g.rows.length ? `
+        <div class="summary">${["red", "yellow", "ok", "done"].map((k) =>
+          `<span><span class="dot ${k}"></span>${count[k]} ${RISK_WORD[k]}</span>`).join("")}</div>
+        ${g.rows.map((r) => `
         <div class="grow ${esc(r.risk)}" data-url="${esc(r.url)}" title="${esc(r.summary)}">
-          <span class="gkey">${GOAL_MARK[r.risk] || "·"} ${esc(r.key)}</span>
-          <span class="gsum">${esc(r.summary)}</span>
-          <span class="gown">${esc(r.owner || "unassigned")}</span>
-          <span class="gst">${esc(r.status)}</span>
-        </div>`).join("")
+          <span class="dot ${esc(r.risk)}"></span>
+          <span class="gsum"><span class="gkey">${esc(r.key)}</span> ${esc(r.summary)}</span>
+          <span class="gside">${esc(r.owner || "Unassigned")} · ${esc(r.status)}</span>
+        </div>`).join("")}`
         : `<div class="gnone">No goal tasks in this sprint.</div>`}
-    </div>` : "";
+    </div>`;
+  };
 
   // Work left behind in a past sprint that never shipped. It is absent from the
   // main list — once a sprint closes the main query stops returning it.
   const relBand = (rows) => rows.length ? `
+    <hr>
     <div class="band rel">
-      <div class="bhdr">🚚 AWAITING RELEASE (${rows.length})</div>
+      <div class="h">${sym("shippingbox", "sm")}Awaiting release <span class="n">${rows.length}</span></div>
       ${rows.map((r) => `
         <div class="brow" data-url="${esc(r.url)}"
              title="${esc(r.summary)}&#10;${esc(r.status)} · ${r.days} business days">
-          <span class="brepo">🟢 ${esc(r.key)}</span>
+          ${sym("shippingbox.fill", "c-green")}
+          <span class="brepo">${esc(r.key)}</span>
           <span class="bchecks">${esc(clip(r.status, 16))}${r.sprint
-            ? " · " + esc(clip(r.sprint.replace(/^.*Sprint/i, "Sprint"), 12)) : ""} · ${r.days}g</span>
+            ? " · " + esc(clip(r.sprint.replace(/^.*Sprint/i, "Sprint"), 12)) : ""} · ${r.days}d</span>
         </div>`).join("")}
     </div>` : "";
 
@@ -262,15 +271,16 @@
   window.sbNotes = (n) => { NOTES = Array.isArray(n) ? n : []; if (LAST) draw(LAST); };
 
   const notesHtml = () => `
+    <hr>
     <div class="notes">
-      <div class="nhdr">${NOTES.length ? "NOTES " + NOTES.length + "/6" : "NOTES"}</div>
+      <div class="h">Notes ${NOTES.length ? `<span class="n">${NOTES.length}/6</span>` : ""}</div>
       ${NOTES.map((n) => `
         <div class="nrow">
           <span class="ntext">${esc(n.text)}</span>
-          <span class="ndel" data-del="${esc(n.id)}" title="sil">✕</span>
+          <span class="ndel" data-del="${esc(n.id)}" title="Delete">${sym("xmark", "sm")}</span>
         </div>`).join("")}
       <input class="ninput" type="text" maxlength="500" placeholder="${NOTES.length >= 6
-        ? "list full — the oldest drops" : "+ note… (Enter)"}">
+        ? "List full — the oldest note drops" : "Add a note"}">
     </div>`;
 
   let keepInput = "";
@@ -295,66 +305,76 @@
     if (prevInput) keepInput = prevInput.value;
     const card = document.getElementById("card");
     if (!d || !d.ok) {
-      card.innerHTML = `<div class="err">⚠ ${esc(d && d.error || "veri yok")}</div>`;
+      card.innerHTML = `<div class="err">${sym("exclamationmark.triangle.fill", "c-red")} ${esc(d && d.error || "No data")}</div>`;
       return;
     }
-    const { sprint = {}, boss, tasks = [] } = d;
+    const { sprint = {}, overdue, tasks = [] } = d;
     const waiting = d.waitingPrs || [], reviews = d.reviewRequests || [];
 
     card.innerHTML = `
       <div class="hdr">
-        <span class="name"><span class="lights"><span class="tl close" data-win="close" title="close"></span><span class="tl min" data-win="minimize" title="minimize"></span><span class="tl fill" data-win="fill" title="full screen"></span></span>⚔ ${esc(clip(sprint.name, 30))}</span>
-        <span class="right">${sprint.daysLeft == null ? "—" : sprint.daysLeft + "d left"}
-          · ${hhmm(d.generatedAt)}</span>
+        <span class="lights"><span class="tl close" data-win="close" title="close"></span><span class="tl min" data-win="minimize" title="minimize"></span><span class="tl fill" data-win="fill" title="full screen"></span></span>
+        <span class="name">${esc(sprint.name)}</span>
+        <span class="right">${sprint.daysLeft == null ? "—" : days(sprint.daysLeft)} · ${hhmm(d.generatedAt)}</span>
+      </div>
+      <hr>
+
+      ${staleNote ? `<div class="stale">${sym("exclamationmark.triangle.fill", "c-yellow")}<div>Could not refresh: <b>${esc(staleNote.error)}</b><br>
+        Showing data as of ${hhmm(staleNote.at)}. It will retry shortly; press Refresh
+        if you would rather not wait.</div></div>` : ""}
+
+      <div class="sec">
+        <div class="top"><span class="lbl">Sprint progress</span><span class="val">${pct(d.done, d.total)}</span></div>
+        <progress value="${d.done}" max="${d.total || 1}"></progress>
+        <div class="under"><span>${d.done} of ${d.total} done</span>
+          <span class="tools"><span class="rf" id="rf" title="Refresh now">${sym("arrow.clockwise")}</span><span class="rf" id="gear" title="Settings">${sym("gearshape")}</span></span></div>
       </div>
 
-      ${staleNote ? `<div class="stale">⚠ Could not refresh: <b>${esc(staleNote.error)}</b><br>
-        Showing data as of ${hhmm(staleNote.at)}. It will retry shortly; press ⟳
-        if you would rather not wait.</div>` : ""}
+      ${goalBand(d.sprintGoal, sprint.daysLeft)}
+      <hr>
 
-      <div class="siege">
-        <span>${bar(d.total ? d.cleared / d.total : 0, 12)} ${d.cleared}/${d.total} cleared</span>
-        <span class="tools"><span class="rf" id="rf" title="refresh now">⟳</span><span class="rf" id="gear" title="settings">⚙</span></span>
-      </div>
+      ${overdue ? `
+        <div class="overdue" data-url="${esc(overdue.url)}">
+          ${sym("exclamationmark.triangle.fill", "c-red")}
+          <div class="body">
+            <div class="tag">Most overdue · ${esc(overdue.key)}</div>
+            <div class="sum">${esc(overdue.summary)}</div>
+            <progress value="${Math.max(.15, Math.min(1, (overdue.ratio - 1) / 2))}" max="1"></progress>
+            <div class="meta">${esc(overdue.status)} · ${overdue.daysInStatus} days, ${overdue.threshold > 0
+              ? `${overdue.ratio}× the ${overdue.threshold}-day limit` : "limit 0"}${overdue.carriedOver
+              ? " · carried over, sprint " + overdue.sprintCount : ""}</div>
+          </div>
+        </div>` : `<div class="all-clear">${sym("checkmark.seal.fill", "c-green")}<span>Nothing overdue</span><span class="c-2">— every task is within its limit</span></div>`}
+      <hr>
 
-      ${goalBand(d.sprintGoal)}
-
-      ${boss ? `
-        <div class="boss" data-url="${esc(boss.url)}">
-          <div class="tag">💀 B O S S ${"⚡".repeat(boss.bolts)}
-            ${boss.carriedOver ? `<span class="ghost"> 👻 ×${boss.sprintCount}</span>` : ""}</div>
-          <div class="key">${esc(boss.key)}</div>
-          <div class="sum">${esc(clip(boss.summary, 46))}</div>
-          <div class="hp">HP ${bar(Math.max(.15, Math.min(1, (boss.ratio - 1) / 2)))}
-            ${esc(boss.status)} · ${boss.daysInStatus}d / threshold ${boss.threshold}d</div>
-        </div>` : `<div class="clean">⚔ No boss — your sprint is clean</div>`}
-
+      <div class="h">My tasks <span class="n">${tasks.length}</span></div>
       ${tasks.map((t) => `
         <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}" data-url="${esc(t.url)}"
-             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (threshold ${t.threshold}d) · age ${t.ageDays}d">
-          <span class="k">${icon(t)} ${esc(t.key)}</span>
-          <span class="s">${esc(clip(t.status, 14))}</span>
-          ${t.goal ? `<span class="goal">🎯 GOAL</span>` : ""}
-          <span class="qa">${t.qaShort ? "🧪" + esc(t.qaShort) : ""}</span>
-          <span class="carry">${t.carriedOver ? "×" + t.sprintCount : ""}</span>
-          <span class="pr ${t.pr ? prClass(t.pr.state) : ""}">${t.pr ? "⚙" + t.pr.count + prMark(t.pr.state) : ""}</span>
-          <span class="d">${t.daysInStatus}g</span>
-          <span class="age">/${t.ageDays}</span>
+             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (limit ${t.threshold}d) · age ${t.ageDays}d">
+          ${icon(t)}
+          <span class="k">${esc(t.key)}</span>
+          <span class="s">${esc(t.status)}</span>
+          ${t.goal ? `<span class="goal">GOAL</span>` : ""}
+          <span class="qa">${t.qaShort ? sym("testtube.2") + " " + esc(t.qaShort) : ""}</span>
+          <span class="carry">${t.carriedOver ? sym("arrow.uturn.forward", "sm") + t.sprintCount : ""}</span>
+          <span class="pr ${t.pr ? prClass(t.pr.state) : ""}">${t.pr ? sym("arrow.triangle.pull") + t.pr.count + prMark(t.pr.state) : ""}</span>
+          <span class="d">${t.daysInStatus}d</span>
+          <span class="age">${t.ageDays}d</span>
         </div>`).join("")}
 
       ${relBand(d.pendingRelease || [])}
 
-      ${band("waiting", "⏳ WAITING", waiting, "●")}
-      ${band("review", "👀 AWAITING YOUR REVIEW", reviews, "·")}
+      ${band("waiting", sym("hourglass", "sm") + "Waiting", waiting, sym("hourglass", "c-orange"))}
+      ${band("review", sym("eye", "sm") + "Awaiting your review", reviews, "")}
       ${prBand(d.pullRequests || [])}
 
-      ${d.prsAvailable === false ? `<div class="off">${d.githubOrgError
-        ? `PR/CI bands are off — ${esc(d.githubOrgError)}. Fix it from ⚙.`
+      ${d.prsAvailable === false ? `<div class="off">${sym("info.circle")}<div>${d.githubOrgError
+        ? `PR/CI bands are off — ${esc(d.githubOrgError)}. Fix it in Settings.`
         : `PR/CI bands are off — GitHub could not be reached.
-        Run <b>gh auth login</b>, or add a GitHub token from ⚔ → Settings.`}</div>` : ""}
+        Run <b>gh auth login</b>, or add a GitHub token in Settings.`}</div></div>` : ""}
 
       ${d.update ? `<div class="upd" data-url="${esc(d.update.url || "")}">
-        ⬆ <b>v${esc(d.update.version)}</b> is out — click to download</div>` : ""}
+        ${sym("arrow.down.circle", "c-blue")}<span>Version <b>${esc(d.update.version)}</b> is available — click to download</span></div>` : ""}
 
       ${notesHtml()}
     `;
@@ -395,9 +415,8 @@
       e.stopPropagation();
       window.webkit?.messageHandlers?.sb?.postMessage({ settings: true });
     });
-
-    // Report the real content height to Swift so the window fits exactly
-    window.webkit?.messageHandlers?.sb?.postMessage({ height: card.offsetHeight });
+    // A window resized by hand, or moved off a smaller screen, has the same card: fit it anyway.
+    fit();
   }
 
   // fetch.mjs normally takes ~13 s; on the FIRST launch after a rebuild it can
@@ -408,7 +427,7 @@
     const el = document.getElementById("card");
     if (!el || LAST) return;
     const sec = Math.round((Date.now() - T0) / 1000);
-    el.innerHTML = `<div class="err">⏳ fetching data… ${sec}s` +
+    el.innerHTML = `<div class="err">${sym("hourglass", "c-2")} Fetching data… ${sec}s` +
       (sec > 25
         ? `<div class="hint">macOS may ask for keychain permission on first launch.
              If a permission dialog appeared, choose <b>Always Allow</b>;

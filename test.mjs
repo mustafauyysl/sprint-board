@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 import {
   businessDaysBetween,
   evaluate,
-  pickBoss,
-  bolts,
+  pickMostOverdue,
+  alertSound,
   firstName,
   extractIssueKey,
   summarizePrs,
@@ -106,27 +106,27 @@ test("evaluate: a zero-tolerance threshold does not collapse the ratio", () => {
   assert.equal(r.tier, "critical");
 });
 
-test("pickBoss: picks by RATIO, not by day count", () => {
+test("pickMostOverdue: picks by RATIO, not by day count", () => {
   const tasks = [
     { key: "A", daysInStatus: 8, threshold: 7, ratio: 8 / 7, alert: true },
     { key: "B", daysInStatus: 4, threshold: 2, ratio: 2, alert: true },
   ];
-  assert.equal(pickBoss(tasks).key, "B", "fewer days but a higher ratio");
+  assert.equal(pickMostOverdue(tasks).key, "B", "fewer days but a higher ratio");
 });
 
-test("pickBoss: null when nothing is over threshold", () => {
-  assert.equal(pickBoss([{ key: "A", alert: false, ratio: 0.5, daysInStatus: 1 }]), null);
-  assert.equal(pickBoss([]), null);
+test("pickMostOverdue: null when nothing is over threshold", () => {
+  assert.equal(pickMostOverdue([{ key: "A", alert: false, ratio: 0.5, daysInStatus: 1 }]), null);
+  assert.equal(pickMostOverdue([]), null);
 });
 
-test("pickBoss: a closed task cannot be the boss", () => {
+test("pickMostOverdue: a closed task cannot be the most overdue", () => {
   const tasks = [{ key: "A", alert: true, ratio: 9, daysInStatus: 30, done: true }];
-  assert.equal(pickBoss(tasks), null);
+  assert.equal(pickMostOverdue(tasks), null);
 });
 
 // --- ownershipStartedAt ---------------------------------------------------
 // The clock belongs to the PERSON, not to the ticket: a card that rotted
-// unassigned for weeks must not land on its new owner as a boss alert.
+// unassigned for weeks must not land on its new owner as an overdue alert.
 
 const ME = "557058:aaaa-bbbb";
 const SPRINT_FIELD = "customfield_10020";
@@ -229,7 +229,7 @@ test("ownershipStartedAt: the 23-day To Do card is 1 day old for its new owner",
   assert.equal(businessDaysBetween(statusAt, now), 24);
   const from = ownedAt > statusAt ? ownedAt : statusAt;
   assert.equal(businessDaysBetween(from, now), 1);
-  // 1 day in To Do (threshold 7) is not an alert; 24 would have been the boss.
+  // 1 day in To Do (threshold 7) is not an alert; 24 would have been the most overdue task.
   assert.equal(evaluate("To Do", 1, config).alert, false);
   assert.equal(evaluate("To Do", 24, config).alert, true);
 });
@@ -269,12 +269,6 @@ test("sprintHistory: does not crash when the field is empty/missing", () => {
   assert.deepEqual(sprintHistory(null), { carriedOver: false, closedSprints: 0, sprintCount: 0 });
   assert.deepEqual(sprintHistory([]), { carriedOver: false, closedSprints: 0, sprintCount: 0 });
   assert.equal(sprintHistory([null, undefined]).carriedOver, false);
-});
-
-test("bolts: stays within 1-5", () => {
-  assert.equal(bolts(0.5), 1);
-  assert.equal(bolts(3.7), 3);
-  assert.equal(bolts(99), 5);
 });
 
 test("requiredRollup: an optional failure raises no warning, measured live", () => {
@@ -691,6 +685,60 @@ test("both screens: one card radius, and no shadow outside the card", () => {
   }
 });
 
+test("both screens: the window material is rounded with the card's radius", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  const swift = Number(read("./SprintBoard.swift").match(/^let CARD_RADIUS: CGFloat = (\d+)$/m)?.[1]);
+  assert.ok(swift > 0, "CARD_RADIUS not found");
+  for (const f of ["./view.html", "./setup.html"]) {
+    const css = read(f).match(/#card \{([^}]*)\}/)?.[1] ?? "";
+    assert.equal(css.match(/border-radius: ?([^;]+);/)?.[1], `${swift}px`, f);
+  }
+});
+
+test("both screens: the same panel colours and window buttons", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  // Tokens per scheme ("light" before the dark media query, "dark" inside it) and selector.
+  const tokens = (page) => {
+    const [light, dark] = page.split("@media (prefers-color-scheme: dark)");
+    assert.ok(dark !== undefined, "no dark media query");
+    const out = {};
+    for (const [scheme, css] of [["light", light], ["dark", dark.slice(0, dark.indexOf("\n  }"))]]) {
+      for (const [, sel, body] of css.matchAll(/(:root) \{([^}]*)\}/g)) {
+        for (const [, name, value] of body.matchAll(/(--[\w-]+): ?([^;}]+?)\s*(?:;|$)/g)) {
+          out[`${scheme} ${sel} ${name}`] = value;
+        }
+      }
+    }
+    return out;
+  };
+  const buttons = (page) => Object.fromEntries([...page.matchAll(/(?:\.hdr )?(\.tl[\w.:-]*) \{([^}]*)\}/g)]
+    .map(([, sel, body]) => [sel, body.replace(/\s+/g, " ").replace(/\s*([:;])\s*/g, "$1").trim()]));
+  const [view, setup] = [read("./view.html"), read("./setup.html")];
+  const [tv, ts] = [tokens(view), tokens(setup)];
+  for (const key of ["light :root --panel", "light :root --fill",
+    "dark :root --panel", "dark :root --fill"]) {
+    assert.ok(key in tv && key in ts, `${key} missing`);
+  }
+  for (const key of Object.keys(ts).filter((k) => k in tv)) assert.equal(ts[key], tv[key], key);
+  const [bv, bs] = [buttons(view), buttons(setup)];
+  assert.deepEqual(Object.keys(bv).sort(), [".tl", ".tl.close", ".tl.fill", ".tl.min", ".tl:hover"]);
+  assert.deepEqual(bs, bv);
+});
+
+test("both screens: the page function Swift calls after fill mode exists", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  // Swift guards the call with `&&`, so a renamed function would fail silently.
+  assert.match(read("./SprintBoard.swift"), /evaluateJavaScript\("window\.sbFit && window\.sbFit\(\)"\)/);
+  for (const f of ["./view.html", "./setup.html"]) assert.match(read(f), /^\s*window\.sbFit = /m, f);
+});
+
+test("both screens: a trackpad swipe does not pull the card off the window", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  for (const f of ["./view.html", "./setup.html"]) {
+    assert.match(read(f), /^\s*html \{[^}]*\boverscroll-behavior: none;/m, f);
+  }
+});
+
 test("addNote: every note gets a unique id", () => {
   const t = at("2026-08-20");
   const n = addNote(addNote([], "a", t), "b", t);
@@ -755,44 +803,71 @@ test("reviewWaitInfo: an empty timeline falls back to PR creation, missing data 
 });
 
 test("detectAlerts: plays no sound on the first run", () => {
-  const now = { bossKey: "DEMO-1", brokenIds: ["a#1"], reviewIds: ["b#2"] };
+  const now = { overdueKey: "DEMO-1", brokenIds: ["a#1"], reviewIds: ["b#2"] };
   assert.deepEqual(detectAlerts(emptyState(), now), [], "existing items must stay silent at launch");
   assert.deepEqual(detectAlerts(null, now), []);
 });
 
-test("detectAlerts: a new boss sounds, the same boss does not sound again", () => {
-  const prev = { initialized: true, bossKey: null, brokenIds: [], reviewIds: [] };
-  assert.deepEqual(detectAlerts(prev, { bossKey: "DEMO-1", brokenIds: [], reviewIds: [] }), ["boss"]);
-  const same = { initialized: true, bossKey: "DEMO-1", brokenIds: [], reviewIds: [] };
-  assert.deepEqual(detectAlerts(same, { bossKey: "DEMO-1", brokenIds: [], reviewIds: [] }), []);
+test("detectAlerts: a new overdue task sounds, the same one does not sound again", () => {
+  const prev = { initialized: true, overdueKey: null, brokenIds: [], reviewIds: [] };
+  assert.deepEqual(detectAlerts(prev, { overdueKey: "DEMO-1", brokenIds: [], reviewIds: [] }), ["overdue"]);
+  const same = { initialized: true, overdueKey: "DEMO-1", brokenIds: [], reviewIds: [] };
+  assert.deepEqual(detectAlerts(same, { overdueKey: "DEMO-1", brokenIds: [], reviewIds: [] }), []);
 });
 
-test("detectAlerts: a changed boss sounds again", () => {
-  const prev = { initialized: true, bossKey: "DEMO-1", brokenIds: [], reviewIds: [] };
-  assert.deepEqual(detectAlerts(prev, { bossKey: "DEMO-2", brokenIds: [], reviewIds: [] }), ["boss"]);
+test("detectAlerts: a changed overdue task sounds again", () => {
+  const prev = { initialized: true, overdueKey: "DEMO-1", brokenIds: [], reviewIds: [] };
+  assert.deepEqual(detectAlerts(prev, { overdueKey: "DEMO-2", brokenIds: [], reviewIds: [] }), ["overdue"]);
 });
 
-test("detectAlerts: a boss disappearing makes no sound", () => {
-  const prev = { initialized: true, bossKey: "DEMO-1", brokenIds: [], reviewIds: [] };
-  assert.deepEqual(detectAlerts(prev, { bossKey: null, brokenIds: [], reviewIds: [] }), []);
+test("detectAlerts: an overdue task disappearing makes no sound", () => {
+  const prev = { initialized: true, overdueKey: "DEMO-1", brokenIds: [], reviewIds: [] };
+  assert.deepEqual(detectAlerts(prev, { overdueKey: null, brokenIds: [], reviewIds: [] }), []);
 });
 
 test("detectAlerts: only NEW broken CI sounds", () => {
-  const prev = { initialized: true, bossKey: null, brokenIds: ["cs#1"], reviewIds: [] };
-  assert.deepEqual(detectAlerts(prev, { bossKey: null, brokenIds: ["cs#1"], reviewIds: [] }), [],
+  const prev = { initialized: true, overdueKey: null, brokenIds: ["cs#1"], reviewIds: [] };
+  assert.deepEqual(detectAlerts(prev, { overdueKey: null, brokenIds: ["cs#1"], reviewIds: [] }), [],
     "an already-known breakage does not sound again");
-  assert.deepEqual(detectAlerts(prev, { bossKey: null, brokenIds: ["cs#1", "shared-lib#2"], reviewIds: [] }), ["ci"]);
+  assert.deepEqual(detectAlerts(prev, { overdueKey: null, brokenIds: ["cs#1", "shared-lib#2"], reviewIds: [] }), ["ci"]);
 });
 
 test("detectAlerts: a new review request sounds", () => {
-  const prev = { initialized: true, bossKey: null, brokenIds: [], reviewIds: ["r#1"] };
-  assert.deepEqual(detectAlerts(prev, { bossKey: null, brokenIds: [], reviewIds: ["r#1", "r#2"] }), ["review"]);
+  const prev = { initialized: true, overdueKey: null, brokenIds: [], reviewIds: ["r#1"] };
+  assert.deepEqual(detectAlerts(prev, { overdueKey: null, brokenIds: [], reviewIds: ["r#1", "r#2"] }), ["review"]);
+});
+
+test("detectAlerts: the bossKey that older versions saved still counts as known", () => {
+  const prev = { initialized: true, bossKey: "DEMO-1", brokenIds: [], reviewIds: [] };
+  assert.deepEqual(detectAlerts(prev, { overdueKey: "DEMO-1", brokenIds: [], reviewIds: [] }), [],
+    "the first run after an update must not sound for an already-known task");
+  assert.deepEqual(detectAlerts(prev, { overdueKey: "DEMO-2", brokenIds: [], reviewIds: [] }), ["overdue"]);
+});
+
+test("alertSound: picks one sound by priority overdue > CI > review", () => {
+  const sound = { enabled: true, overdue: "o.aiff", ci: "c.aiff", review: "r.aiff" };
+  assert.deepEqual(alertSound(sound, ["review", "ci", "overdue"]), { pick: "overdue", file: "o.aiff" });
+  assert.deepEqual(alertSound(sound, ["review", "ci"]), { pick: "ci", file: "c.aiff" });
+  assert.deepEqual(alertSound(sound, ["review"]), { pick: "review", file: "r.aiff" });
+});
+
+test("alertSound: an older config's boss sound still plays for an overdue task", () => {
+  assert.deepEqual(alertSound({ enabled: true, boss: "b.aiff" }, ["overdue"]), { pick: "overdue", file: "b.aiff" });
+  assert.deepEqual(alertSound({ enabled: true, boss: "b.aiff", overdue: "o.aiff" }, ["overdue"]),
+    { pick: "overdue", file: "o.aiff" }, "the new key wins over the old one");
+});
+
+test("alertSound: silent when sound is off, nothing is new, or no file is set", () => {
+  assert.equal(alertSound({ enabled: false, overdue: "o.aiff" }, ["overdue"]), null);
+  assert.equal(alertSound({ enabled: true, overdue: "o.aiff" }, []), null);
+  assert.equal(alertSound(undefined, ["overdue"]), null);
+  assert.equal(alertSound({ enabled: true }, ["ci"]), null);
 });
 
 test("detectAlerts: several events are reported together", () => {
-  const prev = { initialized: true, bossKey: null, brokenIds: [], reviewIds: [] };
-  const now = { bossKey: "DEMO-9", brokenIds: ["a#1"], reviewIds: ["b#2"] };
-  assert.deepEqual(detectAlerts(prev, now), ["boss", "ci", "review"]);
+  const prev = { initialized: true, overdueKey: null, brokenIds: [], reviewIds: [] };
+  const now = { overdueKey: "DEMO-9", brokenIds: ["a#1"], reviewIds: ["b#2"] };
+  assert.deepEqual(detectAlerts(prev, now), ["overdue", "ci", "review"]);
 });
 
 test("firstName: takes the first name, shortens long ones, tolerates empty", () => {

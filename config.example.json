@@ -20,7 +20,7 @@
   },
   "sound": {
     "enabled": true,
-    "boss": "/System/Library/Sounds/Sosumi.aiff",
+    "overdue": "/System/Library/Sounds/Sosumi.aiff",
     "ci": "/System/Library/Sounds/Funk.aiff",
     "review": "/System/Library/Sounds/Blow.aiff"
   },

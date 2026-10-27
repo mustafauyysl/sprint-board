@@ -2,100 +2,108 @@
 <meta charset="utf-8">
 <title>Sprint Board — Setup</title>
 <style>
+  :root { color-scheme: light dark;
+          --panel: rgba(250,250,250,.62); --fill: rgba(0,0,0,.035); }
+  /* The window material sits behind the page; this tint keeps the dark panel dark, not grey. */
+  @media (prefers-color-scheme: dark) {
+    :root { --panel: rgba(28,28,30,.80); --fill: rgba(255,255,255,.05); }
+  }
   * { box-sizing: border-box }
   html, body { margin: 0; padding: 0; background: transparent; }
+  html { overflow-y: auto; overscroll-behavior: none; }
   body {
-    font: 11px/1.5 ui-monospace, Menlo, monospace;
-    color: #cfe9d8;
+    font: 12px/1.4 -apple-system, system-ui;
+    color: -apple-system-label;
     -webkit-user-select: none; user-select: none;
   }
   #card {
-    padding: 16px 18px; background: rgba(6, 18, 10, .96);
-    border: 1px solid rgba(57,255,20,.35); border-radius: 10px;
+    padding: 12px 14px 14px; background: var(--panel); border-radius: 10px;
   }
-  h1 { margin: 0 0 3px; font-size: 12px; letter-spacing: .18em; color: #39ff14; font-weight: 700 }
-  .sub { margin: 0 0 14px; color: #5f8a70; font-size: 9px; line-height: 1.6 }
-  a { color: #7fb0ff; text-decoration: none }
+  h1 { display: flex; align-items: center; margin: 0 0 10px; font-size: 13px; font-weight: 700 }
+  .sub { margin: 0 0 12px; color: -apple-system-secondary-label; font-size: 11px }
+  a { color: -apple-system-link; text-decoration: none }
   a:hover { text-decoration: underline }
-  .hint { margin-top: 2px; color: #4d6b5a; font-size: 9px }
-  button {
-    margin-top: 16px; width: 100%; padding: 7px; font: inherit; font-weight: 700;
-    letter-spacing: .12em; color: #06120a; background: #39ff14; border: 0;
-    border-radius: 5px; cursor: pointer;
+  .hint { margin-top: 4px; color: -apple-system-secondary-label; font-size: 11px }
+  /* Native push buttons; the primary action is the blue default button. */
+  button { display: block; width: 100%; margin-top: 12px; font: 13px -apple-system, system-ui; cursor: default }
+  button.primary {
+    -webkit-appearance: none; appearance: none; padding: 5px 10px; border: 0; border-radius: 6px;
+    color: white; background: -apple-system-control-accent;
   }
-  button:disabled { opacity: .5; cursor: default }
+  button.primary:active { filter: brightness(.9) }
+  button:disabled { opacity: .5 }
   .err {
-    margin-top: 12px; padding: 6px 8px; border-radius: 5px; font-size: 9px; line-height: 1.6;
-    color: #ffb0b0; background: rgba(255,0,0,.08); border: 1px solid rgba(255,80,80,.35);
+    margin-top: 12px; padding: 6px 8px; border-radius: 7px; font-size: 11px;
+    color: -apple-system-label; background: rgba(255,59,48,.14);
+    background: color-mix(in srgb, -apple-system-red 14%, transparent);
   }
-  .err ul { margin: 0; padding-left: 14px }
-  button.alt { margin-top: 12px; color: #39ff14; background: transparent; border: 1px solid rgba(57,255,20,.45) }
-  #tokenForm { display: none; margin-top: 10px }
-  label { display: block; margin-top: 8px; color: #8fb59c; font-size: 9px; letter-spacing: .08em }
-  input {
-    display: block; width: 100%; margin-top: 3px; padding: 5px 7px; font: inherit; color: #cfe9d8;
-    background: rgba(255,255,255,.04); border: 1px solid rgba(57,255,20,.3); border-radius: 4px;
-    -webkit-user-select: text; user-select: text;
-  }
-  input:focus { outline: none; border-color: #39ff14 }
-  .lights { display: inline-flex; gap: 6px; margin-right: 8px; vertical-align: -1px }
-  .tl { width: 10px; height: 10px; border-radius: 50%; cursor: pointer; display: inline-block }
+  .err ul { margin: 0; padding-left: 16px }
+  #tokenForm { display: none; margin-top: 4px }
+  label { display: block; margin-top: 10px; color: -apple-system-secondary-label; font-size: 11px; font-weight: 600 }
+  input { display: block; width: 100%; margin-top: 3px; font: 12px -apple-system, system-ui;
+          -webkit-user-select: text; user-select: text }
+  .lights { display: inline-flex; gap: 8px; margin-right: 12px }
+  .tl { width: 12px; height: 12px; border-radius: 50%; cursor: pointer; display: inline-block;
+        box-shadow: inset 0 0 0 .5px rgba(0,0,0,.18) }
   .tl.close { background: #ff5f57 } .tl.min { background: #febc2e } .tl.fill { background: #28c840 }
-  .tl:hover { filter: brightness(1.25) }
-  #current { display: none; margin: 0 0 12px; padding: 6px 8px; border-radius: 5px; font-size: 9px;
-    color: #9bffb0; background: rgba(57,255,20,.06); border: 1px solid rgba(57,255,20,.25) }
+  .tl:hover { filter: brightness(1.15) }
+  #current { display: none; margin: 0 0 4px; padding: 8px 10px; border-radius: 7px; font-size: 11px;
+    background: var(--fill) }
   #current .row { display: flex; align-items: center; gap: 8px }
   #current .who { flex: 1 }
-  #disconnect { width: auto; margin: 0; padding: 3px 8px; font-size: 9px; letter-spacing: .08em;
-    color: #ffb0b0; background: transparent; border: 1px solid rgba(255,80,80,.45) }
-  #disconnect.armed { color: #06120a; background: #ff6b6b }
+  /* A destructive action: red text in a red outline; the second click fills it. */
+  #disconnect { width: auto; margin: 0; padding: 2px 10px; font-size: 11px;
+    -webkit-appearance: none; appearance: none; border-radius: 6px;
+    color: -apple-system-red; background: transparent; border: 1px solid -apple-system-red }
+  #disconnect.armed { color: white; background: -apple-system-red }
   #back { display: none }
-  label.check { display: flex; align-items: center; gap: 6px; cursor: pointer }
+  label.check { display: flex; align-items: center; gap: 6px; cursor: default;
+                color: -apple-system-label; font-size: 12px; font-weight: 400 }
   label.check input { display: inline-block; width: auto; margin: 0 }
-  #settings { display: none; margin-top: 14px; padding-top: 6px; border-top: 1px solid rgba(57,255,20,.18) }
+  #settings { display: none; margin-top: 12px; padding-top: 2px; border-top: 1px solid -apple-system-separator }
 </style>
 
 <div id="card">
-<h1><span class="lights"><span class="tl close" data-win="close" title="close"></span><span class="tl min" data-win="minimize" title="minimize"></span><span class="tl fill" data-win="fill" title="full screen"></span></span>⚔ SPRINT BOARD</h1>
+<h1><span class="lights"><span class="tl close" data-win="close" title="close"></span><span class="tl min" data-win="minimize" title="minimize"></span><span class="tl fill" data-win="fill" title="full screen"></span></span>Sprint Board</h1>
 <div id="current">
-  <div class="row"><span class="who" id="who"></span><button id="disconnect">DISCONNECT</button></div>
+  <div class="row"><span class="who" id="who"></span><button id="disconnect">Disconnect</button></div>
   <div class="hint"><span id="hintText"></span> <a href="#" id="hintLink"></a></div>
 </div>
 <div id="signin">
 <p class="sub">Sign in and the rest follows — your Jira site, your email and your
 permissions are read from your account. Nothing is written to a file; it goes to the keychain.</p>
 
-<button id="atlassian">SIGN IN WITH ATLASSIAN</button>
+<button id="atlassian" class="primary">Sign in with Atlassian</button>
 <div class="hint">A browser opens, you approve, it closes. Read-only access:
   nothing in Jira is ever modified.</div>
 
-<button id="useToken" class="alt">USE AN API TOKEN INSTEAD</button>
+<button id="useToken" class="alt">Use an API token instead</button>
 <div id="tokenForm">
-  <label for="host">JIRA SITE</label>
+  <label for="host">Jira site</label>
   <input id="host" placeholder="yourcompany.atlassian.net" autocomplete="off" spellcheck="false">
-  <label for="email">EMAIL</label>
+  <label for="email">Email</label>
   <input id="email" placeholder="you@company.com" autocomplete="off" spellcheck="false">
-  <label for="token">API TOKEN</label>
+  <label for="token">API token</label>
   <input id="token" type="password" placeholder="paste your token" autocomplete="off">
   <div class="hint">Create one at <a href="#" data-url="https://id.atlassian.com/manage-profile/security/api-tokens">id.atlassian.com → API tokens</a>.
     It is checked against Jira, then stored in the keychain.</div>
-  <button id="saveToken">SAVE TOKEN</button>
+  <button id="saveToken" class="primary">Save token</button>
 </div>
 </div>
 
 <div id="settings">
-  <label for="org">GITHUB ORGANIZATION</label>
+  <label for="org">GitHub organization</label>
   <input id="org" placeholder="empty = all your PRs" autocomplete="off" spellcheck="false">
   <div class="hint">Only PRs in this organization are watched. The board uses it at the next refresh.</div>
-  <label class="check"><input id="drafts" type="checkbox"> SHOW DRAFT PRS</label>
-  <div class="hint">Drafts appear in MERGE BLOCKED, marked "draft". They never appear in WAITING.</div>
-  <label class="check"><input id="goals" type="checkbox"> SPRINT GOAL TRACKING</label>
-  <div class="hint">Shows the flagged tasks of your sprint under the "cleared" line, whoever owns them.</div>
-  <button id="saveSettings" class="alt">SAVE SETTINGS</button>
+  <label class="check"><input id="drafts" type="checkbox"> Show draft PRs</label>
+  <div class="hint">Drafts appear in Merge blocked, marked "draft". They never appear in Waiting.</div>
+  <label class="check"><input id="goals" type="checkbox"> Sprint goal tracking</label>
+  <div class="hint">Shows the flagged tasks of your sprint under Sprint progress, whoever owns them.</div>
+  <button id="saveSettings" class="alt">Save settings</button>
   <div id="saved" class="hint"></div>
 </div>
 
-<button id="back" class="alt">BACK TO BOARD</button>
+<button id="back" class="alt">Back to board</button>
 
 <div id="err" class="err" style="display:none"></div>
 </div>
@@ -111,13 +119,16 @@ permissions are read from your account. Nothing is written to a file; it goes to
 
   $("atlassian").addEventListener("click", () => {
     $("atlassian").disabled = true;
-    $("atlassian").textContent = "BROWSER OPENED, WAITING FOR APPROVAL…";
+    $("atlassian").textContent = "Browser opened, waiting for approval…";
     $("err").style.display = "none";
     post({ atlassianLogin: true });
   });
 
 
-  const resize = () => requestAnimationFrame(() => post({ height: $("card").offsetHeight }));
+  // The window follows the card, as on the board. Swift calls it too when the widget leaves fill mode.
+  const fit = () => requestAnimationFrame(() => post({ height: $("card").offsetHeight }));
+  window.sbFit = fit;
+  new ResizeObserver(fit).observe($("card"));
 
   document.querySelectorAll("[data-win]").forEach((el) =>
     el.addEventListener("click", () => post({ win: el.dataset.win })));
@@ -138,7 +149,6 @@ permissions are read from your account. Nothing is written to a file; it goes to
     $("drafts").checked = ctx.showDraftPrs !== false;
     $("goals").checked = ctx.sprintGoalTracking === true;
     $("settings").style.display = "block";
-    resize();
   };
 
   $("saveSettings").addEventListener("click", () => {
@@ -154,7 +164,6 @@ permissions are read from your account. Nothing is written to a file; it goes to
       $("drafts").checked = res.showDraftPrs !== false;
       $("goals").checked = res.sprintGoalTracking === true;
       $("saved").textContent = "Saved. The board uses it at the next refresh.";
-      resize();
       return;
     }
     window.sbSetupResult(res);
@@ -174,10 +183,10 @@ permissions are read from your account. Nothing is written to a file; it goes to
       return;
     }
     $("disconnect").classList.add("armed");
-    $("disconnect").textContent = "CLICK AGAIN";
+    $("disconnect").textContent = "Click again to disconnect";
     disarm = setTimeout(() => {
       $("disconnect").classList.remove("armed");
-      $("disconnect").textContent = "DISCONNECT";
+      $("disconnect").textContent = "Disconnect";
     }, 3000);
   });
 
@@ -185,7 +194,6 @@ permissions are read from your account. Nothing is written to a file; it goes to
     $("tokenForm").style.display = "block";
     $("useToken").style.display = "none";
     $("host").focus();
-    resize();
   });
 
   $("saveToken").addEventListener("click", () => {
@@ -195,7 +203,7 @@ permissions are read from your account. Nothing is written to a file; it goes to
       return;
     }
     $("saveToken").disabled = true;
-    $("saveToken").textContent = "CHECKING WITH JIRA…";
+    $("saveToken").textContent = "Checking with Jira…";
     $("err").style.display = "none";
     post({ tokenLogin: { host, email, token } });
   });
@@ -205,17 +213,13 @@ permissions are read from your account. Nothing is written to a file; it goes to
   // Swift hands the validation result back through this.
   window.sbSetupResult = (res) => {
     $("atlassian").disabled = false;
-    $("atlassian").textContent = "SIGN IN WITH ATLASSIAN";
+    $("atlassian").textContent = "Sign in with Atlassian";
     $("saveToken").disabled = false;
-    $("saveToken").textContent = "SAVE TOKEN";
+    $("saveToken").textContent = "Save token";
     const errs = (res && res.errors) || ["unknown error"];
     $("err").innerHTML = "<ul>" + errs.map((e) =>
       "<li>" + String(e).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</li>"
     ).join("") + "</ul>";
     $("err").style.display = "block";
-    resize();
   };
-
-  // Size the window to the content (the same bridge view.html uses).
-  requestAnimationFrame(() => post({ height: $("card").offsetHeight }));
 </script>
