@@ -104,11 +104,8 @@
   .row { display:flex; gap:6px; align-items:center; padding:2px 4px; margin:0 -4px; cursor:pointer;
          border-radius:5px; white-space:nowrap }
   .row .k { min-width:68px; flex:none; font-weight:500 }
-  .row .s { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; color:-apple-system-secondary-label }
   .row .qa { flex:none; width:66px; overflow:hidden; text-overflow:ellipsis; color:-apple-system-secondary-label }
   .row .carry { flex:none; width:28px; text-align:right; color:-apple-system-purple }
-  .row .pr { flex:none; width:40px; text-align:right; color:-apple-system-secondary-label }
-  .row .pr.bad { color:-apple-system-red } .row .pr.wait { color:-apple-system-orange } .row .pr.good { color:-apple-system-green }
   .row .d { flex:none; width:24px; text-align:right }
   .row .age { flex:none; width:34px; text-align:right; color:-apple-system-tertiary-label }
   .row.done { opacity:.5 }
@@ -122,6 +119,36 @@
   .row.critical .d, .row.critical .k { color:-apple-system-red }
   .goal { flex:none; font-size:9px; font-weight:600; color:-apple-system-blue; border:1px solid currentColor;
           border-radius:4px; padding:0 3px; line-height:13px }
+
+  /* Two top-level sections: what Jira says about the sprint, what GitHub says about PRs.
+     The header draws its own rule, so the separator right after it is dropped. */
+  .zone { display:flex; align-items:center; gap:8px; margin:12px 0 2px; font-size:10px; font-weight:700;
+          letter-spacing:.14em; color:-apple-system-secondary-label }
+  .zone::after { content:""; flex:1; border-top:1px solid -apple-system-separator }
+  .zone + hr { display:none }
+  .clear { display:flex; align-items:center; gap:7px; margin-top:6px; font-size:11px; color:-apple-system-secondary-label }
+
+  /* One section per status; the status lives in the header, not on every row. */
+  .ghd { display:flex; align-items:center; gap:6px; margin:6px 0 1px; font-size:10px; font-weight:600;
+         color:-apple-system-tertiary-label }
+  .ghd .n { font-weight:500 }
+  .ghd.p1 { color:-apple-system-green } .ghd.p3 { color:-apple-system-gray }
+
+  /* Every row's PR column. On waiting-to-ship and shipped rows the row's fade stays off it. */
+  .row .rp { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; text-align:right; font-size:11px }
+  .row .rp .g + .g { margin-left:8px }
+  .row .rp .c, .row .rp .w { white-space:nowrap }
+  .row .rp .c { cursor:pointer }
+  .row .rp .c:hover { text-decoration:underline }
+  .row .rp .open { color:-apple-system-green }
+  .row .rp .merged, .row .rp .deployed { color:-apple-system-purple }
+  .row .rp .none { color:-apple-system-tertiary-label }
+  .row .rp .c.bad { color:-apple-system-red } .row .rp .c.wait { color:-apple-system-orange }
+  .row .rp .badge { color:-apple-system-secondary-label } .row .rp .badge.bad { color:-apple-system-red }
+  .row .rp .badge.wait { color:-apple-system-orange } .row .rp .badge.good { color:-apple-system-green }
+  .row.done.rel { opacity:1 }
+  .row.done.rel > :not(.rp) { opacity:.5 }
+  .row.done.pending.rel > :not(.rp) { opacity:.78 }
 
   .band .brow .brepo { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis }
   .band .brow .bchecks { flex:none; max-width:58%; overflow:hidden; text-overflow:ellipsis; color:-apple-system-secondary-label }
@@ -166,9 +193,8 @@
     : t.statusCategory === "new" ? sym("circle", "c-gray") : sym("circle.lefthalf.filled", "c-blue");
   const PR_MARK = { FAILURE: "xmark", ERROR: "xmark", PENDING: "clock", EXPECTED: "clock", SUCCESS: "checkmark" };
   const prMark = (s) => PR_MARK[s] ? sym(PR_MARK[s], "sm") : "";
-  // When the state is unknown (draft PR, or the CI query failed) ASSIGN NO CLASS:
-  // the base .row .pr colour is already neutral. The old "good" here painted a
-  // stateless PR green — that read as "passed" when in fact nothing is known.
+  // When the state is unknown (draft PR, or the CI query failed) ASSIGN NO CLASS and no mark:
+  // painting a stateless PR as passed reads "green" when in fact nothing is known.
   const prClass = (s) => (s === "FAILURE" || s === "ERROR") ? "bad"
     : (s === "PENDING" || s === "EXPECTED") ? "wait" : s ? "good" : "";
   const hhmm = (iso) => { try { const d = new Date(iso);
@@ -204,6 +230,41 @@
             : esc((p.checks || []).join(", ") || "?")}</span>
         </div>`).join("")}
     </div>` : "";
+
+  // Every row lists its PRs, one label per state ("#12 #34 open") so a task with several PRs
+  // still fits the narrow column. An open PR's number carries the state the task badge used to
+  // show (CI, conflict, review), and its tooltip says why.
+  const prNumber = (p) => {
+    const why = (p.checks || []).length ? " · " + p.checks.join(", ") : "";
+    return `<span class="c${p.ci ? " " + prClass(p.ci) : ""}" data-url="${esc(p.url)}"
+      title="${esc(p.repo)}#${esc(p.number)} · ${esc(p.title)}${esc(why)}">#${esc(p.number)}${p.ci ? prMark(p.ci) : ""}</span>`;
+  };
+  // When the PR search failed, the open-PR search may still have given the task its badge.
+  const searchFailed = (t) => t.pr
+    ? `<span class="badge ${prClass(t.pr.state)}" title="the GitHub PR search failed: ${t.pr.count} open PR(s), CI from the open-PR search">${sym("arrow.triangle.pull")}${t.pr.count}${prMark(t.pr.state)}</span>`
+    : `<span class="none" title="the GitHub PR search failed">PRs ?</span>`;
+  const relChips = (t, prs = t.releasePrs) => prs === null ? searchFailed(t)
+    : !Array.isArray(prs) ? ""
+    : !prs.length ? `<span class="none">no PR</span>`
+    : ["open", "merged", "deployed"].map((st) => {
+        const of = prs.filter((p) => p.status === st);
+        return of.length ? `<span class="g ${st}">${of.map((p) => prNumber(p) + " ").join("")}<span class="w">${st}</span></span>` : "";
+      }).join("");
+
+  // Waiting-to-ship and shipped rows fade, but their PR column stays lit.
+  const PRS_STAY_LIT = new Set(["pending", "finished"]);
+  const taskRow = (t) => `
+        <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}${PRS_STAY_LIT.has(t.release) ? " rel" : ""}" data-url="${esc(t.url)}"
+             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (limit ${t.threshold}d) · age ${t.ageDays}d">
+          ${icon(t)}
+          <span class="k">${esc(t.key)}</span>
+          ${t.goal ? `<span class="goal">GOAL</span>` : ""}
+          <span class="qa">${t.qaShort ? sym("testtube.2") + " " + esc(t.qaShort) : ""}</span>
+          <span class="carry"${t.carriedOver ? ` title="carried over: this is its sprint #${t.sprintCount}"` : ""}>${t.carriedOver ? sym("arrow.uturn.forward", "sm") + t.sprintCount : ""}</span>
+          <span class="rp">${relChips(t)}</span>
+          <span class="d" title="${t.daysInStatus} business days in ${esc(t.status)} (limit ${t.threshold}d)">${t.daysInStatus}d</span>
+          <span class="age" title="opened ${t.ageDays} business days ago">${t.ageDays}d</span>
+        </div>`;
 
   // Every PR that cannot be merged, with its reasons; a PR GitHub has not settled reads "checking".
   const prBand = (rows) => rows.length ? `
@@ -253,7 +314,7 @@
   const relBand = (rows) => rows.length ? `
     <hr>
     <div class="band rel">
-      <div class="h">${sym("shippingbox", "sm")}Awaiting release <span class="n">${rows.length}</span></div>
+      <div class="h">${sym("shippingbox", "sm")}Past sprints · awaiting release <span class="n">${rows.length}</span></div>
       ${rows.map((r) => `
         <div class="brow" data-url="${esc(r.url)}"
              title="${esc(r.summary)}&#10;${esc(r.status)} · ${r.days} business days">
@@ -308,7 +369,7 @@
       card.innerHTML = `<div class="err">${sym("exclamationmark.triangle.fill", "c-red")} ${esc(d && d.error || "No data")}</div>`;
       return;
     }
-    const { sprint = {}, overdue, tasks = [] } = d;
+    const { sprint = {}, overdue, tasks = [], groups = [] } = d;
     const waiting = d.waitingPrs || [], reviews = d.reviewRequests || [];
 
     card.innerHTML = `
@@ -330,6 +391,8 @@
           <span class="tools"><span class="rf" id="rf" title="Refresh now">${sym("arrow.clockwise")}</span><span class="rf" id="gear" title="Settings">${sym("gearshape")}</span></span></div>
       </div>
 
+      <div class="zone">JIRA</div>
+
       ${goalBand(d.sprintGoal, sprint.daysLeft)}
       <hr>
 
@@ -348,25 +411,20 @@
       <hr>
 
       <div class="h">My tasks <span class="n">${tasks.length}</span></div>
-      ${tasks.map((t) => `
-        <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}" data-url="${esc(t.url)}"
-             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (limit ${t.threshold}d) · age ${t.ageDays}d">
-          ${icon(t)}
-          <span class="k">${esc(t.key)}</span>
-          <span class="s">${esc(t.status)}</span>
-          ${t.goal ? `<span class="goal">GOAL</span>` : ""}
-          <span class="qa">${t.qaShort ? sym("testtube.2") + " " + esc(t.qaShort) : ""}</span>
-          <span class="carry">${t.carriedOver ? sym("arrow.uturn.forward", "sm") + t.sprintCount : ""}</span>
-          <span class="pr ${t.pr ? prClass(t.pr.state) : ""}">${t.pr ? sym("arrow.triangle.pull") + t.pr.count + prMark(t.pr.state) : ""}</span>
-          <span class="d">${t.daysInStatus}d</span>
-          <span class="age">${t.ageDays}d</span>
-        </div>`).join("")}
+      ${groups.map((g) => `
+        <div class="ghd p${esc(g.phase)}">${esc(g.status)} <span class="n">${g.tasks.length}</span></div>
+        ${g.tasks.map(taskRow).join("")}`).join("")}
 
       ${relBand(d.pendingRelease || [])}
+
+      <div class="zone">GITHUB</div>
 
       ${band("waiting", sym("hourglass", "sm") + "Waiting", waiting, sym("hourglass", "c-orange"))}
       ${band("review", sym("eye", "sm") + "Awaiting your review", reviews, "")}
       ${prBand(d.pullRequests || [])}
+      ${d.prsAvailable !== false && d.reviewsAvailable !== false && !d.requiredError
+        && !waiting.length && !reviews.length && !(d.pullRequests || []).length
+        ? `<div class="clear">${sym("checkmark.seal.fill", "c-green")}<span>No PR waiting, to review or blocked</span></div>` : ""}
 
       ${d.prsAvailable === false ? `<div class="off">${sym("info.circle")}<div>${d.githubOrgError
         ? `PR/CI bands are off — ${esc(d.githubOrgError)}. Fix it in Settings.`
@@ -379,8 +437,9 @@
       ${notesHtml()}
     `;
 
+    // A PR inside a task row opens the PR, not the task as well.
     card.querySelectorAll("[data-url]").forEach((el) =>
-      el.addEventListener("click", () => openUrl(el.getAttribute("data-url"))));
+      el.addEventListener("click", (e) => { e.stopPropagation(); openUrl(el.getAttribute("data-url")); }));
     card.querySelectorAll("[data-del]").forEach((el) =>
       el.addEventListener("click", (e) => {
         e.stopPropagation();

@@ -33,5 +33,8 @@
     "Pending for Release",
     "Waiting for Release",
     "Waiting for SDK Release"
+  ],
+  "releasedStatuses": [
+    "Released on Prod"
   ]
 }

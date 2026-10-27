@@ -208,6 +208,24 @@ export function pendingReleaseStatuses(config) {
 }
 
 /**
+ * Statuses that mean the task is live. An allow list for the same reason as the pending one:
+ * "finished" also holds Closed, Done, Resolved and every unknown status, which prove nothing
+ * about a release, so a merged PR on them reads merged, not deployed.
+ */
+export const DEFAULT_RELEASED_STATUSES = ["Released on Prod"];
+
+/** Falls back to the default when the configured list is malformed (not an array). */
+export function releasedStatuses(config) {
+  const c = config && config.releasedStatuses;
+  return Array.isArray(c) ? c : DEFAULT_RELEASED_STATUSES;
+}
+
+export function isReleasedStatus(status, config) {
+  const norm = typeof status === "string" ? status.trim().toLowerCase() : "";
+  return norm !== "" && releasedStatuses(config).some((s) => String(s).trim().toLowerCase() === norm);
+}
+
+/**
  * Splits a done-category status three ways: finished / cancelled / waiting to ship.
  *
  * An unknown status counts as "finished" (fail-closed) — see the allow list above.
@@ -601,6 +619,122 @@ export function searchNodes(response) {
 
 export const prSearch = (qualifier) => `${qualifier}author:@me is:pr is:open`;
 export const reviewSearch = (qualifier) => `${qualifier}is:open is:pr review-requested:@me`;
+
+// --- Every task's PRs, open and merged ------------------------------------------------
+// The open-PR search above never returns a merged PR, so the PR column needs its own.
+
+const JIRA_KEY = /^[A-Z][A-Z0-9]+-\d+$/;
+
+/**
+ * The search for one task's PRs, open and merged, by the key in the title. Without an org it
+ * stays on PRs that involve me rather than every public PR naming the key. null when the key
+ * is not a Jira key, so nothing else can reach the query text.
+ */
+export function releasePrSearch(qualifier, key) {
+  if (typeof qualifier !== "string" || !JIRA_KEY.test(String(key))) return null;
+  return `${qualifier || "involves:@me "}is:pr ${key} in:title`;
+}
+
+/** The key as a whole token: DEMO-10 must not claim "DEMO-101 | …". */
+export function titleNamesKey(title, key) {
+  if (!JIRA_KEY.test(String(key))) return false;
+  return new RegExp(`(?<![A-Z0-9-])${key}(?![0-9])`).test(String(title ?? ""));
+}
+
+/**
+ * open, merged or deployed; null for a PR closed without merging. GitHub records no
+ * deployments, so "deployed" needs proof: the task's status is on the released list
+ * (`released`), or the merge commit is already on master (`shipped`).
+ */
+export function releasePrState(pr, released, shipped = false) {
+  if (!pr) return null;
+  if (pr.state === "OPEN") return "open";
+  if (pr.state === "MERGED") return released || shipped ? "deployed" : "merged";
+  return null;
+}
+
+/** The branch a merge into main or develop has to reach to be live. */
+export const RELEASE_BRANCH = "master";
+const GITHUB_NAME = /^[A-Za-z0-9_.-]+$/;
+const COMMIT_OID = /^[0-9a-f]{40}$/;
+
+/** A PR across orgs and repos. */
+export const releasePrId = (n) => `${n?.repository?.owner?.login ?? "?"}/${n?.repository?.name ?? "?"}#${n?.number}`;
+
+/**
+ * What to ask GitHub to learn whether a merged PR is on master: {owner, name, oid}, or null.
+ * A PR merged straight into master is not asked: there a merge is not always a release
+ * (Terraform, charts), so Jira stays the judge. Every field goes into the query text, so
+ * anything but a plain name or a commit id is refused.
+ */
+export function releaseBranchCheck(node) {
+  if (node?.state !== "MERGED" || node.baseRefName === RELEASE_BRANCH) return null;
+  const owner = node.repository?.owner?.login;
+  const name = node.repository?.name;
+  const oid = node.mergeCommit?.oid;
+  const fits = (value, re) => typeof value === "string" && re.test(value);
+  if (!fits(owner, GITHUB_NAME) || !fits(name, GITHUB_NAME) || !fits(oid, COMMIT_OID)) return null;
+  return { owner, name, oid };
+}
+
+/** master compared with the merge commit: at it or past it means the commit is on master. */
+export const reachedReleaseBranch = (status) => status === "BEHIND" || status === "IDENTICAL";
+
+/**
+ * A task's PR column from its search nodes: open PRs first, closed-unmerged ones dropped.
+ * `shipped` holds the releasePrIds whose merge commit is on master.
+ */
+export function releasePrs(nodes, key, released, shipped = new Set()) {
+  if (!Array.isArray(nodes)) return null;
+  const seen = new Set();
+  const rows = [];
+  for (const n of nodes) {
+    if (!n || !n.number || !titleNamesKey(n.title, key)) continue;
+    const status = releasePrState(n, released, shipped.has(releasePrId(n)));
+    if (!status) continue;
+    if (seen.has(releasePrId(n))) continue;
+    seen.add(releasePrId(n));
+    rows.push({ repo: n.repository?.name ?? "?", number: n.number, url: n.url ?? null, title: n.title ?? "", status });
+  }
+  return rows.sort((a, b) => (a.status === "open" ? 0 : 1) - (b.status === "open" ? 0 : 1));
+}
+
+/**
+ * Open PRs in the column take the state the task badge used to show, per PR: FAILURE when
+ * something needs action (CI, conflict, changes requested), PENDING while waiting (CI
+ * running, review required), else CI's own state. Only the open-PR search knows it, so a PR
+ * that search did not return, or a draft, gets null. `checks` says why.
+ */
+export function withOpenPrState(rows, prs) {
+  if (!Array.isArray(rows)) return rows;
+  const byId = new Map();
+  for (const pr of prs || []) if (pr && pr.number) byId.set(`${pr.repo}#${pr.number}`, pr);
+  return rows.map((r) => {
+    if (r.status !== "open") return r;
+    const pr = byId.get(`${r.repo}#${r.number}`);
+    if (!pr || pr.isDraft) return { ...r, ci: null, checks: [] };
+    const { rank, reasons } = prBlockers(pr);
+    return { ...r, ci: rank === 3 ? "FAILURE" : rank === 2 ? "PENDING" : pr.ciState || null, checks: reasons };
+  });
+}
+
+const PHASE = { pending: 1, finished: 2, cancelled: 3 };
+
+/**
+ * The board's sections, one per status: active work, then waiting to ship, then shipped,
+ * then cancelled. Within a phase a status sits where the sorted list first reaches it, so
+ * the section holding the hottest task comes first.
+ */
+export function groupByStatus(tasks) {
+  const groups = new Map();
+  for (const t of tasks || []) {
+    if (!groups.has(t.status)) {
+      groups.set(t.status, { status: t.status, phase: t.done ? PHASE[t.release] ?? 2 : 0, tasks: [] });
+    }
+    groups.get(t.status).tasks.push(t);
+  }
+  return [...groups.values()].sort((a, b) => a.phase - b.phase);
+}
 
 // --- Sprint goal ----------------------------------------------------------
 // The goal tasks of a sprint are its flagged issues. One that does not reach release in the

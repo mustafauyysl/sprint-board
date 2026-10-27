@@ -14,6 +14,8 @@ import {
   updateInfo, jiraRequest, ownershipStartedAt,
   mergeBlocked, githubOrgQualifier, prSearch, reviewSearch, searchNodes, reviewIds, conflictIds, newConflicts, conflictNotifications, refreshSummary, CONFLICT_SCOPE,
   showDraftPrs, sprintGoalTracking, activeSprints, goalJql, goalBand, withGoalMarks,
+  releasePrSearch, releasePrs, withOpenPrState, groupByStatus,
+  titleNamesKey, RELEASE_BRANCH, releasePrId, releaseBranchCheck, reachedReleaseBranch, isReleasedStatus,
 } from "./lib.mjs";
 
 const APP_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -332,6 +334,61 @@ async function attachRequiredChecks(prs, token) {
   }
 }
 
+let releasePrsError = null;
+
+/**
+ * Every task's PRs, open and merged, one aliased search per task in a SINGLE call. Optional
+ * like the other GitHub layers: on failure the column reads unknown (null), releasePrsError
+ * says why, and the board carries on.
+ */
+async function attachReleasePrs(tasks, qualifier, token, cfg) {
+  const wanted = tasks
+    .map((t) => ({ t, q: releasePrSearch(qualifier, t.key), released: isReleasedStatus(t.status, cfg) }))
+    .filter((w) => w.q);
+  if (!token || wanted.length === 0) return;
+  const aliases = wanted.map((w, i) => `
+    r${i}: search(query: ${JSON.stringify(w.q)}, type: ISSUE, first: 10) {
+      nodes { ... on PullRequest {
+        number title url state baseRefName mergeCommit { oid } repository { name owner { login } }
+      } }
+    }`);
+  try {
+    const data = (await ghGraphql(`{${aliases.join("\n")}}`, token))?.data ?? {};
+    const nodesOf = (i) => (Array.isArray(data[`r${i}`]?.nodes) ? data[`r${i}`].nodes : []);
+    const unproven = wanted.flatMap((w, i) =>
+      w.released ? [] : nodesOf(i).filter((n) => titleNamesKey(n?.title, w.t.key)));
+    const shipped = await shippedPrs(unproven, token);
+    wanted.forEach((w, i) => { w.t.releasePrs = releasePrs(data[`r${i}`]?.nodes, w.t.key, w.released, shipped); });
+  } catch (err) {
+    releasePrsError = String(err && err.message ? err.message : err).slice(0, 200);
+    wanted.forEach((w) => { w.t.releasePrs = null; });
+  }
+}
+
+/**
+ * The PRs merged into a branch other than master whose merge commit is already on master,
+ * as releasePrIds, from ONE aliased call. Optional: on failure they all read merged.
+ */
+async function shippedPrs(nodes, token) {
+  const checks = new Map();
+  for (const n of nodes) {
+    const check = releaseBranchCheck(n);
+    if (check) checks.set(releasePrId(n), check);
+  }
+  const shipped = new Set();
+  if (checks.size === 0) return shipped;
+  const list = [...checks];
+  const aliases = list.map(([, c], j) => `
+    c${j}: repository(owner: ${JSON.stringify(c.owner)}, name: ${JSON.stringify(c.name)}) {
+      ref(qualifiedName: ${JSON.stringify(`refs/heads/${RELEASE_BRANCH}`)}) { compare(headRef: ${JSON.stringify(c.oid)}) { status } }
+    }`);
+  try {
+    const data = (await ghGraphql(`{${aliases.join("\n")}}`, token))?.data ?? {};
+    list.forEach(([id], j) => { if (reachedReleaseBranch(data[`c${j}`]?.ref?.compare?.status)) shipped.add(id); });
+  } catch { /* optional: merged stays merged */ }
+  return shipped;
+}
+
 const reviewQuery = (qualifier) => `
 {
   viewer { login }
@@ -459,6 +516,7 @@ function demoPayload(cfg) {
     { key: "DEMO-104", summary: "Rate limit alarm regressed again", status: "IN AUTO TESTING", daysInStatus: 2, ageDays: 6, priority: "2 High", carriedOver: false, sprintCount: 1, qa: "Kerem Demir" },
     { key: "DEMO-105", summary: "Editor endpoint returns 404", status: "To Do", daysInStatus: 0, ageDays: 3, priority: "2 High", carriedOver: false, sprintCount: 1 },
     { key: "DEMO-106", summary: "Upgrade vulnerable dependencies", status: "Ready For Release", daysInStatus: 1, ageDays: 17, priority: "3 Medium", carriedOver: false, sprintCount: 1, qa: "Zeynep Aksu", done: true },
+    { key: "DEMO-112", summary: "Retry window for failed exports", status: "Released on Prod", daysInStatus: 2, ageDays: 9, priority: "3 Medium", carriedOver: false, sprintCount: 1, qa: "Ada Yilmaz", done: true },
   ];
 
   const tasks = seed.map((t) => {
@@ -493,6 +551,25 @@ function demoPayload(cfg) {
     t.pr = p ? { count: p.count, state: p.state } : null;
   }
 
+  // Search answers per task: merged and closed PRs here, the open ones come from demoPrs below.
+  // releasePrs drops the closed one exactly as it does live.
+  const demoReleaseNodes = {
+    "DEMO-106": [
+      { number: 96, title: "DEMO-106 | Lockfile refresh", url: "#", state: "MERGED", repository: { name: "shared-lib" } },
+      { number: 95, title: "DEMO-106 | First attempt", url: "#", state: "CLOSED", repository: { name: "shared-lib" } },
+    ],
+    "DEMO-112": [
+      { number: 4590, title: "DEMO-112 | Export retry window", url: "#", state: "MERGED", repository: { name: "web-frontend" } },
+    ],
+  };
+  for (const pr of demoPrs) {
+    const key = pr.title.split(" ")[0];
+    (demoReleaseNodes[key] ||= []).push({ number: pr.number, title: pr.title, url: pr.url, state: "OPEN", repository: { name: pr.repo } });
+  }
+  for (const t of tasks) {
+    t.releasePrs = withOpenPrState(releasePrs(demoReleaseNodes[t.key] || [], t.key, isReleasedStatus(t.status, cfg)), demoPrs);
+  }
+
   const overdue = pickMostOverdue(tasks);
 
   // Two sprints so every colour shows: one ends tomorrow (red), one is in its second week
@@ -511,11 +588,14 @@ function demoPayload(cfg) {
       ], activeSprints([{ fields: { sprint: [endingSprint, runningSprint] } }], "sprint"), now, cfg.host, "sprint")
     : null;
 
+  const visible = withGoalMarks([...tasks].sort((a, b) =>
+    a.done !== b.done ? (a.done ? 1 : -1) : b.ratio - a.ratio || b.daysInStatus - a.daysInStatus), sprintGoal);
+
   return {
     ok: true, demo: true, generatedAt: now.toISOString(), apiCalls: 0,
     sprintGoal,
     sprint: { name: "Demo Team - Sprint#4", endDate: null, daysLeft: 2 },
-    done: 1, total: tasks.length,
+    done: tasks.filter((t) => t.done).length, total: tasks.length,
     overdue: overdue && {
       key: overdue.key, summary: overdue.summary, status: overdue.status,
       daysInStatus: overdue.daysInStatus, threshold: overdue.threshold,
@@ -523,6 +603,7 @@ function demoPayload(cfg) {
       carriedOver: overdue.carriedOver, sprintCount: overdue.sprintCount,
     },
     prsAvailable: true,
+    reviewsAvailable: true,
     pendingRelease: [
       { key: "DEMO-107", summary: "Missing font-display setting", status: "Ready For Release",
         url: "https://example.invalid/browse/DEMO-107", sprint: "Demo Team - Sprint#2", days: 17 },
@@ -537,8 +618,8 @@ function demoPayload(cfg) {
     brokenPrs: demoBroken,
     waitingPrs: demoWaiting,
     pullRequests: mergeBlocked(demoPrs, showDraftPrs(cfg)),
-    tasks: withGoalMarks([...tasks].sort((a, b) =>
-      a.done !== b.done ? (a.done ? 1 : -1) : b.ratio - a.ratio || b.daysInStatus - a.daysInStatus), sprintGoal),
+    tasks: visible,
+    groups: groupByStatus(visible),
   };
 }
 
@@ -667,13 +748,16 @@ async function main() {
   const orgQualifier = githubOrgQualifier(cfg.githubOrg);
   const githubOrgError = orgQualifier === null ? "GitHub organization in config is not valid" : null;
   const ghToken = piped.githubToken || githubToken(cfg);
+  const releasePrsP = githubOrgError ? null : attachReleasePrs(tasks, orgQualifier, ghToken, cfg);
   const prs = githubOrgError ? null : await fetchPrs(orgQualifier, ghToken);
   const reviewRequests = githubOrgError ? null : await fetchReviewRequests(orgQualifier, new Date(), ghToken);
   await attachRequiredChecks(prs, ghToken);
+  await releasePrsP;
   const { byKey: prByKey, broken: brokenPrs, waiting: waitingPrs } = summarizePrs(prs);
   for (const t of tasks) {
     const p = prByKey[t.key];
     t.pr = p ? { count: p.count, state: p.state } : null;
+    t.releasePrs = withOpenPrState(t.releasePrs, prs);
   }
 
   const prevState = readJson(STATE_PATH, emptyState());
@@ -735,16 +819,19 @@ async function main() {
         }
       : null,
     tasks: visible,
+    groups: groupByStatus(visible),
     sprintGoal,
     prsAvailable: prs !== null,
     githubOrgError,
     pendingRelease: (await pendingReleaseP) || [],
     pendingReleaseError,
     reviewRequests: reviewRequests || [],
+    reviewsAvailable: reviewRequests !== null,
     position: cfg.position || { top: 40, right: 40 },
     alerts,
     played,
     requiredError,
+    releasePrsError,
     brokenPrs,
     waitingPrs,
     pullRequests: mergeBlocked(prs, includeDrafts),
