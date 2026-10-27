@@ -89,7 +89,7 @@ export function evaluate(status, daysInStatus, config) {
   const threshold = config.thresholds?.[status] ?? config.defaultThresholdDays;
   const alert = daysInStatus > threshold;
   // A threshold of 0 ("zero tolerance") is a valid setting; without clamping the
-  // denominator to 1 the ratio would be 0 and both boss ranking and the critical
+  // denominator to 1 the ratio would be 0 and both the overdue ranking and the critical
   // tier would silently collapse.
   const ratio = daysInStatus / Math.max(threshold, 1);
   const tier = !alert ? "ok" : ratio >= 2 ? "critical" : "warn";
@@ -97,11 +97,11 @@ export function evaluate(status, daysInStatus, config) {
 }
 
 /**
- * Boss = the task exceeding its threshold by the largest RATIO, not by the most
+ * Most overdue = the task exceeding its threshold by the largest RATIO, not by the most
  * days: something sitting 4 days in code review (threshold 2, ratio 2.0) is more
  * urgent than something sitting 8 days in To Do (threshold 7, ratio 1.14).
  */
-export function pickBoss(tasks) {
+export function pickMostOverdue(tasks) {
   const candidates = tasks.filter((t) => t.alert && !t.done);
   if (candidates.length === 0) return null;
   return candidates.reduce((best, t) => {
@@ -126,11 +126,6 @@ export function sprintHistory(sprints) {
     closedSprints: closed,
     sprintCount: closed + (hasActive ? 1 : 0),
   };
-}
-
-/** Number of lightning bolts (1–5) based on how far past the threshold. */
-export function bolts(ratio) {
-  return Math.max(1, Math.min(5, Math.floor(ratio)));
 }
 
 /** Extracts the Jira key from a PR title ("DEMO-101 | Template gate" -> "DEMO-101"). */
@@ -396,15 +391,16 @@ export function removeNote(notes, id) {
  * Critical events that are NEW relative to the previous run.
  *
  * On the first run (prev.initialized !== true) it produces nothing — otherwise
- * the widget would play a sound for every existing boss/broken CI/review request
+ * the widget would play a sound for every existing overdue task/broken CI/review request
  * on first launch. An already-known event stays silent; only new ones count.
  */
 export function detectAlerts(prev, now) {
   const alerts = [];
   if (!prev || prev.initialized !== true) return alerts;
 
-  const prevBoss = prev.bossKey || null;
-  if (now.bossKey && now.bossKey !== prevBoss) alerts.push("boss");
+  // `bossKey` is the name older versions saved; reading it keeps a known task quiet after an update.
+  const prevOverdue = prev.overdueKey || prev.bossKey || null;
+  if (now.overdueKey && now.overdueKey !== prevOverdue) alerts.push("overdue");
 
   const known = (list) => new Set(Array.isArray(list) ? list : []);
   const prevBroken = known(prev.brokenIds);
@@ -414,6 +410,18 @@ export function detectAlerts(prev, now) {
   if ((now.reviewIds || []).some((id) => !prevReviews.has(id))) alerts.push("review");
 
   return alerts;
+}
+
+/**
+ * The one sound to play for this run's alerts (priority overdue > CI > review), from the
+ * config's `sound` block. `boss` is the name older configs use for the overdue sound.
+ */
+export function alertSound(sound, alerts) {
+  const snd = sound || {};
+  if (!snd.enabled || !Array.isArray(alerts) || alerts.length === 0) return null;
+  const pick = alerts.includes("overdue") ? "overdue" : alerts.includes("ci") ? "ci" : "review";
+  const file = snd[pick] || (pick === "overdue" ? snd.boss : null);
+  return file ? { pick, file } : null;
 }
 
 /**
@@ -430,13 +438,13 @@ export function reviewIds(requests, previous = []) {
  * previous run?" — i.e. preventing repeated sounds.
  *
  * `initialized` is CRITICAL: detectAlerts relies on it to stay quiet on the first
- * run. Without it the widget would play a sound for every existing boss/broken CI
+ * run. Without it the widget would play a sound for every existing overdue task/broken CI
  * on every launch.
  */
 export function emptyState() {
   return {
     initialized: false,
-    bossKey: null,
+    overdueKey: null,
     brokenIds: [],
     reviewIds: [],
     conflictIds: [],

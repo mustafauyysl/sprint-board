@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  businessDaysBetween, evaluate, pickBoss, bolts,
+  businessDaysBetween, evaluate, pickMostOverdue, alertSound,
   releaseState, pendingReleaseStatuses, emptyState, sprintHistory, firstName,
   summarizePrs, requiredRollup, reviewWaitInfo, detectAlerts, resolveExecutable,
   updateInfo, jiraRequest, ownershipStartedAt,
@@ -457,18 +457,15 @@ async function fetchReviewRequests(qualifier, now, token) {
 }
 
 /**
- * Plays a single system sound on a critical event (priority boss > CI > review).
+ * Plays a single system sound on a critical event (priority overdue > CI > review).
  * spawn+unref so the sound never blocks the refresh; failures are ignored quietly.
  */
 function playAlert(cfg, alerts) {
-  const snd = cfg.sound || {};
-  if (!snd.enabled || alerts.length === 0) return null;
-  const pick = alerts.includes("boss") ? "boss" : alerts.includes("ci") ? "ci" : "review";
-  const file = snd[pick];
-  if (!file) return null;
+  const sound = alertSound(cfg.sound, alerts);
+  if (!sound) return null;
   try {
-    spawn("/usr/bin/afplay", [file], { detached: true, stdio: "ignore" }).unref();
-    return pick;
+    spawn("/usr/bin/afplay", [sound.file], { detached: true, stdio: "ignore" }).unref();
+    return sound.pick;
   } catch {
     return null;
   }
@@ -505,7 +502,7 @@ function activeSprint(issues, sprintField) {
 
 /**
  * --demo: shows every visual state in one frame without touching Jira.
- * The input is fake but the logic is REAL — evaluate/pickBoss/summarizePrs run
+ * The input is fake but the logic is REAL — evaluate/pickMostOverdue/summarizePrs run
  * exactly as they do live, so what you see here matches real data.
  */
 function demoPayload(cfg) {
@@ -573,7 +570,7 @@ function demoPayload(cfg) {
     t.releasePrs = withOpenPrState(releasePrs(demoReleaseNodes[t.key] || [], t.key, isReleasedStatus(t.status, cfg)), demoPrs);
   }
 
-  const boss = pickBoss(tasks);
+  const overdue = pickMostOverdue(tasks);
 
   // Two sprints so every colour shows: one ends tomorrow (red), one is in its second week
   // (yellow). Dates are relative to now, so the colours never age out of the demo.
@@ -598,12 +595,12 @@ function demoPayload(cfg) {
     ok: true, demo: true, generatedAt: now.toISOString(), apiCalls: 0,
     sprintGoal,
     sprint: { name: "Demo Team - Sprint#4", endDate: null, daysLeft: 2 },
-    cleared: tasks.filter((t) => t.done).length, total: tasks.length,
-    boss: boss && {
-      key: boss.key, summary: boss.summary, status: boss.status,
-      daysInStatus: boss.daysInStatus, threshold: boss.threshold,
-      ratio: Number(boss.ratio.toFixed(2)), bolts: bolts(boss.ratio), url: boss.url,
-      carriedOver: boss.carriedOver, sprintCount: boss.sprintCount,
+    done: tasks.filter((t) => t.done).length, total: tasks.length,
+    overdue: overdue && {
+      key: overdue.key, summary: overdue.summary, status: overdue.status,
+      daysInStatus: overdue.daysInStatus, threshold: overdue.threshold,
+      ratio: Number(overdue.ratio.toFixed(2)), url: overdue.url,
+      carriedOver: overdue.carriedOver, sprintCount: overdue.sprintCount,
     },
     prsAvailable: true,
     reviewsAvailable: true,
@@ -649,7 +646,7 @@ async function main() {
     throw new Error(
       piped.jiraAuthState === "temporary"
         ? "Could not reach Atlassian — it will retry automatically once you are back online"
-        : "No Jira session, or it has expired — sign in again from ⚔ > Settings in the menu bar"
+        : "No Jira session, or it has expired — sign in again from the ring icon → Settings… in the menu bar"
     );
   }
   const jiraAuth = auth || { mode: "basic", token: Buffer.from(`${cfg.email}:${token}`).toString("base64") };
@@ -681,7 +678,7 @@ async function main() {
     if (!me.ok) {
       throw new Error(
         me.status === 401
-          ? "Jira token is invalid — refresh it from ⚔ > Settings in the menu bar"
+          ? "Jira token is invalid — refresh it from the ring icon → Settings… in the menu bar"
           : `Jira authentication failed (HTTP ${me.status})`
       );
     }
@@ -702,7 +699,7 @@ async function main() {
     const statusAt = latestStatusChange(histories) ?? new Date(f.created);
     // The clock is the PERSON's, not the ticket's. A card that sat unassigned in
     // To Do for 23 days and was handed over today is 1 day of THIS person's
-    // delay, not 23 — otherwise it lands on its new owner as an instant boss
+    // delay, not 23 — otherwise it lands on its new owner as an instant overdue
     // alert for a queue they never saw. Whichever came later wins: a status
     // change after the handover is the real bottleneck again.
     // Every issue here matched `assignee = currentUser()`, so f.assignee IS me.
@@ -726,7 +723,7 @@ async function main() {
       statusCategory: f.status?.statusCategory?.key ?? "new",
       done,
       // The done category alone is not enough: "finished" and "waiting to ship"
-      // are different. NOTE: this distinction is VISUAL ONLY. The `cleared` counter
+      // are different. NOTE: this distinction is VISUAL ONLY. The `done` counter
       // still looks at `done` — once the development work is finished the sprint
       // considers it closed, and waiting on a release must not hold the counter
       // back. Not an inconsistency; deliberate.
@@ -767,9 +764,9 @@ async function main() {
   const includeDrafts = showDraftPrs(cfg);
 
   // Critical-event detection: compare against the previous run so only NEW items sound.
-  const bossNow = pickBoss(tasks);
+  const overdueNow = pickMostOverdue(tasks);
   const signals = {
-    bossKey: bossNow ? bossNow.key : null,
+    overdueKey: overdueNow ? overdueNow.key : null,
     brokenIds: brokenPrs.map((p) => `${p.repo}#${p.number}`),
     reviewIds: reviewIds(reviewRequests, prevState.reviewIds),
     // Kept from the previous run when GitHub is unreachable or the search failed: an empty
@@ -781,8 +778,8 @@ async function main() {
   const notify = conflictNotifications(newConflicts(prevState, prs, includeDrafts));
   const played = playAlert(cfg, alerts);
   // `initialized` is REQUIRED: this is how detectAlerts recognises the first run.
-  // Without it every launch counts as "first launch" and every existing boss or
-  // broken CI plays a sound all over again.
+  // Without it every launch counts as "first launch" and every existing overdue task
+  // or broken CI plays a sound all over again.
   writeJson(STATE_PATH, { initialized: true, ...signals });
 
   // Closed items are NOT dropped from the list, only sorted to the end: statuses
@@ -801,7 +798,7 @@ async function main() {
         await fetchLatestRelease(cfg.updateRepo || "mustafauyysl/sprint-board", ghToken))
     : null;
 
-  const boss = pickBoss(tasks);
+  const overdue = pickMostOverdue(tasks);
   const daysLeft = sprint?.endDate
     ? Math.max(0, Math.ceil((new Date(sprint.endDate) - now) / 86400000))
     : null;
@@ -811,14 +808,14 @@ async function main() {
     generatedAt: now.toISOString(),
     apiCalls,
     sprint: { name: sprint?.name ?? "Sprint", endDate: sprint?.endDate ?? null, daysLeft },
-    cleared: tasks.filter((t) => t.done).length,
+    done: tasks.filter((t) => t.done).length,
     total: tasks.length,
-    boss: boss
+    overdue: overdue
       ? {
-          key: boss.key, summary: boss.summary, status: boss.status,
-          daysInStatus: boss.daysInStatus, threshold: boss.threshold,
-          ratio: Number(boss.ratio.toFixed(2)), bolts: bolts(boss.ratio), url: boss.url,
-          carriedOver: boss.carriedOver, sprintCount: boss.sprintCount,
+          key: overdue.key, summary: overdue.summary, status: overdue.status,
+          daysInStatus: overdue.daysInStatus, threshold: overdue.threshold,
+          ratio: Number(overdue.ratio.toFixed(2)), url: overdue.url,
+          carriedOver: overdue.carriedOver, sprintCount: overdue.sprintCount,
         }
       : null,
     tasks: visible,

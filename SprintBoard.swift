@@ -154,7 +154,7 @@ func disconnectHint(_ cfg: [String: Any]) -> [String: String] {
     ]
 }
 
-/// What the setup screen gets when it opens from Settings or ⚙. nil while nobody is signed in
+/// What the setup screen gets when it opens from Settings or the gear button. nil while nobody is signed in
 /// (first run, after Disconnect): the sign-in block then stays. Otherwise the screen shows the
 /// account, the board settings and the Disconnect hint, and hides the sign-in block.
 func setupContext(_ cfg: [String: Any]) -> [String: Any]? {
@@ -354,12 +354,13 @@ final class CallbackListener {
                 }
 
                 let html = """
-                <!doctype html><meta charset="utf-8">
-                <body style="font-family:system-ui;background:#06120a;color:#9bffb0;
+                <!doctype html><meta charset="utf-8"><title>Sprint Board</title>
+                <body style="color-scheme:light dark;font:15px -apple-system,system-ui,sans-serif;
+                             background:Canvas;color:CanvasText;
                              display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
                 <div style="text-align:center">
-                  <h2 style="letter-spacing:.18em;color:#39ff14">\u{2694} SPRINT BOARD</h2>
-                  <p>Signed in. You can close this tab.</p>
+                  <h2 style="font-size:20px;font-weight:600;margin:0 0 6px">Sprint Board</h2>
+                  <p style="margin:0;opacity:.6">Signed in. You can close this tab.</p>
                 </div>
                 """
                 let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n" +
@@ -388,38 +389,105 @@ let REFRESH_SECONDS: TimeInterval = 30 * 60
 let NOTES_PATH = ("~/.local/state/sprint-widget/notes.json" as NSString).expandingTildeInPath
 let MAX_NOTES = 6
 let NOTE_LIMIT = 500
+/// The corner radius of the board card in view.html and setup.html; the window material follows it.
+let CARD_RADIUS: CGFloat = 10
+
+/// `frame` moved, and shortened if needed, to lie inside the visible area of its own screen: the
+/// screen `current` overlaps most (the main screen when it is on none, e.g. a display was unplugged).
+/// Pass the window's frame before a resize, so a tall board cannot pick the screen below.
+func onScreen(_ frame: NSRect, near current: NSRect? = nil) -> NSRect {
+    let at = current ?? frame
+    let area = { (s: NSScreen) in s.frame.intersection(at).width * s.frame.intersection(at).height }
+    guard let screen = NSScreen.screens.filter({ area($0) > 0 }).max(by: { area($0) < area($1) })
+            ?? NSScreen.main else { return frame }
+    let vf = screen.visibleFrame
+    var f = frame
+    f.size.height = min(f.height, vf.height)
+    f.size.width = min(f.width, vf.width)
+    f.origin.x = min(max(f.minX, vf.minX), vf.maxX - f.width)
+    f.origin.y = min(max(f.minY, vf.minY), vf.maxY - f.height)
+    return f
+}
+
+/// A stretchable mask that rounds the popover material's corners to `radius`.
+func roundedMask(_ radius: CGFloat) -> NSImage {
+    let side = radius * 2 + 1
+    let mask = NSImage(size: NSSize(width: side, height: side), flipped: false) { r in
+        NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
+        return true
+    }
+    mask.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+    mask.resizingMode = .stretch
+    return mask
+}
+
+/// The SF Symbols the page uses. A page cannot load them itself, so each one goes in as a
+/// CSS mask image on `.s-<name>` (dots become dashes) and takes the text colour.
+let PAGE_SYMBOLS = [
+    "arrow.clockwise", "gearshape", "flag.fill", "checkmark.seal.fill", "exclamationmark.triangle.fill",
+    "checkmark.circle.fill", "xmark.circle", "xmark.circle.fill", "xmark.octagon.fill", "shippingbox",
+    "shippingbox.fill", "flame.fill", "arrow.uturn.forward.circle", "arrow.uturn.forward", "circle",
+    "circle.lefthalf.filled", "testtube.2", "arrow.triangle.pull", "checkmark", "xmark", "clock", "eye",
+    "hourglass", "ellipsis.circle", "info.circle", "arrow.down.circle",
+]
+
+func symbolStyleSheet() -> String {
+    var css = ""
+    for name in PAGE_SYMBOLS {
+        guard let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 40, weight: .regular)),
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(img.size.width * 2),
+                                         pixelsHigh: Int(img.size.height * 2), bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
+            dbg("symbol not found: \(name)")
+            continue
+        }
+        rep.size = img.size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        img.draw(in: NSRect(origin: .zero, size: img.size))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let png = rep.representation(using: .png, properties: [:]) else { continue }
+        css += ".s-\(name.replacingOccurrences(of: ".", with: "-")){-webkit-mask-image:url(data:image/png;base64,\(png.base64EncodedString()))}\n"
+    }
+    return css
+}
 
 /// Dragging the top strip moves the window; everything else reaches the WebView
 /// as a normal click. (CSS -webkit-app-region is Electron-specific and does
 /// nothing in WKWebView — and isMovableByWindowBackground is not enough either,
 /// because the WebView consumes the events.)
 // Menu bar icon — not the drag class's job, it lives at the top level.
-/// The sword for the menu bar. Being a template image it is drawn black and macOS
-/// handles the tinting. Font-independent — the ⚔ glyph can fall back to Apple
-/// Color Emoji.
-func swordIcon(_ side: CGFloat) -> NSImage {
+/// The sprint ring of the app icon for the menu bar: a faint track, a three-quarter
+/// arc and a check. Being a template image it is drawn black (the track as alpha)
+/// and macOS handles the tinting. Drawn paths, not an SF Symbol, so it matches the
+/// app icon on every macOS version.
+func ringIcon(_ side: CGFloat) -> NSImage {
     let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
         func p(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
             NSPoint(x: x * side, y: y * side)
         }
-        let blade = NSBezierPath()
-        blade.move(to: p(0.50, 0.98))
-        blade.line(to: p(0.60, 0.76))
-        blade.line(to: p(0.588, 0.40))
-        blade.line(to: p(0.412, 0.40))
-        blade.line(to: p(0.40, 0.76))
-        blade.close()
+        let center = p(0.5, 0.5), radius = side * 0.38
+        let track = NSBezierPath()
+        track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
+        track.lineWidth = side * 0.11
+        NSColor.black.withAlphaComponent(0.3).setStroke()
+        track.stroke()
 
-        let guardBar = NSBezierPath(roundedRect: NSRect(x: 0.16 * side, y: 0.315 * side,
-                                                       width: 0.68 * side, height: 0.085 * side),
-                                    xRadius: 0.04 * side, yRadius: 0.04 * side)
-        let grip = NSBezierPath(roundedRect: NSRect(x: 0.442 * side, y: 0.115 * side,
-                                                    width: 0.116 * side, height: 0.20 * side),
-                                xRadius: 0.04 * side, yRadius: 0.04 * side)
-        let pommel = NSBezierPath(ovalIn: NSRect(x: 0.40 * side, y: 0.015 * side,
-                                                 width: 0.20 * side, height: 0.13 * side))
-        NSColor.black.setFill()
-        for path in [blade, guardBar, grip, pommel] { path.fill() }
+        let arc = NSBezierPath()
+        arc.appendArc(withCenter: center, radius: radius, startAngle: 90, endAngle: -180, clockwise: true)
+        arc.lineWidth = side * 0.11
+        arc.lineCapStyle = .round
+        let check = NSBezierPath()
+        check.move(to: p(0.34, 0.50))
+        check.line(to: p(0.45, 0.39))
+        check.line(to: p(0.66, 0.62))
+        check.lineWidth = side * 0.10
+        check.lineCapStyle = .round
+        check.lineJoinStyle = .round
+        NSColor.black.setStroke()
+        for path in [arc, check] { path.stroke() }
         return true
     }
     img.isTemplate = true          // adapts itself to a light/dark menu bar
@@ -438,7 +506,7 @@ final class DragWebView: WKWebView {
             return
         }
 
-        // Calling performDrag UNCONDITIONALLY on the strip made the ⟳ refresh button
+        // Calling performDrag UNCONDITIONALLY on the strip made the refresh button
         // unclickable: the event went to the drag and never reached the page. We
         // inspect the next event to tell them apart — drag or plain click.
         // dequeue:false => the event stays queued, normal handling is unaffected.
@@ -469,7 +537,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var retryCount = 0
     var ready = false
     var pendingJSON: String?
-    /// Set by "Refresh now" and the ⟳ button: the next result is reported as a notification.
+    /// Set by "Refresh now" and the refresh button: the next result is reported as a notification.
     var manualRefreshPending = false
     /// The widget's frame before it was made to fill the screen; nil while it is normal size.
     var restoreFrame: NSRect?
@@ -488,14 +556,30 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         cfg.userContentController.add(self, name: "sb")
         // Transparent backing: show the card's own background, not a window rectangle.
         cfg.setValue(false, forKey: "drawsBackground")
+        if let css = try? JSONSerialization.data(withJSONObject: symbolStyleSheet(), options: .fragmentsAllowed),
+           let literal = String(data: css, encoding: .utf8) {
+            let js = "(() => { const s = document.createElement('style'); s.textContent = \(literal); document.head.appendChild(s); })()"
+            cfg.userContentController.addUserScript(
+                WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        }
 
         let frame = savedFrame()
         window = BoardWindow(contentRect: frame, styleMask: [.borderless, .resizable, .miniaturizable],
                              backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
-        window.hasShadow = false
+        // The shadow follows the window's alpha, so it bends round the clear corners of the card.
+        window.hasShadow = true
         window.isMovableByWindowBackground = true
+
+        // The system material behind the transparent page. Always active: following the
+        // window's key state would turn the panel flat whenever another app has focus.
+        let material = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
+        material.material = .popover
+        material.blendingMode = .behindWindow
+        material.state = .active
+        window.contentView = material
+        applyCornerRadius(CARD_RADIUS)
         // NOTE: the desktop level (desktopIcon) was tried — the window received no mouse
         // events. Normal level: same plane as other windows, clicks/drags work.
         window.level = .normal
@@ -503,11 +587,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         // widget on top of full-screen apps. Keep it on the desktop Space.
         window.collectionBehavior = [.stationary, .ignoresCycle, .fullScreenNone]
 
-        web = DragWebView(frame: window.contentView!.bounds, configuration: cfg)
+        web = DragWebView(frame: material.bounds, configuration: cfg)
         web.autoresizingMask = [.width, .height]
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
-        window.contentView!.addSubview(web)
+        material.addSubview(web)
 
         if needsSetup() {
             onSetupScreen = true
@@ -519,10 +603,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         // Menu bar item: with no Dock icon (LSUIElement) this is the ONLY UI route to
         // quitting the app. Without it you would need pkill from a terminal.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // A template NSImage, NOT TEXT: `button.title = "⚔"` looked like a tiny character
-        // rather than an icon and depended on the menu font. A template image fits the
+        // A template NSImage, NOT TEXT: a text glyph as `button.title` looked like a tiny
+        // character rather than an icon and depended on the menu font. A template image fits the
         // menu height and tints itself for a light/dark menu bar.
-        statusItem.button?.image = swordIcon(18)
+        statusItem.button?.image = ringIcon(18)
         statusItem.button?.toolTip = "Sprint Board"
         let menu = NSMenu()
         let mRefresh = NSMenuItem(title: "Refresh now", action: #selector(menuRefresh), keyEquivalent: "r")
@@ -655,15 +739,28 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// The green button: the widget fills the screen with larger text; again restores it.
     func toggleFill() {
         if let frame = restoreFrame {
-            restoreFrame = nil
             web.pageZoom = 1
+            // The animation runs a nested run loop: height reports must still wait until it ends.
             window.setFrame(frame, display: true, animate: true)
+            restoreFrame = nil
         } else if let screen = window.screen ?? NSScreen.main {
             restoreFrame = window.frame
             web.pageZoom = 1.4
             window.setFrame(screen.visibleFrame, display: true, animate: true)
         }
+        // The zoom scales the card's CSS corners; the material must follow them.
+        applyCornerRadius(CARD_RADIUS * web.pageZoom)
+        window.invalidateShadow()
         applyFillClass()
+        if restoreFrame == nil {
+            web.evaluateJavaScript("window.sbFit && window.sbFit()") { _, err in
+                if let err { dbg("fit: \(err.localizedDescription)") }
+            }
+        }
+    }
+
+    func applyCornerRadius(_ radius: CGFloat) {
+        (window.contentView as? NSVisualEffectView)?.maskImage = roundedMask(radius)
     }
 
     func applyFillClass() {
@@ -752,9 +849,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
         // Default: top-left corner (on macOS y is measured from the bottom up).
         let vf = screen.visibleFrame
-        return NSRect(x: x ?? (vf.minX + 40),
-                      y: y ?? (vf.maxY - h - 40),
-                      width: 430, height: h)
+        return onScreen(NSRect(x: x ?? (vf.minX + 40),
+                               y: y ?? (vf.maxY - h - 40),
+                               width: 430, height: h))
     }
 
     func saveFrame() {
@@ -1272,12 +1369,18 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             }
         }
         // While the widget fills the screen its size is fixed; the page's height reports wait.
-        if let h = body["height"] as? Double, h > 60, restoreFrame == nil {
+        // The window never leaves the screen: it would run under the Dock and be saved so.
+        if let posted = body["height"] as? Double, posted > 60, restoreFrame == nil {
             var f = window.frame
             let top = f.maxY                    // pin the top edge, grow downwards
-            f.size.height = CGFloat(h)
-            f.origin.y = top - CGFloat(h)
+            f.size.height = CGFloat(posted)
+            f.origin.y = top - f.height
+            f = onScreen(f, near: window.frame)
+            let now = window.frame
+            guard abs(f.minX - now.minX) >= 0.5 || abs(f.minY - now.minY) >= 0.5
+                    || abs(f.height - now.height) >= 0.5 else { return }
             window.setFrame(f, display: true)
+            window.invalidateShadow()
             saveFrame()
         }
     }

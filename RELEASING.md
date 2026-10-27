@@ -66,7 +66,7 @@ xcrun stapler validate "/tmp/dl/Sprint Board.app"
 ## How users find out
 
 On every refresh (30 min) the widget checks `releases/latest`; if it is newer than the
-user's own version, an **"⬆ vX.Y.Z is out — click to download"** row appears at the
+user's own version, a **"Version X.Y.Z is available — click to download"** row appears at the
 bottom of the card, and clicking it opens the release page.
 
 For that to work:

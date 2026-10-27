@@ -94,6 +94,15 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp sprint-board "$APP/Contents/MacOS/SprintBoard"
 cp SprintBoard.icns "$APP/Contents/Resources/"
+# macOS 26 draws an icon that comes only as an .icns small, inside a grey frame.
+# Assets.car holds the Icon Composer icon (SprintBoard.icon) at full size; the
+# .icns stays as the fallback. It is committed so a build needs no Xcode. After
+# a change to SprintBoard.icon, compile it again with Xcode's actool:
+#   /Applications/Xcode.app/Contents/Developer/usr/bin/actool SprintBoard.icon \
+#     --compile <out> --platform macosx --minimum-deployment-target 13.0 \
+#     --app-icon SprintBoard --output-partial-info-plist <out>/partial.plist
+# and copy <out>/Assets.car over the one in the repo.
+cp Assets.car "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -105,11 +114,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>com.mustafauysal.sprintboard</string>
   <key>CFBundleExecutable</key><string>SprintBoard</string>
   <key>CFBundleIconFile</key><string>SprintBoard</string>
+  <key>CFBundleIconName</key><string>SprintBoard</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD_NUM}</string>
   <key>NSHighResolutionCapable</key><true/>
-  <!-- No Dock icon: this is a desktop widget. Quit/refresh live in the ⚔ menu bar item. -->
+  <!-- No Dock icon: this is a desktop widget. Quit/refresh live in the menu bar item. -->
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict>
