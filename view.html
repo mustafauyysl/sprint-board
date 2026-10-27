@@ -241,7 +241,7 @@
   };
   // When the PR search failed, the open-PR search may still have given the task its badge.
   const searchFailed = (t) => t.pr
-    ? `<span class="badge ${prClass(t.pr.state)}" title="the GitHub PR search failed: ${t.pr.count} open PR(s), CI from the open-PR search">⚙${t.pr.count}${prMark(t.pr.state)}</span>`
+    ? `<span class="badge ${prClass(t.pr.state)}" title="the GitHub PR search failed: ${t.pr.count} open PR(s), CI from the open-PR search">${sym("arrow.triangle.pull")}${t.pr.count}${prMark(t.pr.state)}</span>`
     : `<span class="none" title="the GitHub PR search failed">PRs ?</span>`;
   const relChips = (t, prs = t.releasePrs) => prs === null ? searchFailed(t)
     : !Array.isArray(prs) ? ""
@@ -255,14 +255,15 @@
   const PRS_STAY_LIT = new Set(["pending", "finished"]);
   const taskRow = (t) => `
         <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}${PRS_STAY_LIT.has(t.release) ? " rel" : ""}" data-url="${esc(t.url)}"
-             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (threshold ${t.threshold}d) · age ${t.ageDays}d">
-          <span class="k">${icon(t)} ${esc(t.key)}</span>
-          ${t.goal ? `<span class="goal">🎯 GOAL</span>` : ""}
-          <span class="qa">${t.qaShort ? "🧪" + esc(t.qaShort) : ""}</span>
-          <span class="carry"${t.carriedOver ? ` title="carried over: this is its sprint #${t.sprintCount}"` : ""}>${t.carriedOver ? "×" + t.sprintCount : ""}</span>
+             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (limit ${t.threshold}d) · age ${t.ageDays}d">
+          ${icon(t)}
+          <span class="k">${esc(t.key)}</span>
+          ${t.goal ? `<span class="goal">GOAL</span>` : ""}
+          <span class="qa">${t.qaShort ? sym("testtube.2") + " " + esc(t.qaShort) : ""}</span>
+          <span class="carry"${t.carriedOver ? ` title="carried over: this is its sprint #${t.sprintCount}"` : ""}>${t.carriedOver ? sym("arrow.uturn.forward", "sm") + t.sprintCount : ""}</span>
           <span class="rp">${relChips(t)}</span>
-          <span class="d" title="${t.daysInStatus} business days in ${esc(t.status)} (threshold ${t.threshold}d)">${t.daysInStatus}g</span>
-          <span class="age" title="opened ${t.ageDays} business days ago">/${t.ageDays}</span>
+          <span class="d" title="${t.daysInStatus} business days in ${esc(t.status)} (limit ${t.threshold}d)">${t.daysInStatus}d</span>
+          <span class="age" title="opened ${t.ageDays} business days ago">${t.ageDays}d</span>
         </div>`;
 
   // Every PR that cannot be merged, with its reasons; a PR GitHub has not settled reads "checking".
@@ -423,7 +424,7 @@
       ${prBand(d.pullRequests || [])}
       ${d.prsAvailable !== false && d.reviewsAvailable !== false && !d.requiredError
         && !waiting.length && !reviews.length && !(d.pullRequests || []).length
-        ? `<div class="clear">✓ No PR waiting, to review or blocked</div>` : ""}
+        ? `<div class="clear">${sym("checkmark.seal.fill", "c-green")}<span>No PR waiting, to review or blocked</span></div>` : ""}
 
       ${d.prsAvailable === false ? `<div class="off">${sym("info.circle")}<div>${d.githubOrgError
         ? `PR/CI bands are off — ${esc(d.githubOrgError)}. Fix it in Settings.`

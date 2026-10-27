@@ -1801,7 +1801,7 @@ test("--demo: the board is grouped by status and every row carries its PRs", () 
   assert.deepEqual(prs["DEMO-105"], [], "a task without PRs reads no PR");
   assert.deepEqual(prs["DEMO-106"], ["worker-jobs#288 open FAILURE", "shared-lib#96 merged"]);
   assert.deepEqual(prs["DEMO-112"], ["web-frontend#4590 deployed"]);
-  assert.equal(out.cleared, out.tasks.filter((t) => t.done).length);
+  assert.equal(out.done, out.tasks.filter((t) => t.done).length);
 });
 
 const sprintIssue = (key, status, category) => ({
