@@ -1006,6 +1006,23 @@ let PANEL_TABS: [(title: String, page: String, handler: String)] = [
     ("Sprint", "popover/sprints.html", "sb"),
     ("Hosts", "popover/hosts.html", "hosts"),
 ]
+/// The page the widget shows as its board; the panel's Sprint tab shows the same page.
+let WIDGET_BOARD_PAGE = "popover/sprints.html"
+let WIDGET_TAB_KEY = "widgetTab"
+/// The motion of a fold in popover/sprints.html (FOLD_MOTION), so the window edge moves with it.
+let WIDGET_FIT_SECONDS: TimeInterval = 0.2
+let WIDGET_FIT_CURVE = CAMediaTimingFunction(controlPoints: 0.2, 0.7, 0.3, 1)
+/// The tint of the widget's board, behind the tab header and the tab pages.
+let WIDGET_TINT = NSColor(srgbRed: 28 / 255, green: 28 / 255, blue: 30 / 255, alpha: 0.8)
+/// Runs in the widget's tab pages. Swift calls sbFit after fill mode; these pages have no own one.
+let WIDGET_PAGE_SCRIPT = #"""
+addEventListener('DOMContentLoaded', () => {
+  const card = document.getElementById('card');
+  const handlers = window.webkit?.messageHandlers;
+  if (!card || window.sbFit) return;
+  window.sbFit = () => requestAnimationFrame(() => (handlers?.sb ?? handlers?.hosts)?.postMessage({ height: card.offsetHeight }));
+});
+"""#
 /// Runs first in every panel page; see makePanelWebView.
 let PANEL_PAGE_SCRIPT = """
 document.documentElement.classList.add('nohover');
@@ -1153,6 +1170,16 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     let panel = NSPopover()
     /// One WebView per PANEL_TABS entry, in the same order; panelWeb is the Sprint board's.
     var panelTabs: [WKWebView] = []
+    /// The widget's own tab header and Hosts page. Its Sprint page is `web`.
+    var widgetTabControl: NSSegmentedControl!
+    var widgetHostsWeb: WKWebView!
+    var widgetHeader: NSView?
+    var widgetTint: NSView?
+    /// The height each widget page last reported, so the window follows the active tab.
+    var widgetPageHeights: [WKWebView: CGFloat] = [:]
+    /// The window height of the move under way, and a number that tells a newer move from an older one.
+    var widgetFitTarget: CGFloat?
+    var widgetFitRun = 0
     var panelWeb: WKWebView!
     var hostsWeb: WKWebView!
     var tabControl: NSSegmentedControl!
@@ -1204,6 +1231,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         cfg.userContentController.add(self, name: "sb")
         // Transparent backing: show the card's own background, not a window rectangle.
         cfg.setValue(false, forKey: "drawsBackground")
+        for source in [PANEL_PAGE_SCRIPT, WIDGET_PAGE_SCRIPT] {
+            cfg.userContentController.addUserScript(WKUserScript(
+                source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
         if let script = symbolScript() { cfg.userContentController.addUserScript(script) }
 
         let frame = savedFrame()
@@ -1235,12 +1266,13 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
         material.addSubview(web)
+        setUpWidgetTabs(in: material)
 
         if needsSetup() {
             onSetupScreen = true
             loadPage("setup.html")
         } else {
-            loadPage("view.html")
+            loadPage(WIDGET_BOARD_PAGE)
         }
 
         // Menu bar item: with no Dock icon (LSUIElement) this is the ONLY UI route to
@@ -1421,12 +1453,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     func toggleFill() {
         if let frame = restoreFrame {
             web.pageZoom = 1
+            widgetHostsWeb.pageZoom = 1
             // The animation runs a nested run loop: height reports must still wait until it ends.
             window.setFrame(frame, display: true, animate: true)
             restoreFrame = nil
         } else if let screen = window.screen ?? NSScreen.main {
             restoreFrame = window.frame
             web.pageZoom = 1.4
+            widgetHostsWeb.pageZoom = 1.4
             window.setFrame(screen.visibleFrame, display: true, animate: true)
         }
         // The zoom scales the card's CSS corners; the material must follow them.
@@ -1434,14 +1468,17 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.invalidateShadow()
         applyFillClass()
         if restoreFrame == nil {
-            web.evaluateJavaScript("window.sbFit && window.sbFit()") { _, err in
-                if let err { dbg("fit: \(err.localizedDescription)") }
+            for page in [web, widgetHostsWeb] as [WKWebView] {
+                page.evaluateJavaScript("window.sbFit && window.sbFit()") { _, err in
+                    if let err { dbg("fit: \(err.localizedDescription)") }
+                }
             }
         }
     }
 
     func applyCornerRadius(_ radius: CGFloat) {
         (window.contentView as? NSVisualEffectView)?.maskImage = roundedMask(radius)
+        widgetTint?.layer?.cornerRadius = radius
     }
 
     func applyFillClass() {
@@ -1480,6 +1517,161 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         menuFront()
         return false
+    }
+
+    // MARK: widget tabs
+
+    /// The tab header holds the window buttons, so both tabs have them. The Hosts page stays
+    /// loaded behind the Sprint page, so each tab keeps its state, as in the panel. The setup
+    /// screen uses the whole window and brings its own card and window buttons.
+    func setUpWidgetTabs(in material: NSView) {
+        let tint = NSView(frame: material.bounds)
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = WIDGET_TINT.cgColor
+        tint.layer?.cornerRadius = CARD_RADIUS
+        tint.autoresizingMask = [.width, .height]
+        material.addSubview(tint, positioned: .below, relativeTo: web)
+        widgetTint = tint
+
+        widgetHostsWeb = makePanelWebView(handler: "hosts")
+        widgetHostsWeb.configuration.userContentController.addUserScript(WKUserScript(
+            source: WIDGET_PAGE_SCRIPT, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        widgetHostsWeb.autoresizingMask = [.width, .height]
+        widgetHostsWeb.isHidden = true
+        material.addSubview(widgetHostsWeb)
+
+        let width = material.bounds.width
+        let header = NSView(frame: NSRect(x: 0, y: material.bounds.height - PANEL_HEADER_HEIGHT,
+                                          width: width, height: PANEL_HEADER_HEIGHT))
+        header.autoresizingMask = [.width, .minYMargin]
+        header.appearance = NSAppearance(named: .darkAqua)
+        material.addSubview(header)
+        widgetHeader = header
+
+        widgetTabControl = NSSegmentedControl(labels: PANEL_TABS.map(\.title), trackingMode: .selectOne,
+                                              target: self, action: #selector(widgetTabChanged))
+        widgetTabControl.sizeToFit()
+        widgetTabControl.frame.origin = NSPoint(x: (width - widgetTabControl.frame.width) / 2,
+                                                y: (PANEL_HEADER_HEIGHT - widgetTabControl.frame.height) / 2)
+        widgetTabControl.autoresizingMask = [.minXMargin, .maxXMargin]
+        header.addSubview(widgetTabControl)
+
+        let lights: [(color: UInt32, action: String)] = [(0xff5f57, "close"), (0xfebc2e, "minimize"), (0x28c840, "fill")]
+        for (i, light) in lights.enumerated() {
+            let button = NSButton(frame: NSRect(x: 16 + CGFloat(i) * 20, y: (PANEL_HEADER_HEIGHT - 12) / 2, width: 12, height: 12))
+            button.title = ""
+            button.isBordered = false
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 6
+            button.layer?.backgroundColor = NSColor(srgbRed: CGFloat(light.color >> 16 & 255) / 255,
+                                                    green: CGFloat(light.color >> 8 & 255) / 255,
+                                                    blue: CGFloat(light.color & 255) / 255, alpha: 1).cgColor
+            button.identifier = NSUserInterfaceItemIdentifier(light.action)
+            button.toolTip = light.action
+            button.target = self
+            button.action = #selector(widgetLightClicked)
+            header.addSubview(button)
+        }
+
+        loadPage("popover/hosts.html", in: widgetHostsWeb)
+        let saved = UserDefaults.standard.integer(forKey: WIDGET_TAB_KEY)
+        widgetTabControl.selectedSegment = PANEL_TABS.indices.contains(saved) ? saved : 0
+        layoutWidget()
+    }
+
+    var widgetShownPage: WKWebView { widgetHostsWeb?.isHidden == false ? widgetHostsWeb : web }
+
+    /// Places the header and the pages for the setup screen or the selected tab.
+    func layoutWidget() {
+        guard let header = widgetHeader, let material = window.contentView else { return }
+        let tabs = !onSetupScreen
+        let pageFrame = NSRect(x: 0, y: 0, width: material.bounds.width,
+                               height: material.bounds.height - (tabs ? PANEL_HEADER_HEIGHT : 0))
+        web.frame = pageFrame
+        widgetHostsWeb.frame = pageFrame
+        header.isHidden = !tabs
+        widgetTint?.isHidden = !tabs
+        let hostsShown = tabs && PANEL_TABS[widgetTabControl.selectedSegment].page == "popover/hosts.html"
+        web.isHidden = hostsShown
+        widgetHostsWeb.isHidden = !hostsShown
+        fitWidget()
+    }
+
+    /// The window follows the active page. It keeps its top edge and never leaves the screen: it
+    /// would run under the Dock and be saved so. While it fills the screen its size is fixed.
+    /// With `animated` the bottom edge moves with the page's fold motion. A page reports its new
+    /// height before its motion starts, so a move in one step cuts or uncovers the board before
+    /// the content arrives. A WKWebView redraws at each resize, so the pages stay pinned at the
+    /// taller height for the move and take their exact height once, at its end.
+    func fitWidget(animated: Bool = false) {
+        guard restoreFrame == nil, let height = widgetPageHeights[widgetShownPage] else { return }
+        var f = window.frame
+        let top = f.maxY
+        f.size.height = height + (onSetupScreen ? 0 : PANEL_HEADER_HEIGHT)
+        f.origin.y = top - f.height
+        f = onScreen(f, near: window.frame)
+        let now = window.frame
+        if let target = widgetFitTarget {
+            // A fold reports its height more than once; the move under way already goes there.
+            if abs(f.height - target) < 0.5 { return }
+        } else if abs(f.minX - now.minX) < 0.5, abs(f.minY - now.minY) < 0.5, abs(f.height - now.height) < 0.5 {
+            return
+        }
+        widgetFitRun += 1
+        let run = widgetFitRun
+        let move = animated && window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let interrupted = widgetFitTarget != nil
+        widgetFitTarget = move ? f.height : nil
+        if move { pinWidgetPages(windowHeight: f.height) }
+        guard move || interrupted else {
+            window.setFrame(f, display: true)
+            window.invalidateShadow()
+            saveFrame()
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = move ? WIDGET_FIT_SECONDS : 0
+            context.timingFunction = WIDGET_FIT_CURVE
+            window.animator().setFrame(f, display: true)
+        }, completionHandler: { [weak self] in
+            guard let self, run == self.widgetFitRun else { return }
+            self.widgetFitTarget = nil
+            for page in [self.web, self.widgetHostsWeb] as [WKWebView] { page.autoresizingMask = [.width, .height] }
+            self.layoutWidget()
+            self.window.invalidateShadow()
+            self.saveFrame()
+        })
+    }
+
+    /// Pages keep their top edge and height while the window moves under them.
+    func pinWidgetPages(windowHeight: CGFloat) {
+        let height = windowHeight - PANEL_HEADER_HEIGHT
+        for page in [web, widgetHostsWeb] as [WKWebView] {
+            page.autoresizingMask = [.width, .minYMargin]
+            guard height > page.frame.height else { continue }
+            page.frame = NSRect(x: 0, y: page.frame.maxY - height, width: page.frame.width, height: height)
+        }
+    }
+
+    @objc func widgetTabChanged() {
+        UserDefaults.standard.set(widgetTabControl.selectedSegment, forKey: WIDGET_TAB_KEY)
+        widgetShownPage.evaluateJavaScript("document.documentElement.classList.add('nohover')")
+        layoutWidget()
+        // /etc/hosts may have been edited by hand since the tab was last drawn.
+        if widgetShownPage === widgetHostsWeb { hostsMessage(["status": true]) }
+    }
+
+    @objc func widgetLightClicked(_ button: NSButton) {
+        windowAction(button.identifier?.rawValue ?? "")
+    }
+
+    func windowAction(_ action: String) {
+        switch action {
+        case "close": window.orderOut(nil)
+        case "minimize": window.miniaturize(nil)
+        case "fill": toggleFill()
+        default: break
+        }
     }
 
     // MARK: menu bar panel
@@ -1715,7 +1907,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         setupResultTarget = nil
         setupReason = nil
         hidePanelSettings()
-        loadPage("view.html")
+        loadPage(WIDGET_BOARD_PAGE)
         // With no data yet the panel still says "action needed"; reloading it shows the
         // loading ticker until the first result.
         if lastJSON == nil { loadPage("popover/sprints.html", in: panelWeb) }
@@ -1859,8 +2051,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         let json = (try? JSONSerialization.data(withJSONObject: state))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         DispatchQueue.main.async {
-            self.hostsWeb.evaluateJavaScript("window.sbHosts && window.sbHosts(\(json))") { _, err in
-                if let err { dbg("sbHosts: \(err.localizedDescription)") }
+            for page in [self.hostsWeb, self.widgetHostsWeb] as [WKWebView] {
+                page.evaluateJavaScript("window.sbHosts && window.sbHosts(\(json))") { _, err in
+                    if let err { dbg("sbHosts: \(err.localizedDescription)") }
+                }
             }
         }
     }
@@ -1951,8 +2145,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         let arg = (try? JSONSerialization.data(withJSONObject: note.map { $0 as Any } ?? NSNull(), options: .fragmentsAllowed))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "null"
         DispatchQueue.main.async {
-            self.hostsWeb.evaluateJavaScript("window.sbHostsNote && window.sbHostsNote(\(arg))") { _, err in
-                if let err { dbg("sbHostsNote: \(err.localizedDescription)") }
+            for page in [self.hostsWeb, self.widgetHostsWeb] as [WKWebView] {
+                page.evaluateJavaScript("window.sbHostsNote && window.sbHostsNote(\(arg))") { _, err in
+                    if let err { dbg("sbHostsNote: \(err.localizedDescription)") }
+                }
             }
         }
     }
@@ -2035,7 +2231,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// The data layer must not run while the setup screen is open: setup.html has no
     /// sbRender, so pushing data there fails with "A JavaScript exception occurred" —
     /// and with no config written yet, fetch would fail anyway.
-    var onSetupScreen = false
+    var onSetupScreen = false {
+        didSet { DispatchQueue.main.async { [weak self] in self?.layoutWidget() } }
+    }
     /// The setup screen was opened from Settings while signed in, so it offers "Back to board".
     var setupFromSettings = false
     /// The user opened Settings while signed in: nothing is wrong, so refreshes go on behind it
@@ -2599,9 +2797,19 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         if let w = msg.webView, panelTabs.contains(w) || w === panelSetupWeb, let h = body["height"] as? Double {
             panelPageHeight(CGFloat(h), for: w)
         }
+        if let w = msg.webView, w === web || w === widgetHostsWeb, let posted = body["height"] as? Double, posted > 60 {
+            let known = widgetPageHeights[w] != nil
+            widgetPageHeights[w] = CGFloat(posted)
+            if w === widgetShownPage { fitWidget(animated: known && w === web && !onSetupScreen) }
+        }
         // Below is the board/setup protocol. Other tabs' pages post to their own handlers
         // and must not reach it.
-        if msg.name == "hosts" { hostsMessage(body); return }
+        if msg.name == "hosts" {
+            // The widget's Hosts gear opens the widget's settings; the panel may be closed.
+            if msg.webView === widgetHostsWeb, body["settings"] != nil { menuSetup(); return }
+            hostsMessage(body)
+            return
+        }
         guard msg.name == "sb" else { return }
         // The panel's board and its setup page share this handler. Window keys belong to the
         // widget; setup messages come from the widget or the panel's setup page, never the board.
@@ -2659,27 +2867,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             if setupBlocksFetch, setupFromSettings { showBoard() } else { hidePanelSettings() }
         }
         if fromWidget, let w = body["win"] as? String {
-            switch w {
-            case "close": window.orderOut(nil)
-            case "minimize": window.miniaturize(nil)
-            case "fill": toggleFill()
-            default: break
-            }
-        }
-        // While the widget fills the screen its size is fixed; the page's height reports wait.
-        // The window never leaves the screen: it would run under the Dock and be saved so.
-        if fromWidget, let posted = body["height"] as? Double, posted > 60, restoreFrame == nil {
-            var f = window.frame
-            let top = f.maxY                    // pin the top edge, grow downwards
-            f.size.height = CGFloat(posted)
-            f.origin.y = top - f.height
-            f = onScreen(f, near: window.frame)
-            let now = window.frame
-            guard abs(f.minX - now.minX) >= 0.5 || abs(f.minY - now.minY) >= 0.5
-                    || abs(f.height - now.height) >= 0.5 else { return }
-            window.setFrame(f, display: true)
-            window.invalidateShadow()
-            saveFrame()
+            windowAction(w)
         }
     }
 

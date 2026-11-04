@@ -61,7 +61,7 @@
   .tile.days small { margin-top: 1px; }
   .ring { width: 48px; height: 48px; flex: none; }
   .ring.accent { color: -apple-system-control-accent; }
-  .ring text { font: 700 9px -apple-system, system-ui; fill: rgba(255,255,255,.96); }
+  .ring text { font: 700 7.5px -apple-system, system-ui; letter-spacing: -.2px; fill: rgba(255,255,255,.96); }
 
   /* The team goal's tasks: counts as pills (the empty ones left out); each row fades from its
      risk colour on the left to transparent on the right */
@@ -309,7 +309,7 @@
     const share = total ? Math.min(1, done / total) : 0;
     return `<svg class="ring ${cls}" viewBox="0 0 36 36"><circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,.14)" stroke-width="4"/>`
       + `<circle cx="18" cy="18" r="14" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-dasharray="${(share * 87.96).toFixed(1)} 87.96" transform="rotate(-90 18 18)"/>`
-      + `<text x="18" y="21.2" text-anchor="middle">${pct(done, total)}</text></svg>`;
+      + `<text x="18" y="20.7" text-anchor="middle">${pct(done, total)}</text></svg>`;
   };
   const riskLine = (count) => {
     if (count.red) return `<small class="c-red">${count.red} critical</small>`;
