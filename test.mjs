@@ -3614,6 +3614,29 @@ test("Hosts tab: nothing is redrawn and no key acts while a reply is on its way,
   assert.deepEqual(callers, ["function draw(s) {", line.trim(), "draw(s);"]);
 });
 
+test("Hosts tab: while an action waits, a state Swift sent on its own is not taken for its reply", () => {
+  const page = readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8");
+  assert.match(page, /post\(\{ \.\.\.message, requestId: \+\+requestId \}\);/);
+  const handler = page.match(/^  window\.sbHosts = \(s\) => \{[\s\S]*?\n  \};$/m)[0];
+  const received = (busy, s) => {
+    const log = [], window = {};
+    new Function("window", "busy", "requestId", "orderGroups", "draw", handler)(
+      window, busy, 3, () => log.push("order"), () => log.push("draw"));
+    window.sbHosts(s);
+    return log;
+  };
+  assert.deepEqual(received(true, { groups: [] }), [], "the panel opened while an add waits");
+  assert.deepEqual(received(true, { groups: [], requestId: 2 }), [], "an older action's reply");
+  assert.deepEqual(received(true, { groups: [], requestId: 3 }), ["draw"]);
+  assert.deepEqual(received(false, { groups: [] }), ["order", "draw"]);
+  // Swift sends the id back on every reply to a Hosts message.
+  const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(methodSource(swift, "replyHosts"), /state\["requestId"\] = body\["requestId"\]/);
+  const message = methodSource(swift, "hostsMessage");
+  assert.equal((message.match(/replyHosts\(/g) || []).length, 4);
+  assert.equal((message.match(/self\.replyHosts\(state, to: body\)/g) || []).length, 4);
+});
+
 test("Hosts tab: a gear opens Settings, and the back arrow returns to Hosts", () => {
   const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   assert.match(methodSource(swift, "hostsMessage"), /if body\["settings"\] != nil \{\n\s*showPanelSettings\(\)\n\s*return\n\s*\}/);
@@ -3766,7 +3789,7 @@ final class App {
     var replies: [[String: Any]] = []
     var notes: [Any] = []
     var chromeRefreshes = 0
-    func replyHosts(_ state: [String: Any]) { replies.append(state) }
+    func replyHosts(_ state: [String: Any], to body: [String: Any]) { replies.append(state) }
     func showPanelSettings() {}
     func showChromeNote(_ note: String?) { notes.append(note.map { $0 as Any } ?? NSNull()) }
     func refreshChrome() { chromeRefreshes += 1 }
@@ -4022,4 +4045,31 @@ test("Open Insecure Chrome: a Chrome running without the flags is left alone; ot
 
 test("Chrome refresh: a burst of switches refreshes Chrome once", { skip: !swiftAvailable }, () => {
   assert.deepEqual(appRun({ op: "chromeBurst" }).refreshes, [1, 2]);
+});
+
+test("hosts.html trims a domain and a partner name as Swift does, invisible characters included", { skip: !swiftAvailable }, () => {
+  const { hostName, partnerName } = pageChecks();
+  const domains = ["\u0085app.example.test\u0085", "app.example.test\ufeff",
+    "\u2028app.example.test\u2029", "\u00a0app.example.test\u3000", "\u000bapp.example.test\u000c"];
+  assert.deepEqual(domains.map(hostName), hostsRun(domains.map((raw) => ({ op: "name", raw }))));
+  const partners = ["\u0085demoshop\u0085", "\u00a0demoshop\u2029"];
+  assert.deepEqual(partners.map(partnerName), hostsRun(partners.map((raw) => ({ op: "partnerName", raw }))));
+});
+
+test("Hosts tab: an action Swift refused stays refused after its error moves under the field", () => {
+  const page = readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8");
+  const draw = page.slice(page.indexOf("  function draw(s) {"), page.indexOf("  function fitChips() {"));
+  const kept = draw.indexOf("const refused = Boolean(s.error);");
+  assert.ok(kept >= 0 && kept < draw.indexOf("if (s.error) { fieldError = s.error; s = { ...s, error: null }; }"));
+  // Nothing after it reads the error that was moved: the field keeps the text, no group is picked or carried over.
+  assert.equal((draw.match(/!s\.error/g) || []).length, 0);
+  assert.equal((draw.match(/!refused/g) || []).length, 4);
+  assert.match(draw, /else if \(fieldEl && adding && !refused && !bulk\) fieldEl\.value = "";/);
+});
+
+test("board page: the refresh button keeps spinning through redraws until the result arrives", () => {
+  const page = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  assert.match(page, /if \(refreshing\) return;[^\n]*\n\s*refreshing = true;\n\s*el\.classList\.add\("spin"\);\n\s*post\(\{ refresh: true \}\);/);
+  assert.match(page, /`;\n\s*if \(refreshing\) card\.querySelector\("#rf"\)\.classList\.add\("spin"\);/);
+  assert.match(page, /window\.sbRender = \(d\) => \{\n\s*clearInterval\(waitTimer\);\n\s*refreshing = false;/);
 });

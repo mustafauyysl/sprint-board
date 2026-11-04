@@ -1783,14 +1783,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
                 var state = hostsStatus("", self.readHostsList() ?? HostsList(), writable: writable)
                 state["mode"] = "unreadable"
                 state["error"] = "Could not read /etc/hosts as text, so nothing can be shown or changed."
-                self.replyHosts(state)
+                self.replyHosts(state, to: body)
                 return
             }
             let saved = self.readHostsList()
             if saved == nil, FileManager.default.fileExists(atPath: HOSTS_LIST_PATH) {
                 var state = hostsStatus(text, HostsList(), writable: writable)
                 state["error"] = "Could not read the domain list (\(HOSTS_LIST_PATH)). Fix or delete that file; nothing was changed."
-                self.replyHosts(state)
+                self.replyHosts(state, to: body)
                 return
             }
             let before = saved ?? HostsList()
@@ -1800,7 +1800,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             if block == nil, body["remove"] != nil || body["setMode"] != nil || body["groupDeleteWithDomains"] != nil {
                 var state = hostsStatus(text, before, writable: writable)
                 state["error"] = "Sprint Board's block in /etc/hosts is damaged; fix it by hand first. Nothing was changed."
-                self.replyHosts(state)
+                self.replyHosts(state, to: body)
                 return
             }
             var action = body
@@ -1835,7 +1835,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             var state = self.readHostsText().map { hostsStatus($0, list, writable: writable) }
                 ?? hostsStatus("", list, writable: writable).merging(["mode": "unreadable"]) { $1 }
             if let error { state["error"] = error }
-            self.replyHosts(state)
+            self.replyHosts(state, to: body)
         }
     }
 
@@ -1849,10 +1849,13 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         return partnerDomainSuffixes(config)
     }
 
-    /// The page gets the partner suffixes with every state, so "Add partner" follows the config.
-    func replyHosts(_ state: [String: Any]) {
+    /// The page gets the partner suffixes with every state, so "Add partner" follows the config,
+    /// and the requestId of the message answered, so it can tell its action's reply from a state
+    /// Swift sent on its own (the panel opened, a tab switch).
+    func replyHosts(_ state: [String: Any], to body: [String: Any]) {
         var state = state
         state["partnerSuffixes"] = hostsPartnerSuffixes()
+        state["requestId"] = body["requestId"]
         let json = (try? JSONSerialization.data(withJSONObject: state))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         DispatchQueue.main.async {

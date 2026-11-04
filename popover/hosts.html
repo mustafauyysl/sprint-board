@@ -267,7 +267,8 @@
     return labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : labels.join("");
   };
   function hostName(raw) {
-    let s = raw.trim().toLowerCase();
+    // As Swift's .whitespacesAndNewlines: trim() would also drop U+FEFF and keep U+0085.
+    let s = raw.replace(/^[\p{Zs}\t\n\v\f\r\u0085\u2028\u2029]+|[\p{Zs}\t\n\v\f\r\u0085\u2028\u2029]+$/gu, "").toLowerCase();
     const scheme = s.indexOf("://");
     if (scheme >= 0) s = s.slice(scheme + 3);
     const rest = s.search(/[?#\/]/);
@@ -282,7 +283,7 @@
     return ok ? s : null;
   }
   function partnerName(raw) {
-    const first = (hostName(raw) ?? raw.trim().toLowerCase()).split(".")[0];
+    const first = (hostName(raw) ?? raw.replace(/^[\p{Zs}\t\n\v\f\r\u0085\u2028\u2029]+|[\p{Zs}\t\n\v\f\r\u0085\u2028\u2029]+$/gu, "").toLowerCase()).split(".")[0];
     return first.length >= 1 && first.length <= 60 && !first.startsWith("-") && !first.endsWith("-") && /^[a-z0-9-]+$/.test(first) ? first : null;
   }
   function groupName(raw) {
@@ -334,6 +335,7 @@
   let removedAt = 0;          // when a domain was last deleted
   let resetScroll = false;    // the list changed: show it from its top
   let busy = false, adding = false;
+  let requestId = 0;          // the last action's id; Swift sends it back with that action's reply
   let pointerDown = false;    // a mouse button is held: a blur now comes from a press in progress
   let listed = [];            // the domains in the list now, for All prod / All local
   let drawn = false;          // the first draw shows the page as it is, without animating it in
@@ -351,7 +353,7 @@
     renaming = null;
     card.classList.add("busy");
     card.querySelectorAll("input").forEach((i) => { i.readOnly = true; });
-    post(message);
+    post({ ...message, requestId: ++requestId });
   };
   const closeAll = () => {
     menuFor = renaming = null;
@@ -471,6 +473,7 @@
     }
     // A refusal of the field's entry shows under the field rather than at the top; a group made
     // from the field closes it only once Swift has made it.
+    const refused = Boolean(s.error);
     if (fieldAsked) {
       if (s.error) { fieldError = s.error; s = { ...s, error: null }; }
       else if (action === "group") action = null;
@@ -479,12 +482,12 @@
     last = s;
     if (selectAfter) {
       // Only when the create or rename went through: a refused name may match another group.
-      const match = !s.error && s.groups.find((g) => same(g, selectAfter));
+      const match = !refused && s.groups.find((g) => same(g, selectAfter));
       if (match) { selected = [match]; resetScroll = true; }
       selectAfter = null;
     }
     if (renamed) {
-      if (!s.error && s.groups.includes(renamed.to)) {
+      if (!refused && s.groups.includes(renamed.to)) {
         const { from, to } = renamed;
         if (groupUse[from]) { groupUse[to] = groupUse[from]; delete groupUse[from]; saveUse(); }
         groupOrder = groupOrder.map((g) => (g === from ? to : g));
@@ -492,7 +495,7 @@
       }
       renamed = null;
     }
-    const created = creatingGroup && !s.error;
+    const created = creatingGroup && !refused;
     if (created) { groupQuery = ""; groupScrollReset = true; }
     const kept = selected.filter((g) => s.groups.includes(g));   // a group deleted, or renamed away
     if (kept.length !== selected.length) { selected = kept; resetScroll = true; }
@@ -657,7 +660,7 @@
     // An accepted entry is cleared (the add field stays open for the next one); a refused one stays.
     // A comma-separated add keeps its text until it ends, then leaves only what was not added.
     if (fieldEl && fieldText != null) { fieldEl.value = fieldText; fieldText = null; }
-    else if (fieldEl && adding && !s.error && !bulk) fieldEl.value = "";
+    else if (fieldEl && adding && !refused && !bulk) fieldEl.value = "";
     const findEl = live("#groupFind");
     if (findEl && created) findEl.value = "";
     if (fieldEl && action === "search" && fieldEl.value !== query) fieldEl.value = query;
@@ -1000,7 +1003,10 @@
     setTimeout(redraw);
   }, true);
 
+  // While an action waits, only its own reply counts. A state Swift sent on its own (the panel
+  // opened, a tab switch) is left out: the reply that follows carries a newer one.
   window.sbHosts = (s) => {
+    if (busy && s.requestId !== requestId) return;
     if (!busy) orderGroups(s.groups);
     draw(s);
   };

@@ -355,6 +355,7 @@
   let LAST = null;
   let LAST_OK = null;    // the last successful data; a failed refresh must not wipe the board
   let staleNote = null;
+  let refreshing = false;  // a refresh was asked for and its result has not arrived
   const staleHtml = () => staleNote ? `<div class="stale">${sym("exclamationmark.triangle.fill", "c-yellow")}<div>Could not refresh: <b>${esc(staleNote.error)}</b><br>
         Showing data as of ${hhmm(staleNote.at)}. It will retry shortly; press Refresh
         if you would rather not wait.</div></div>` : "";
@@ -548,7 +549,8 @@
     } else if (el.dataset.del) {
       post({ noteDel: el.dataset.del });
     } else if (el.id === "rf") {
-      if (el.classList.contains("spin")) return;   // one refresh at a time, ~13 s
+      if (refreshing) return;   // one refresh at a time, ~13 s
+      refreshing = true;
       el.classList.add("spin");
       post({ refresh: true });
     } else if (el.id === "gear") {
@@ -586,6 +588,7 @@
       ${updateHtml(d.update)}
       ${notesHtml()}
     `;
+    if (refreshing) card.querySelector("#rf").classList.add("spin");
     const input = card.querySelector(".ninput");
     input.value = typed;
     if (hadFocus) input.focus();
@@ -605,6 +608,7 @@
 
   window.sbRender = (d) => {
     clearInterval(waitTimer);
+    refreshing = false;
     // A failed refresh over good data keeps the data and puts a "could not refresh" strip on top.
     if (d && d.ok === false && LAST_OK) {
       staleNote = { error: d.error || "unknown error", at: LAST_OK.generatedAt };
