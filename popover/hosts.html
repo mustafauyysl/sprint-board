@@ -789,7 +789,9 @@
     }
   }
 
-  const redraw = () => { if (last) draw(last); };
+  // Nothing is drawn while a reply is on its way: draw would take the last state for that reply
+  // (a comma-separated add would count it). What changed meanwhile shows with the reply.
+  const redraw = () => { if (last && !busy) draw(last); };
   function submitField(box) {
     const value = box.querySelector("#field").value.trim();
     if (!value) return;
@@ -923,7 +925,7 @@
     }
     else if ((el = at("[data-bulk]"))) act({ setMode: el.dataset.bulk, names: listed.map((d) => d.name) });
     else if (at("#toggleConflicts")) { conflictsOpen = !conflictsOpen; redraw(); }
-    else if (at("#hideChromeNote")) { chromeNote = null; if (!busy) redraw(); }
+    else if (at("#hideChromeNote")) { chromeNote = null; redraw(); }
     else if (at("#importBtn")) act({ importAll: true, group: one() });
   });
   // A press anywhere in the name field (its padding, the gap, the trash) must not take the focus
@@ -934,7 +936,9 @@
     e.preventDefault();
     if (!e.target.closest(".rdel")) pill.querySelector("#renameGroup").focus();
   });
+  // While a reply is on its way keys do nothing, as clicks do (pointer-events).
   card.addEventListener("keydown", (e) => {
+    if (busy) return;
     const t = e.target;
     if (t.id === "field") {
       if (e.key === "Enter" && action !== "search") submitField(t.closest(".fieldbox"));
@@ -981,7 +985,7 @@
   }, true);
 
   document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape") return;
+    if (busy || e.key !== "Escape") return;
     if (menuFor || renaming) { closeAll(); redraw(); }
     else if (action) { closeAction(); redraw(); }
   });
@@ -993,7 +997,7 @@
     if (!menuFor || e.target.closest(".gmenu, [data-row]")) return;
     menuFor = null;
     groupQuery = "";
-    setTimeout(() => { if (!busy) redraw(); });
+    setTimeout(redraw);
   }, true);
 
   window.sbHosts = (s) => {
@@ -1005,8 +1009,7 @@
     const note = text || null;
     if (note === chromeNote) return;
     chromeNote = note;
-    // While a reply is on its way it draws the note; drawing now would read as that reply.
-    if (!busy) redraw();
+    redraw();
   };
   post({ status: true });
 </script>

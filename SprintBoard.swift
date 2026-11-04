@@ -1170,6 +1170,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var retryCount = 0
     /// A fetch.mjs run (or the keychain read before it) is under way. Main thread only.
     var fetchInFlight = false
+    /// Counts the times the board's data was dropped (Disconnect, a session that ended): a fetch
+    /// started before belongs to the account that left. Main thread only.
+    var boardGeneration = 0
     /// Board pages (the widget's view.html, the panel's sprints.html) that have finished loading. A render sent
     /// to a page that is still loading is lost, so only these receive data.
     var loadedBoards = Set<WKWebView>()
@@ -1721,11 +1724,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         widgetHiddenBeforeSetup = nil
     }
 
-    /// Signed out: no board may keep showing the previous account. Reloading the panel's
-    /// page also drops the page's own copy of the last good data (LAST_OK).
+    /// Signed out: no board, nor the menu bar icon, may keep showing the previous account.
+    /// Reloading the panel's page also drops the page's own copy of the last good data (LAST_OK).
     func clearBoardData() {
         lastJSON = nil
         lastOkJSON = nil
+        boardGeneration += 1
+        menuIcon = MenuIconState()
+        statusItem.button?.image = ringIcon(18, menuIcon)
         loadPage("popover/sprints.html", in: panelWeb)
     }
 
@@ -1813,9 +1819,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
                     error = "Could not save the domain list to \(HOSTS_LIST_PATH); nothing was changed."
                 }
             }
-            // Compared as sets: the block's order (or a hand-made ::1 line) is no reason to
-            // rewrite /etc/hosts when nobody switched anything.
-            if list == result.list, Set(result.local) != Set(block ?? []) {
+            // Opening the tab only reads: a status never writes /etc/hosts or refreshes Chrome,
+            // whatever the block holds. Compared as sets: the block's order (or a hand-made ::1
+            // line) is no reason to rewrite /etc/hosts when nobody switched anything.
+            if body["status"] == nil, list == result.list, Set(result.local) != Set(block ?? []) {
                 if let failed = writeHostsBlock(result.local, path: HOSTS_PATH, backupDir: HOSTS_BACKUP_DIR) {
                     error = failed
                     // Keep the list in step with the block that stayed as it was.
@@ -2381,12 +2388,21 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         // running fetch (manualRefreshPending).
         guard !fetchInFlight else { return }
         fetchInFlight = true
+        let generation = boardGeneration
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            // Queued after any push() below, so the flag clears once its result is handled.
-            defer { DispatchQueue.main.async { self.fetchInFlight = false } }
+            // Queued after any push() below, so the flag clears once its result is handled. When
+            // the account left while it ran, push() dropped the result and the board now signed
+            // in gets its own fetch instead of waiting for the timer.
+            defer {
+                DispatchQueue.main.async {
+                    self.fetchInFlight = false
+                    if generation != self.boardGeneration { self.reload() }
+                }
+            }
             guard let node = NODE else {
-                self.push(#"{"ok":false,"error":"node not found — looked in /opt/homebrew/bin, /usr/local/bin and /usr/bin"}"#)
+                self.push(#"{"ok":false,"error":"node not found — looked in /opt/homebrew/bin, /usr/local/bin and /usr/bin"}"#,
+                          for: generation)
                 return
             }
             // Build the payload BEFORE STARTING the child process. In OAuth mode this
@@ -2424,7 +2440,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             p.standardOutput = pipe
             p.standardError = FileHandle.nullDevice
             do { try p.run() } catch {
-                self.push(#"{"ok":false,"error":"could not run fetch.mjs: \#(error)"}"#)
+                self.push(#"{"ok":false,"error":"could not run fetch.mjs: \#(error)"}"#, for: generation)
                 return
             }
             // Tokens go to stdin, NOT argv: argv would show up in `ps` output.
@@ -2437,7 +2453,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             p.waitUntilExit()
             let out = String(data: data, encoding: .utf8) ?? ""
             dbg("fetch output (\(out.count) bytes): \(out.prefix(240))")
-            self.push(out.isEmpty ? #"{"ok":false,"error":"fetch.mjs produced no output"}"# : out)
+            self.push(out.isEmpty ? #"{"ok":false,"error":"fetch.mjs produced no output"}"# : out, for: generation)
         }
     }
 
@@ -2453,7 +2469,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
     }
 
-    func push(_ json: String) {
+    func push(_ json: String, for generation: Int) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
 
@@ -2463,6 +2479,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             // conflicts, so one dropped here would never notify.
             self.notifyFromResult(obj, ok: ok)
             if self.setupBlocksFetch { return }
+            if generation != self.boardGeneration { return }
             if ok { self.retryCount = 0; self.retryTimer?.invalidate() } else { self.scheduleRetry() }
 
             self.lastJSON = json

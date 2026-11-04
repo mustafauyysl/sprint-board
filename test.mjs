@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -3406,6 +3407,26 @@ test("menu bar icon: it is redrawn from every fetch result", () => {
   assert.match(swiftSource(src, "ringIcon"), /img\.isTemplate = true/);
 });
 
+test("menu bar icon: signing out resets it, so it never shows the account that left", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(methodSource(src, "clearBoardData"), /menuIcon = MenuIconState\(\)\n\s*statusItem\.button\?\.image = ringIcon\(18, menuIcon\)/);
+});
+
+test("refresh: a fetch that ran while the account left is dropped, and the account now signed in gets its own", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(methodSource(src, "clearBoardData"), /boardGeneration \+= 1/);
+  const reload = methodSource(src, "reload");
+  assert.match(reload, /fetchInFlight = true\n\s*let generation = boardGeneration/);
+  // Every result carries the generation its fetch started in.
+  assert.equal((reload.match(/self\.push\(/g) || []).length, 3);
+  assert.equal((reload.match(/for: generation\)/g) || []).length, 3);
+  assert.match(reload, /self\.fetchInFlight = false\n\s*if generation != self\.boardGeneration \{ self\.reload\(\) \}/);
+  // Such a result reaches no board and not the icon.
+  const push = methodSource(src, "push");
+  assert.match(push, /if generation != self\.boardGeneration \{ return \}/);
+  assert.ok(push.indexOf("generation != self.boardGeneration") < push.indexOf("self.lastJSON = json"));
+});
+
 test("settings: while the user browses Settings the panel keeps refreshing; a setup screen that opened itself stops it", () => {
   const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   assert.match(src, /var setupBlocksFetch: Bool \{ onSetupScreen && !browsingSettings \}/);
@@ -3571,6 +3592,28 @@ test("Hosts tab: rows as tall as the switch, 4 px apart; a local one fades from 
   assert.match(page, /\.tag \{[^}]*font-size: 11px;[^}]*background: rgba\(255,255,255,\.1\);/);
 });
 
+test("Hosts tab: opening the tab only reads /etc/hosts; only a change writes it and refreshes Chrome", () => {
+  const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const message = methodSource(swift, "hostsMessage");
+  assert.match(message, /if body\["status"\] == nil, list == result\.list, Set\(result\.local\) != Set\(block \?\? \[\]\) \{/);
+  // The Chrome refresh rides only on that write.
+  assert.equal((message.match(/scheduleChromeRefresh\(\)/g) || []).length, 1);
+  assert.ok(message.indexOf(`if body["status"] == nil,`) < message.indexOf("scheduleChromeRefresh()"));
+  // Showing the tab asks for a status and nothing else.
+  assert.match(methodSource(swift, "selectPanelTab"), /self\.hostsMessage\(\["status": true\]\)/);
+});
+
+test("Hosts tab: nothing is redrawn and no key acts while a reply is on its way, so a comma-separated add counts only Swift's replies", () => {
+  const page = readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8");
+  const line = page.match(/^ *const redraw = .*$/m)[0];
+  assert.match(line, /const redraw = \(\) => \{ if \(last && !busy\) draw\(last\); \};/);
+  assert.match(page, /card\.addEventListener\("keydown", \(e\) => \{\n\s*if \(busy\) return;/);
+  assert.match(page, /document\.addEventListener\("keydown", \(e\) => \{\n\s*if \(busy \|\| e\.key !== "Escape"\) return;/);
+  // draw takes its state for the reply, so only redraw and Swift's reply (sbHosts) call it.
+  const callers = page.split("\n").filter((l) => /(^|[^\w.])draw\(/.test(l)).map((l) => l.trim());
+  assert.deepEqual(callers, ["function draw(s) {", line.trim(), "draw(s);"]);
+});
+
 test("Hosts tab: a gear opens Settings, and the back arrow returns to Hosts", () => {
   const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   assert.match(methodSource(swift, "hostsMessage"), /if body\["settings"\] != nil \{\n\s*showPanelSettings\(\)\n\s*return\n\s*\}/);
@@ -3634,4 +3677,349 @@ test("panel tabs: neither page shows a scroll bar, so a tab switch or an opened 
     assert.match(page, /html, body \{[^}]*scrollbar-width: none; \}\n\s*html::-webkit-scrollbar, body::-webkit-scrollbar \{ display: none; \}/);
   }
   assert.match(readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8"), /html, body \{ scrollbar-width: none; \}\n\s*html::-webkit-scrollbar, body::-webkit-scrollbar \{ display: none; \}/);
+});
+
+test("real run: the config's goal stages and name overrides reach the goal band", () => {
+  const stages = [{ name: "Anything", atRisk: 1, critical: null, statuses: ["In Progress"] }];
+  const { out } = runReal({ ...realCfg, sprintGoalTracking: true, goalRiskStages: stages, nameOverrides: { "Demo User": "Dee" } }, realSearches);
+  const { out: plain } = runReal({ ...realCfg, sprintGoalTracking: true }, realSearches);
+  assert.deepEqual(plain.sprintGoal.rows.map((r) => [r.key, r.stage, r.risk, r.ownerShort]), [["DEMO-101", "In Progress", "red", "Demo"]]);
+  assert.deepEqual(out.sprintGoal.rows.map((r) => [r.key, r.stage, r.risk, r.ownerShort]), [["DEMO-101", "Anything", "yellow", "Dee"]]);
+  assert.equal(out.sprintGoal.worst, "yellow");
+});
+
+// App methods that touch /etc/hosts, the keychain and Chrome, compiled with stand-ins: temp
+// files for the paths, an in-memory keychain, fake NSWorkspace and NSRunningApplication, and the
+// page's replies and notes recorded instead of sent. Each run is its own process.
+let appDriver, appDir;
+function appRun(input, env = {}) {
+  if (!appDriver) {
+    const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+    const consts = ["HOSTS_BLOCK_START", "HOSTS_BLOCK_END", "HOSTS_LEGACY_BLOCK_START", "HOSTS_LEGACY_BLOCK_END",
+      "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS", "JIRA_KEYCHAIN", "JIRA_OAUTH_KEYCHAIN"].map((name) => {
+      const line = src.match(new RegExp(`^let ${name} = .*$`, "m"));
+      assert.ok(line, `${name} not found in SprintBoard.swift`);
+      return line[0];
+    });
+    const decls = ["struct HostsGroup", "struct HostsList", "enum TokenResult"].map((header) => swiftDecl(src, header));
+    const funcs = ["hostsName", "hostsEntry", "hostsMarkers", "hostsBlockRange", "managedHosts", "hostsWithBlock",
+      "hostsConflicts", "hostsImportable", "hostsGroupHeader", "hostsImportGroups", "hostsPartnerName", "hostsGroupName",
+      "hostsList", "hostsListJSON", "hostsApply", "hostsStatus", "hostsFileText", "writeHostsBlock", "chromeMissingFlags",
+      "partnerDomainSuffixes", "needsSetup"].map((name) => swiftSource(src, name));
+    const methods = ["readHostsList", "writeHostsList", "hostsMessage", "readHostsText", "hostsPartnerSuffixes", "scheduleChromeRefresh",
+      "openInsecureChrome", "cachedKeychainGet", "forgetCachedTokens", "tokenPayload"].map((name) => methodSource(src, name));
+    const driver = `import Foundation
+let env = ProcessInfo.processInfo.environment
+let HOSTS_PATH = env["SB_HOSTS"] ?? ""
+let HOSTS_LIST_PATH = env["SB_LIST"] ?? ""
+let HOSTS_BACKUP_DIR = env["SB_BACKUP"] ?? ""
+let CONFIG_PATH = env["SB_CONFIG"] ?? ""
+${consts.join("\n")}
+${decls.join("\n")}
+${funcs.join("\n")}
+func dbg(_ s: String) {}
+
+// The keychain: items by service and account. A denied item exists but its secret is not handed
+// over (Deny in macOS's dialog). Secret reads are counted, and one can run a step while it is under way.
+var keychainItems: [String: String] = [:]
+var deniedItems: Set<String> = []
+var secretReads = 0
+var duringRead: (() -> Void)?
+func keychainGet(service: String, account: String) -> String? {
+    secretReads += 1
+    let key = service + "\\n" + account
+    let value = deniedItems.contains(key) ? nil : keychainItems[key]
+    let step = duringRead
+    duringRead = nil
+    step?()
+    return value
+}
+func keychainHas(service: String, account: String) -> Bool { keychainItems[service + "\\n" + account] != nil }
+
+final class NSRunningApplication {
+    static var running: [NSRunningApplication] = []
+    let processIdentifier: Int32
+    init(_ pid: Int32) { processIdentifier = pid }
+    static func runningApplications(withBundleIdentifier id: String) -> [NSRunningApplication] { running }
+}
+final class NSWorkspace {
+    final class OpenConfiguration { var arguments: [String] = []; var activates = false }
+    static let shared = NSWorkspace()
+    var installed = true
+    var launches: [[String]] = []
+    func urlForApplication(withBundleIdentifier id: String) -> URL? {
+        installed ? URL(fileURLWithPath: "/Applications/Google Chrome.app") : nil
+    }
+    func openApplication(at url: URL, configuration: OpenConfiguration, completionHandler: @escaping (Any?, Error?) -> Void) {
+        launches.append(configuration.arguments)
+        completionHandler(nil, nil)
+    }
+}
+
+final class App {
+    let hostsQueue = DispatchQueue(label: "test.hosts")
+    let chromeQueue = DispatchQueue(label: "test.chrome")
+    var chromeRefresh: DispatchWorkItem?
+    var keychainCache: [String: String] = [:]
+    var keychainCacheGeneration = 0
+    let keychainCacheLock = NSLock()
+    var replies: [[String: Any]] = []
+    var notes: [Any] = []
+    var chromeRefreshes = 0
+    func replyHosts(_ state: [String: Any]) { replies.append(state) }
+    func showPanelSettings() {}
+    func showChromeNote(_ note: String?) { notes.append(note.map { $0 as Any } ?? NSNull()) }
+    func refreshChrome() { chromeRefreshes += 1 }
+    func currentJiraAccessToken(email: String) -> TokenResult { .needsLogin }
+${methods.join("\n")}
+}
+
+func settle(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+func waitUntil(_ done: () -> Bool) {
+    let end = Date().addingTimeInterval(2)
+    while !done(), Date() < end { settle(0.01) }
+}
+func setItems(_ items: [[String: Any]]) {
+    keychainItems = [:]
+    deniedItems = []
+    for item in items {
+        let key = (item["service"] as! String) + "\\n" + (item["account"] as! String)
+        keychainItems[key] = item["value"] as? String ?? ""
+        if item["denied"] as? Bool == true { deniedItems.insert(key) }
+    }
+}
+func writeConfig(_ config: Any?) {
+    if let config, !(config is NSNull) {
+        FileManager.default.createFile(atPath: CONFIG_PATH, contents: try! JSONSerialization.data(withJSONObject: config))
+    } else {
+        try? FileManager.default.removeItem(atPath: CONFIG_PATH)
+    }
+}
+let input = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String: Any]
+let app = App()
+var out: [String: Any] = [:]
+switch input["op"] as! String {
+case "hosts":
+    app.hostsMessage(input["body"] as! [String: Any])
+    app.hostsQueue.sync {}
+    out = ["reply": app.replies.last ?? [:]]
+case "keychain":
+    let key = "svc\\nada@example.invalid"
+    var values: [Any] = []
+    for step in input["steps"] as! [[String: Any]] {
+        if let value = step["set"] as? String { keychainItems[key] = value }
+        if step["forget"] != nil { app.forgetCachedTokens() }
+        if let next = step["forgetDuringRead"] as? String {
+            duringRead = { app.forgetCachedTokens(); keychainItems[key] = next }
+        }
+        if step["get"] != nil || step["forgetDuringRead"] != nil {
+            values.append(app.cachedKeychainGet(service: "svc", account: "ada@example.invalid").map { $0 as Any } ?? NSNull())
+        }
+    }
+    out = ["values": values, "reads": secretReads]
+case "payload":
+    writeConfig(input["config"])
+    setItems(input["items"] as! [[String: Any]])
+    out = ["payload": try! JSONSerialization.jsonObject(with: app.tokenPayload())]
+case "needsSetup":
+    var results: [Any] = []
+    for c in input["cases"] as! [[String: Any]] {
+        writeConfig(c["config"])
+        setItems(c["items"] as? [[String: Any]] ?? [])
+        results.append(needsSetup())
+    }
+    out = ["needsSetup": results, "reads": secretReads]
+case "openChrome":
+    var results: [Any] = []
+    for c in input["cases"] as! [[String: Any]] {
+        NSRunningApplication.running = (c["pid"] as? Int).map { [NSRunningApplication(Int32($0))] } ?? []
+        NSWorkspace.shared.installed = c["installed"] as? Bool ?? true
+        NSWorkspace.shared.launches = []
+        app.notes = []
+        app.openInsecureChrome()
+        waitUntil { !app.notes.isEmpty }
+        results.append(["launches": NSWorkspace.shared.launches, "notes": app.notes])
+    }
+    out = ["results": results]
+case "chromeBurst":
+    app.scheduleChromeRefresh()
+    settle(0.05)
+    app.scheduleChromeRefresh()
+    waitUntil { app.chromeRefreshes >= 1 }
+    // Long enough for a refresh the second switch failed to cancel to run too.
+    settle(0.15)
+    let afterBurst = app.chromeRefreshes
+    app.scheduleChromeRefresh()
+    waitUntil { app.chromeRefreshes >= 2 }
+    out = ["refreshes": [afterBurst, app.chromeRefreshes]]
+default:
+    break
+}
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: out))
+`;
+    appDir = mkdtempSync(join(tmpdir(), "sprint-board-app-"));
+    process.on("exit", () => rmSync(appDir, { recursive: true, force: true }));
+    writeFileSync(join(appDir, "main.swift"), driver);
+    execFileSync("swiftc", [join(appDir, "main.swift"), "-o", join(appDir, "app")], { stdio: "pipe" });
+    appDriver = join(appDir, "app");
+  }
+  return JSON.parse(execFileSync(appDriver, { input: JSON.stringify(input),
+    env: { ...process.env, SB_CONFIG: join(appDir, "config.json"), ...env } }));
+}
+
+// One Hosts message on temp files: /etc/hosts, the saved list (in a folder of its own, so it can
+// be made read-only) and the backups.
+function hostsMessageRun(body, { hosts, list = JSON.stringify(LIST), lockHosts = false, lockList = false }) {
+  const dir = mkdtempSync(join(tmpdir(), "sprint-board-message-"));
+  const listDir = join(dir, "list");
+  const env = { SB_HOSTS: join(dir, "hosts"), SB_LIST: join(listDir, "hosts.json"), SB_BACKUP: join(dir, "backup") };
+  mkdirSync(listDir);
+  writeFileSync(env.SB_HOSTS, hosts);
+  writeFileSync(env.SB_LIST, list);
+  if (lockHosts) chmodSync(env.SB_HOSTS, 0o444);
+  if (lockList) chmodSync(listDir, 0o555);
+  try {
+    const { reply } = appRun({ op: "hosts", body }, env);
+    return { reply, hosts: readFileSync(env.SB_HOSTS), list: readFileSync(env.SB_LIST, "utf8") };
+  } finally {
+    chmodSync(listDir, 0o755);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const localDomains = (reply) => reply.domains.filter((d) => d.local).map((d) => d.name);
+
+test("Hosts message: when /etc/hosts cannot be written, the saved list is rolled back and the error is shown", { skip: !swiftAvailable }, () => {
+  const hosts = withBlock(SAMPLE_HOSTS, ["shop.example.test"]);
+  const r = hostsMessageRun({ remove: "shop.example.test" }, { hosts, lockHosts: true });
+  assert.match(r.reply.error, /is not writable by your user/);
+  assert.deepEqual(JSON.parse(r.list), LIST);
+  assert.deepEqual(r.hosts, Buffer.from(hosts));
+  assert.deepEqual(localDomains(r.reply), ["shop.example.test"]);
+});
+
+test("Hosts message: when the domain list cannot be saved, /etc/hosts is not written", { skip: !swiftAvailable }, () => {
+  const hosts = withBlock(SAMPLE_HOSTS, ["shop.example.test"]);
+  const r = hostsMessageRun({ remove: "shop.example.test" }, { hosts, lockList: true });
+  assert.match(r.reply.error, /^Could not save the domain list/);
+  assert.deepEqual(JSON.parse(r.list), LIST);
+  assert.deepEqual(r.hosts, Buffer.from(hosts));
+  assert.deepEqual(localDomains(r.reply), ["shop.example.test"]);
+});
+
+test("Hosts message: an /etc/hosts that is not text is shown as unreadable and nothing is applied", { skip: !swiftAvailable }, () => {
+  const bytes = Buffer.from([0xff, 0xfe, 0x00, 0x41]);
+  const r = hostsMessageRun({ add: "new.example.test" }, { hosts: bytes });
+  assert.equal(r.reply.mode, "unreadable");
+  assert.match(r.reply.error, /^Could not read \/etc\/hosts as text/);
+  assert.equal(r.list, JSON.stringify(LIST));
+  assert.deepEqual(r.hosts, bytes);
+});
+
+test("Hosts message: a domain list that does not parse is left as it is", { skip: !swiftAvailable }, () => {
+  const hosts = withBlock(SAMPLE_HOSTS, ["shop.example.test"]);
+  const r = hostsMessageRun({ add: "new.example.test" }, { hosts, list: "{not json" });
+  assert.match(r.reply.error, /^Could not read the domain list/);
+  assert.equal(r.list, "{not json");
+  assert.deepEqual(r.hosts, Buffer.from(hosts));
+});
+
+test("Hosts message: with a damaged block only what leaves the block alone runs", { skip: !swiftAvailable }, () => {
+  const damaged = `${SAMPLE_HOSTS}${BLOCK_START}\n127.0.0.1 shop.example.test\n`;
+  for (const body of [{ remove: "shop.example.test" }, { setMode: "prod", names: ["shop.example.test"] }, { groupDeleteWithDomains: "Shop" }]) {
+    const r = hostsMessageRun(body, { hosts: damaged });
+    assert.match(r.reply.error, /block in \/etc\/hosts is damaged/, JSON.stringify(body));
+    assert.equal(r.list, JSON.stringify(LIST), JSON.stringify(body));
+    assert.deepEqual(r.hosts, Buffer.from(damaged));
+  }
+  const added = hostsMessageRun({ add: "new.example.test" }, { hosts: damaged });
+  assert.equal(added.reply.error ?? null, null);
+  assert.equal(added.reply.mode, "damaged");
+  assert.ok(JSON.parse(added.list).domains.includes("new.example.test"));
+  assert.deepEqual(added.hosts, Buffer.from(damaged));
+  assert.equal(hostsMessageRun({ status: true }, { hosts: damaged }).reply.error ?? null, null);
+});
+
+test("token cache: an empty read is not kept, and a read under way when the tokens are forgotten keeps nothing", { skip: !swiftAvailable }, () => {
+  const out = appRun({ op: "keychain", steps: [
+    { get: true },
+    { set: "token-1" }, { get: true }, { get: true },
+    { forget: true }, { set: "token-2" }, { get: true },
+    { forget: true }, { forgetDuringRead: "token-3" },
+    { get: true },
+  ] });
+  assert.deepEqual(out.values, [null, "token-1", "token-1", "token-2", "token-2", "token-3"]);
+  // The empty read, token-1 once, token-2 twice (once per forget) and token-3.
+  assert.equal(out.reads, 5);
+});
+
+test("token cache: Disconnect and a new token both forget the cached tokens", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const disconnect = methodSource(src, "disconnect");
+  assert.ok(disconnect.indexOf("forgetCachedTokens()") > disconnect.indexOf("keychainDelete(service: JIRA_OAUTH_KEYCHAIN"));
+  assert.ok(disconnect.indexOf("forgetCachedTokens()") < disconnect.indexOf("clearBoardData()"));
+  const login = methodSource(src, "finishTokenLogin");
+  const saved = login.indexOf("keychainSet(service: JIRA_TOKEN_KEYCHAIN");
+  assert.ok(saved >= 0 && login.indexOf("forgetCachedTokens()") > saved);
+  assert.ok(login.indexOf("forgetCachedTokens()") < login.indexOf("self.showBoard()"));
+});
+
+test("token payload: a token the keychain will not hand over is told apart from a missing one", { skip: !swiftAvailable }, () => {
+  const config = { email: "ada@example.invalid", tokensOwnedByApp: true };
+  const item = { service: "sprint-board-jira", account: "ada@example.invalid" };
+  const payload = (items) => appRun({ op: "payload", config, items }).payload;
+  assert.deepEqual(payload([{ ...item, value: "demo-token" }]), { jiraToken: "demo-token" });
+  assert.deepEqual(payload([{ ...item, value: "demo-token", denied: true }]), { jiraAuthState: "tokenDenied" });
+  assert.deepEqual(payload([]), { jiraAuthState: "tokenMissing" });
+  // Both stop the refresh before fetch.mjs runs; only a denied read offers Back to board.
+  const reload = methodSource(readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8"), "reload");
+  assert.match(reload, /case "tokenMissing":\n\s*self\.requireLogin\("[^"]+"\)\n\s*return/);
+  assert.match(reload, /case "tokenDenied":\n\s*self\.requireLogin\("[^"]+",\n\s*canGoBack: true\)\n\s*return/);
+});
+
+test("needsSetup: tells whether someone is signed in without reading a secret", { skip: !swiftAvailable }, () => {
+  const email = "ada@example.invalid";
+  const has = (service, extra = {}) => [{ service, account: email, value: "x", ...extra }];
+  const cases = [
+    [null, [], true],
+    [{ email: "you@company.com" }, [{ service: "sprint-board-jira", account: "you@company.com", value: "x" }], true],
+    [{ email }, has("sprint-board-jira"), false],
+    [{ email }, [], true],
+    [{ email }, has("sprint-board-jira", { denied: true }), false],
+    [{ email, keychainService: "custom-service" }, has("custom-service"), false],
+    [{ email, keychainService: "custom-service" }, has("sprint-board-jira"), true],
+    [{ email, authMode: "oauth" }, has("sprint-board-jira-oauth"), false],
+    [{ email, authMode: "oauth" }, has("sprint-board-jira"), true],
+  ];
+  const out = appRun({ op: "needsSetup", cases: cases.map(([config, items]) => ({ config, items })) });
+  assert.deepEqual(out.needsSetup, cases.map((c) => c[2]));
+  assert.equal(out.reads, 0, "no secret is read, so macOS shows no permission dialog");
+});
+
+test("Open Insecure Chrome: a Chrome running without the flags is left alone; otherwise Chrome starts with them", { skip: !swiftAvailable }, async () => {
+  const flags = hostsOne({ op: "insecureFlags" });
+  const idle = "setInterval(() => {}, 1000)";
+  const plain = spawn(process.execPath, ["-e", idle], { stdio: "ignore" });
+  const flagged = spawn(process.execPath, ["-e", idle, "--", ...flags], { stdio: "ignore" });
+  try {
+    await Promise.all([once(plain, "spawn"), once(flagged, "spawn")]);
+    const gone = spawnSync("/usr/bin/true").pid;
+    const [notRunning, withoutFlags, withFlags, quit, missing] = appRun({ op: "openChrome", cases: [
+      {}, { pid: plain.pid }, { pid: flagged.pid }, { pid: gone }, { installed: false },
+    ] }).results;
+    assert.deepEqual(notRunning, { launches: [flags], notes: [null] });
+    assert.deepEqual(withoutFlags.launches, []);
+    assert.equal(withoutFlags.notes.length, 1);
+    assert.ok(withoutFlags.notes[0].startsWith(`Chrome is already open without ${flags.join(" ")}: quit it (⌘Q)`), withoutFlags.notes[0]);
+    assert.deepEqual(withFlags, { launches: [flags], notes: [null] });
+    // ps answers nothing for a process that is gone: Chrome quit meanwhile, so it starts.
+    assert.deepEqual(quit, { launches: [flags], notes: [null] });
+    assert.deepEqual(missing, { launches: [], notes: ["Google Chrome is not installed."] });
+  } finally {
+    plain.kill();
+    flagged.kill();
+  }
+});
+
+test("Chrome refresh: a burst of switches refreshes Chrome once", { skip: !swiftAvailable }, () => {
+  assert.deepEqual(appRun({ op: "chromeBurst" }).refreshes, [1, 2]);
 });
