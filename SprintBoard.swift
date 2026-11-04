@@ -394,10 +394,10 @@ final class CallbackListener {
 
 // --- /etc/hosts ------------------------------------------------------------
 // The Hosts tab switches domains between local (127.0.0.1) and prod (real DNS), one by one
-// or a filtered group at a time, like the retired Tempest tool. Sprint Board owns ONE marked
-// block in /etc/hosts and never edits a line outside it: a domain is local while its line is
-// in the block. The file is the source of truth for that, so a hand edit is never overridden
-// by remembered state; the saved list only holds the domains and the user's groups.
+// or a filtered group at a time, like iHosts. /etc/hosts is the source of truth: each local
+// domain in the file is a row, an active line is Local, and a line kept as a comment is Prod.
+// A switch keeps the line in its place. Sprint Board's marked block only takes the domains
+// added with +. hosts.json holds the user's groups, nothing else.
 let HOSTS_PATH = "/etc/hosts"
 let HOSTS_BLOCK_START = "# >>> extension manages >>>"
 let HOSTS_BLOCK_END = "# <<< extension manages <<<"
@@ -405,7 +405,11 @@ let HOSTS_BLOCK_END = "# <<< extension manages <<<"
 /// kind of marker is a damaged file); the next write puts it back in place under the markers above.
 let HOSTS_LEGACY_BLOCK_START = "# >>> sprint-board hosts managed >>>"
 let HOSTS_LEGACY_BLOCK_END = "# <<< sprint-board hosts managed <<<"
-/// The domain list, which survives Prod mode. Not config.json: fetch.mjs rewrites that file.
+/// Names macOS keeps for itself. A line that holds one is never shown or changed.
+let HOSTS_SYSTEM_NAMES = Set(["localhost", "localhost.localdomain", "broadcasthost", "ip6-localhost", "ip6-loopback"])
+/// The addresses that make a domain local.
+let HOSTS_LOCAL_ADDRESSES = Set(["127.0.0.1", "::1"])
+/// The user's groups. Not config.json: fetch.mjs rewrites that file.
 let HOSTS_LIST_PATH = ("~/.config/sprint-widget/hosts.json" as NSString).expandingTildeInPath
 let HOSTS_BACKUP_DIR = ("~/.local/state/sprint-widget" as NSString).expandingTildeInPath
 
@@ -463,85 +467,171 @@ func managedHosts(_ text: String) -> [String]? {
     return lines[(m.starts[0] + 1)..<m.ends[0]].flatMap { hostsEntry($0)?.names ?? [] }
 }
 
-/// The file with Sprint Board's block set to `names` — replaced where it is, else appended
-/// at the end; no names (Prod) means no block. Every other byte stays as it was. The names
-/// are validated again here, at the last step before the file. nil when the block is damaged.
-func hostsWithBlock(_ text: String, _ names: [String]) -> String? {
+/// A line that holds local domains: active, or a comment that is clearly a host entry (one "#",
+/// a local address, then only valid names). Names that are not domains stay out of `names`.
+/// nil for any other line, and for a line with a system name.
+func hostsLocalLine(_ line: String) -> (active: Bool, address: String, names: [String])? {
+    if let entry = hostsEntry(line) {
+        guard HOSTS_LOCAL_ADDRESSES.contains(entry.address),
+              !entry.names.contains(where: HOSTS_SYSTEM_NAMES.contains) else { return nil }
+        let names = entry.names.filter { hostsName($0) == $0 }
+        return names.isEmpty ? nil : (true, entry.address, names)
+    }
+    let start = line.drop(while: { $0 == " " || $0 == "\t" })
+    guard start.hasPrefix("#"), let entry = hostsEntry(String(start.dropFirst())),
+          HOSTS_LOCAL_ADDRESSES.contains(entry.address),
+          entry.names.allSatisfy({ hostsName($0) == $0 && !HOSTS_SYSTEM_NAMES.contains($0) }) else { return nil }
+    return (false, entry.address, entry.names)
+}
+
+/// The line as a comment. Every other byte stays, so hostsUncommented gives it back.
+func hostsCommented(_ line: String) -> String {
+    let start = line.firstIndex { $0 != " " && $0 != "\t" } ?? line.endIndex
+    return String(line[..<start]) + "#" + line[start...]
+}
+
+/// The commented line as an active one: the "#" goes, with the spaces after it.
+func hostsUncommented(_ line: String) -> String {
+    guard let mark = line.firstIndex(of: "#") else { return line }
+    return String(line[..<mark]) + line[line.index(after: mark)...].drop(while: { $0 == " " || $0 == "\t" })
+}
+
+/// The active line without `names`. Every other word keeps the space before it.
+func hostsLineWithout(_ line: String, _ names: Set<String>) -> String {
+    let end = line.firstIndex(of: "#") ?? line.endIndex
+    var words: [Range<String.Index>] = []
+    var i = line.startIndex
+    while i < end {
+        guard !line[i].isWhitespace else { i = line.index(after: i); continue }
+        var j = i
+        while j < end, !line[j].isWhitespace { j = line.index(after: j) }
+        words.append(i..<j)
+        i = j
+    }
+    guard let first = words.first, let last = words.last else { return line }
+    var out = String(line[..<first.upperBound])
+    for k in words.indices.dropFirst() where !names.contains(line[words[k]].lowercased()) {
+        out += line[words[k - 1].upperBound..<words[k].lowerBound] + line[words[k]]
+    }
+    return out + line[last.upperBound...]
+}
+
+/// One domain on the Hosts tab. A domain on several lines is one row: Local when any of them is
+/// active. Removable when all its lines are in the block; the app never deletes any other line.
+struct HostsRow: Equatable {
+    var name: String
+    var local: Bool
+    var removable: Bool
+}
+
+/// The rows of a hosts file, in file order.
+func hostsRows(_ text: String) -> [HostsRow] {
+    let lines = text.components(separatedBy: "\n")
+    let block = managedHosts(text) == nil ? nil : hostsBlockRange(lines)
+    var rows: [HostsRow] = []
+    var seen: [String: Int] = [:]
+    for i in lines.indices {
+        guard let entry = hostsLocalLine(lines[i]) else { continue }
+        let inBlock = block?.contains(i) == true
+        for name in entry.names {
+            if let row = seen[name] {
+                rows[row].local = rows[row].local || entry.active
+                rows[row].removable = rows[row].removable && inBlock
+            } else {
+                seen[name] = rows.count
+                rows.append(HostsRow(name: name, local: entry.active, removable: inBlock))
+            }
+        }
+    }
+    return rows
+}
+
+/// The file with `names` switched. Prod turns off every active line of a name; Local turns on one
+/// commented line of a name that has no active line. A line turns in its place. When other names
+/// share it, the line keeps them as they are and the switched names go on a new line right below.
+func hostsSwitched(_ text: String, _ names: Set<String>, local: Bool) -> String {
+    let lines = text.components(separatedBy: "\n")
+    var wanted = names
+    if local { wanted.subtract(hostsRows(text).filter(\.local).map(\.name)) }
+    var out: [String] = []
+    for line in lines {
+        guard let entry = hostsLocalLine(line), entry.active != local else { out.append(line); continue }
+        let hits = entry.names.filter(wanted.contains)
+        guard !hits.isEmpty else { out.append(line); continue }
+        if local { wanted.subtract(hits) }
+        let active = local ? hostsUncommented(line) : line
+        let rest = hostsLineWithout(active, Set(hits))
+        guard hostsEntry(rest) != nil else {
+            out.append(local ? active : hostsCommented(line))
+            continue
+        }
+        let moved = "\(entry.address)\t\(hits.joined(separator: " "))"
+        out += local ? [hostsCommented(rest), moved] : [rest, "#\(moved)"]
+    }
+    return out.joined(separator: "\n")
+}
+
+/// The file with new domains in Sprint Board's block, in Prod; the block is made at the end when
+/// there is none, and an old block takes the current markers. A name already in the file is left
+/// out. The names are validated again here, at the last step before the file. nil when the block
+/// is damaged.
+func hostsAdded(_ text: String, _ names: [String]) -> String? {
     guard managedHosts(text) != nil else { return nil }
-    var seen = Set<String>()
+    var seen = Set(hostsRows(text).map(\.name))
     let clean = names.compactMap(hostsName).filter { seen.insert($0).inserted }
-    let block = clean.isEmpty ? [] : [HOSTS_BLOCK_START] + clean.map { "127.0.0.1\t\($0)" } + [HOSTS_BLOCK_END]
+    guard !clean.isEmpty else { return text }
+    let entries = clean.map { "#127.0.0.1\t\($0)" }
     var lines = text.components(separatedBy: "\n")
     if let range = hostsBlockRange(lines) {
-        lines.replaceSubrange(range, with: block)
-    } else if !block.isEmpty {
+        let held = Array(lines[(range.lowerBound + 1)..<range.upperBound])
+        lines.replaceSubrange(range, with: [HOSTS_BLOCK_START] + held + entries + [HOSTS_BLOCK_END])
+    } else {
         // Appended after the last line, keeping the file's final newline if it had one, so
         // removing the block later gives back exactly the original bytes.
         let finalNewline = lines.last == ""
         if finalNewline { lines.removeLast() }
-        lines += block + (finalNewline ? [""] : [])
+        lines += [HOSTS_BLOCK_START] + entries + [HOSTS_BLOCK_END] + (finalNewline ? [""] : [])
     }
     return lines.joined(separator: "\n")
 }
 
-/// Active lines OUTSIDE the block that map a listed domain, to any address. Those domains stay
-/// pinned there even in Prod; Sprint Board does not touch them, it can only point them out.
-/// One entry per line: the 1-based line number, its address and the listed names on it.
-func hostsConflicts(_ text: String, _ names: [String]) -> [[String: Any]] {
-    let lines = text.components(separatedBy: "\n")
-    guard managedHosts(text) != nil else { return [] }
-    let block = hostsBlockRange(lines)
-    let listed = Set(names)
-    return lines.indices.compactMap { i -> [String: Any]? in
-        guard block?.contains(i) != true, let entry = hostsEntry(lines[i]) else { return nil }
-        let hits = entry.names.filter { listed.contains($0) }
-        return hits.isEmpty ? nil : ["line": i + 1, "address": entry.address, "names": hits]
+/// The file with `names` gone from Sprint Board's block; a block left empty goes too. Lines
+/// outside the block stay. nil when the block is damaged.
+func hostsRemoved(_ text: String, _ names: [String]) -> String? {
+    guard managedHosts(text) != nil else { return nil }
+    var lines = text.components(separatedBy: "\n")
+    guard !names.isEmpty, let range = hostsBlockRange(lines) else { return text }
+    let gone = Set(names)
+    var held: [String] = []
+    for line in lines[(range.lowerBound + 1)..<range.upperBound] {
+        guard let entry = hostsLocalLine(line), entry.names.contains(where: gone.contains) else {
+            held.append(line)
+            continue
+        }
+        let rest = entry.active ? hostsLineWithout(line, gone) : hostsCommented(hostsLineWithout(hostsUncommented(line), gone))
+        if hostsLocalLine(rest) != nil { held.append(rest) }
     }
+    let empty = held.allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
+    lines.replaceSubrange(range, with: empty ? [] : [HOSTS_BLOCK_START] + held + [HOSTS_BLOCK_END])
+    return lines.joined(separator: "\n")
 }
 
-/// Valid names on active 127.0.0.1 / ::1 lines outside the block that are not listed yet, in
-/// file order: the hand-kept local entries the list can take over.
-func hostsImportable(_ text: String, _ known: [String]) -> [String] {
-    let lines = text.components(separatedBy: "\n")
-    guard managedHosts(text) != nil else { return [] }
-    let block = hostsBlockRange(lines)
-    var seen = Set(known)
-    return lines.indices.flatMap { i -> [String] in
-        guard block?.contains(i) != true, let entry = hostsEntry(lines[i]),
-              entry.address == "127.0.0.1" || entry.address == "::1" else { return [] }
-        return entry.names.compactMap(hostsName).filter { seen.insert($0).inserted }
-    }
+/// What one Hosts action changes in the file.
+struct HostsEdit: Equatable {
+    var added: [String]
+    var removed: [String]
+    var toLocal: [String]
+    var toProd: [String]
+    var removedLocal = false
+    var isEmpty: Bool { added.isEmpty && removed.isEmpty && toLocal.isEmpty && toProd.isEmpty }
+    /// A new domain starts as a comment, so only these change what a name resolves to.
+    var changesResolution: Bool { !toLocal.isEmpty || !toProd.isEmpty || removedLocal }
 }
 
-/// The group a "# Group - XYZ" line names ("group" in any case, spaces optional), or nil for any
-/// other line or a name hostsGroupName refuses.
-func hostsGroupHeader(_ line: String) -> String? {
-    var s = Substring(line.trimmingCharacters(in: .whitespaces))
-    guard s.hasPrefix("#") else { return nil }
-    s = s.drop(while: { $0 == "#" }).drop(while: { $0 == " " || $0 == "\t" })
-    guard s.lowercased().hasPrefix("group") else { return nil }
-    s = s.dropFirst(5).drop(while: { $0 == " " || $0 == "\t" })
-    guard s.hasPrefix("-") else { return nil }
-    return hostsGroupName(String(s.dropFirst()))
-}
-
-/// The groups "# Group - XYZ" headers give the lines below them, up to the next line that starts
-/// with "#": each name on an active 127.0.0.1 / ::1 line outside the block, with its header's
-/// group. A name keeps the first header that claims it. Used when importing hand-kept entries.
-func hostsImportGroups(_ text: String) -> [String: String] {
-    let lines = text.components(separatedBy: "\n")
-    guard managedHosts(text) != nil else { return [:] }
-    let block = hostsBlockRange(lines)
-    var current: String?
-    var groups: [String: String] = [:]
-    for i in lines.indices {
-        if block?.contains(i) == true { current = nil; continue }
-        if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("#") { current = hostsGroupHeader(lines[i]); continue }
-        guard let g = current, let entry = hostsEntry(lines[i]),
-              entry.address == "127.0.0.1" || entry.address == "::1" else { continue }
-        for name in entry.names.compactMap(hostsName) where groups[name] == nil { groups[name] = g }
-    }
-    return groups
+/// The file after an edit; nil when the block is damaged.
+func hostsEdited(_ text: String, _ edit: HostsEdit) -> String? {
+    guard let next = hostsRemoved(text, edit.removed).flatMap({ hostsAdded($0, edit.added) }) else { return nil }
+    return hostsSwitched(hostsSwitched(next, Set(edit.toLocal), local: true), Set(edit.toProd), local: false)
 }
 
 struct HostsGroup: Equatable {
@@ -549,9 +639,9 @@ struct HostsGroup: Equatable {
     var domains: [String]
 }
 
-/// The Hosts tab's saved list: every known domain in order, and the user's named groups,
-/// which only name subsets of `domains` (a domain may be in several). Whether a domain is
-/// local is not stored here: it is read from /etc/hosts.
+/// The domains of the file in order, read from /etc/hosts on every load and never saved, and the
+/// user's named groups, which hosts.json keeps. A domain may be in several groups. A group may
+/// name a domain that is not in the file now.
 struct HostsList: Equatable {
     var domains: [String] = []
     var groups: [HostsGroup] = []
@@ -594,37 +684,40 @@ func hostsGroupName(_ raw: String) -> String? {
 }
 
 /// The list from hosts.json; nil when the file's shape is wrong anywhere — a group of the wrong
-/// type is not dropped quietly, or the next save would lose it for good. A file from before
-/// groups ({"domains": [...]} only) reads as a list with no groups. Invalid or repeated values
-/// are dropped, and a group can only name domains that are in the list.
+/// type is not dropped quietly, or the next save would lose it for good. Invalid or repeated
+/// values are dropped. A file from before /etc/hosts became the source of truth also has
+/// "domains": a group then keeps only domains in it, as that file promised.
 func hostsList(fromJSON object: Any?) -> HostsList? {
-    guard let json = object as? [String: Any], let raw = json["domains"] as? [String] else { return nil }
+    guard let json = object as? [String: Any], json["groups"] != nil || json["domains"] != nil else { return nil }
+    let raw = json["domains"] as? [String]
+    guard raw != nil || json["domains"] == nil else { return nil }
     let rawGroups = json["groups"] ?? [[String: Any]]()
     guard let groupObjects = rawGroups as? [[String: Any]],
           groupObjects.allSatisfy({ $0["name"] is String && ($0["domains"] == nil || $0["domains"] is [String]) })
     else { return nil }
     var seen = Set<String>()
-    let domains = raw.compactMap(hostsName).filter { seen.insert($0).inserted }
+    let domains = (raw ?? []).compactMap(hostsName).filter { seen.insert($0).inserted }
     var names = Set<String>()
     let groups = groupObjects.compactMap { g -> HostsGroup? in
         guard let name = (g["name"] as? String).flatMap(hostsGroupName), names.insert(name.lowercased()).inserted
         else { return nil }
         var members = Set<String>()
         let listed = (g["domains"] as? [String] ?? []).compactMap(hostsName)
-            .filter { seen.contains($0) && members.insert($0).inserted }
+            .filter { (raw == nil || seen.contains($0)) && members.insert($0).inserted }
         return HostsGroup(name: name, domains: listed)
     }
     return HostsList(domains: domains, groups: groups)
 }
 
+/// What hosts.json holds.
 func hostsListJSON(_ list: HostsList) -> [String: Any] {
-    ["domains": list.domains, "groups": list.groups.map { ["name": $0.name, "domains": $0.domains] }]
+    ["groups": list.groups.map { ["name": $0.name, "domains": $0.domains] }]
 }
 
-/// One Hosts tab action applied to the saved list and to the local domains (the block's
-/// names). Returns both — `local` in list order, ready for hostsWithBlock — and an error for
-/// the user. Pure: the caller reads and writes the files. Actions: add (+ group), addMany
-/// (+ group), addPartner (+ group), remove, setMode + names, groupAdd (+ domain), groupRename
+/// One Hosts tab action applied to the list and to the local domains. Returns both — `local` in
+/// list order — and an error for the user. Pure: the caller compares the result with what it
+/// passed in, and writes the files. Actions: add (+ group),
+/// addPartner (+ group), remove, setMode + names, groupAdd (+ domain), groupRename
 /// {from, to}, groupDelete, groupDeleteWithDomains, member {domain, group, on}. Group names
 /// match without regard to case. `partners` are the partner domain suffixes.
 func hostsApply(_ list: HostsList, local: [String], _ action: [String: Any], partners: [String])
@@ -632,11 +725,6 @@ func hostsApply(_ list: HostsList, local: [String], _ action: [String: Any], par
     var list = list
     var localSet = Set(local)
     var error: String?
-    // Names in the block that the list does not know (added by hand, or written before the
-    // list existed) are adopted, so everything that is local shows up in the tab.
-    // Only names the list itself would accept: anything else could not be saved and read back.
-    for name in local where hostsName(name) == name && !list.domains.contains(name) { list.domains.append(name) }
-
     func group(_ name: Any?) -> Int? {
         guard let name = name as? String else { return nil }
         return list.groups.firstIndex { $0.name.lowercased() == name.lowercased() }
@@ -668,15 +756,6 @@ func hostsApply(_ list: HostsList, local: [String], _ action: [String: Any], par
             addDomain(name, into: group(action["group"]))
         } else {
             error = "“\(raw.trimmingCharacters(in: .whitespacesAndNewlines))” is not a domain name."
-        }
-    }
-    if let many = action["addMany"] as? [String] {
-        let headed = action["addManyGroups"] as? [String: String] ?? [:]
-        for name in many.compactMap(hostsName) {
-            let isNew = !list.domains.contains(name)
-            addDomain(name, into: group(action["group"]))
-            // A "# Group - XYZ" header above its line names its group; only a name new to the list.
-            if isNew, let g = headed[name].flatMap(hostsGroupName) { join(name, ensureGroup(g)) }
         }
     }
     if let raw = action["addPartner"] as? String {
@@ -747,27 +826,15 @@ func hostsApply(_ list: HostsList, local: [String], _ action: [String: Any], par
     return (list, list.domains.filter { localSet.contains($0) }, error)
 }
 
-/// What the Hosts tab shows: every domain with its state read from the file and its groups,
-/// the group names, and what needs attention.
+/// What the Hosts tab shows: every local domain in the file with its state and its groups, and
+/// the group names.
 func hostsStatus(_ text: String, _ list: HostsList, writable: Bool) -> [String: Any] {
-    let block = managedHosts(text)
-    let local = Set(block ?? [])
-    let domains: [[String: Any]] = list.domains.map { name in
-        ["name": name, "local": local.contains(name),
-         "groups": list.groups.filter { $0.domains.contains(name) }.map(\.name)]
+    let domains: [[String: Any]] = hostsRows(text).map { row in
+        ["name": row.name, "local": row.local, "removable": row.removable,
+         "groups": list.groups.filter { $0.domains.contains(row.name) }.map(\.name)]
     }
-    guard let block else {
-        return ["mode": "damaged", "domains": domains, "groups": list.groups.map(\.name), "conflicts": [],
-                "importable": [], "writable": writable]
-    }
-    return [
-        "mode": "ok",
-        "domains": domains,
-        "groups": list.groups.map(\.name),
-        "conflicts": hostsConflicts(text, list.domains),
-        "importable": hostsImportable(text, list.domains + block),
-        "writable": writable,
-    ]
+    return ["mode": managedHosts(text) == nil ? "damaged" : "ok", "domains": domains,
+            "groups": list.groups.map(\.name), "writable": writable]
 }
 
 /// The text of a hosts file, and whether it starts with a UTF-8 byte-order mark (some editors
@@ -779,17 +846,16 @@ func hostsFileText(_ data: Data) -> (text: String, bom: Bool)? {
     return (text, bom)
 }
 
-/// Sets Sprint Board's block in the hosts file to `names`; returns an error for the user, or
-/// nil on success. Writes IN PLACE: the user may write /etc/hosts (its owner here) but cannot
+/// Applies an edit to the hosts file; returns an error for the user, or nil on success. Writes IN PLACE: the user may write /etc/hosts (its owner here) but cannot
 /// create files in /etc, so temp-file-and-rename is impossible — and writing in place keeps
 /// the file's owner and mode exactly as they were. The previous contents go to `backupDir`
 /// first: hosts.bak every time, hosts.before-sprint-board once.
-func writeHostsBlock(_ names: [String], path: String, backupDir: String) -> String? {
+func writeHostsFile(_ edit: HostsEdit, path: String, backupDir: String) -> String? {
     let fm = FileManager.default
     guard let data = fm.contents(atPath: path), let file = hostsFileText(data) else {
         return "Could not read \(path) as text; nothing was changed."
     }
-    guard let next = hostsWithBlock(file.text, names) else {
+    guard let next = hostsEdited(file.text, edit) else {
         return "Sprint Board's block in \(path) is damaged (a marker line is missing or repeated). Fix it by hand; nothing was changed."
     }
     if next == file.text { return nil }
@@ -1806,11 +1872,25 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         return (try? d.write(to: URL(fileURLWithPath: HOSTS_LIST_PATH), options: .atomic)) != nil
     }
 
-    /// Messages from popover/hosts.html (see hostsApply for the actions; status and importAll on top).
+    /// hosts.json from before /etc/hosts became the source of truth also held the domains. The
+    /// file goes to the backup folder once, then only the groups stay. When either step fails the
+    /// old file stays as it is: the groups still read from it, and the next load tries again.
+    func migrateHostsList(_ list: HostsList) {
+        guard let data = FileManager.default.contents(atPath: HOSTS_LIST_PATH),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              Set(json.keys) != ["groups"] else { return }
+        try? FileManager.default.createDirectory(atPath: HOSTS_BACKUP_DIR, withIntermediateDirectories: true)
+        let backup = (HOSTS_BACKUP_DIR as NSString).appendingPathComponent("hosts.json.before-file-rows")
+        guard FileManager.default.fileExists(atPath: backup)
+                || (try? data.write(to: URL(fileURLWithPath: backup), options: .atomic)) != nil else { return }
+        _ = writeHostsList(list)
+    }
+
+    /// Messages from popover/hosts.html (see hostsApply for the actions; status on top).
     /// Every action is answered with the full state, its error included, so a failure is never
-    /// silent. The list is saved before the block is written; the block is not written when the
-    /// list could not be saved, and the saved list is rolled back when the block could not be
-    /// written, so the two stay in step.
+    /// silent. hosts.json is saved before /etc/hosts is written; /etc/hosts is not written when the
+    /// groups could not be saved, and they are rolled back when /etc/hosts could not be written,
+    /// so the two stay in step.
     func hostsMessage(_ body: [String: Any]) {
         if body["openChrome"] != nil {
             chromeQueue.async { [weak self] in self?.openInsecureChrome() }
@@ -1819,7 +1899,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         // The page also posts its height here; that is not an action and must not be
         // answered, or every redraw would ask for the next one.
         let actions = ["status", "add", "addPartner", "remove", "setMode", "groupAdd", "groupRename", "groupDelete",
-                       "groupDeleteWithDomains", "member", "importAll"]
+                       "groupDeleteWithDomains", "member"]
         guard body.keys.contains(where: actions.contains) else { return }
         hostsQueue.async { [weak self] in
             guard let self else { return }
@@ -1840,42 +1920,48 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
                 self.replyHosts(state, to: body)
                 return
             }
-            let before = saved ?? HostsList()
-            let block = managedHosts(text)
-            // With a damaged block nobody can tell which domains are local, so nothing that
-            // would change the block may run (the page disables these too).
-            if block == nil, body["remove"] != nil || body["setMode"] != nil || body["groupDeleteWithDomains"] != nil {
+            if let saved { self.migrateHostsList(saved) }
+            let rows = hostsRows(text)
+            let before = HostsList(domains: rows.map(\.name), groups: saved?.groups ?? [])
+            // With a damaged block nothing that writes the file may run (the page disables these too).
+            let writes = ["add", "addPartner", "remove", "setMode", "groupDeleteWithDomains"]
+            if managedHosts(text) == nil, body.keys.contains(where: writes.contains) {
                 var state = hostsStatus(text, before, writable: writable)
                 state["error"] = "Sprint Board's block in /etc/hosts is damaged; fix it by hand first. Nothing was changed."
                 self.replyHosts(state, to: body)
                 return
             }
-            var action = body
-            if body["importAll"] != nil {
-                action["addMany"] = hostsImportable(text, before.domains + (block ?? []))
-                action["addManyGroups"] = hostsImportGroups(text)
+            if let name = body["remove"] as? String, rows.first(where: { $0.name == name })?.removable == false {
+                var state = hostsStatus(text, before, writable: writable)
+                state["error"] = "“\(name)” is outside Sprint Board's block, so it stays. Remove its line from /etc/hosts by hand."
+                self.replyHosts(state, to: body)
+                return
             }
-            let result = hostsApply(before, local: block ?? [], action, partners: self.hostsPartnerSuffixes())
+            let wasLocal = rows.filter(\.local).map(\.name)
+            let result = hostsApply(before, local: wasLocal, body, partners: self.hostsPartnerSuffixes())
             var list = result.list
             var error = result.error
 
-            // Saved on first use too, so names adopted from the block survive their next prod.
-            if list != before || (saved == nil && !list.domains.isEmpty) {
+            if list.groups != before.groups {
                 if !self.writeHostsList(list) {
                     list = before
                     error = "Could not save the domain list to \(HOSTS_LIST_PATH); nothing was changed."
                 }
             }
-            // Opening the tab only reads: a status never writes /etc/hosts or refreshes Chrome,
-            // whatever the block holds. Compared as sets: the block's order (or a hand-made ::1
-            // line) is no reason to rewrite /etc/hosts when nobody switched anything.
-            if body["status"] == nil, list == result.list, Set(result.local) != Set(block ?? []) {
-                if let failed = writeHostsBlock(result.local, path: HOSTS_PATH, backupDir: HOSTS_BACKUP_DIR) {
+            let kept = Set(result.list.domains)
+            let gone = before.domains.filter { !kept.contains($0) }
+            let edit = HostsEdit(added: result.list.domains.filter { !before.domains.contains($0) }, removed: gone,
+                                 toLocal: result.local.filter { !wasLocal.contains($0) },
+                                 toProd: wasLocal.filter { kept.contains($0) && !result.local.contains($0) },
+                                 removedLocal: rows.contains { $0.local && $0.removable && gone.contains($0.name) })
+            // Opening the tab only reads: a status never writes /etc/hosts or refreshes Chrome.
+            if body["status"] == nil, list == result.list, !edit.isEmpty {
+                if let failed = writeHostsFile(edit, path: HOSTS_PATH, backupDir: HOSTS_BACKUP_DIR) {
                     error = failed
-                    // Keep the list in step with the block that stayed as it was.
-                    if list != before, self.writeHostsList(before) { list = before }
+                    // Keep the groups in step with the file that stayed as it was.
+                    if list.groups != before.groups, self.writeHostsList(before) { list = before }
                 } else {
-                    self.scheduleChromeRefresh()
+                    if edit.changesResolution { self.scheduleChromeRefresh() }
                 }
             }
 
@@ -1918,7 +2004,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var chromeRefresh: DispatchWorkItem?
     let chromeQueue = DispatchQueue(label: "sprint-board.chrome")
 
-    /// After Sprint Board's block changed (see chromeRefreshScript for why).
+    /// After a switch changed what a name resolves to (see chromeRefreshScript for why).
     func scheduleChromeRefresh() {
         DispatchQueue.main.async {
             self.chromeRefresh?.cancel()

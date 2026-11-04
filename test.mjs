@@ -2691,19 +2691,23 @@ function hostsRun(ops) {
   if (!hostsDriver) {
     const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
     const consts = ["HOSTS_BLOCK_START", "HOSTS_BLOCK_END", "HOSTS_LEGACY_BLOCK_START", "HOSTS_LEGACY_BLOCK_END",
-      "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS"].map((name) => {
+      "HOSTS_SYSTEM_NAMES", "HOSTS_LOCAL_ADDRESSES", "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS"].map((name) => {
       const line = src.match(new RegExp(`^let ${name} = .*$`, "m"));
       assert.ok(line, `${name} not found in SprintBoard.swift`);
       return line[0];
     });
-    const structs = ["struct HostsGroup", "struct HostsList"].map((header) => swiftDecl(src, header));
-    const funcs = ["hostsName", "hostsEntry", "hostsMarkers", "hostsBlockRange", "managedHosts", "hostsWithBlock",
-      "hostsConflicts", "hostsImportable", "hostsGroupHeader", "hostsImportGroups", "hostsPartnerName", "partnerDomainSuffixes", "hostsGroupName", "hostsList", "hostsListJSON", "hostsApply", "hostsStatus",
-      "hostsFileText", "writeHostsBlock", "chromeRefreshScript", "chromeRefreshNote", "chromeMissingFlags"].map((name) => swiftSource(src, name));
+    const structs = ["struct HostsGroup", "struct HostsList", "struct HostsRow", "struct HostsEdit"].map((header) => swiftDecl(src, header));
+    const funcs = ["hostsName", "hostsEntry", "hostsMarkers", "hostsBlockRange", "managedHosts", "hostsLocalLine", "hostsCommented",
+      "hostsUncommented", "hostsLineWithout", "hostsRows", "hostsSwitched", "hostsAdded", "hostsRemoved", "hostsEdited",
+      "hostsPartnerName", "partnerDomainSuffixes", "hostsGroupName", "hostsList", "hostsListJSON", "hostsApply", "hostsStatus",
+      "hostsFileText", "writeHostsFile", "chromeRefreshScript", "chromeRefreshNote", "chromeMissingFlags"].map((name) => swiftSource(src, name));
     const driver = `import Foundation
 ${consts.join("\n")}
 ${structs.join("\n")}
 ${funcs.join("\n")}
+func listOut(_ list: HostsList) -> [String: Any] {
+    ["domains": list.domains, "groups": list.groups.map { ["name": $0.name, "domains": $0.domains] }]
+}
 let ops = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [[String: Any]]
 let results: [Any] = ops.map { op in
     let text = op["text"] as? String ?? ""
@@ -2711,23 +2715,25 @@ let results: [Any] = ops.map { op in
     switch op["op"] as! String {
     case "name": return hostsName(op["raw"] as! String).map { $0 as Any } ?? NSNull()
     case "managed": return managedHosts(text).map { $0 as Any } ?? NSNull()
-    case "with": return hostsWithBlock(text, names).map { $0 as Any } ?? NSNull()
-    case "conflicts": return hostsConflicts(text, names)
-    case "importable": return hostsImportable(text, names)
+    case "rows": return hostsRows(text).map { ["name": $0.name, "local": $0.local, "removable": $0.removable] }
+    case "switch": return hostsSwitched(text, Set(names), local: op["local"] as! Bool)
+    case "add": return hostsAdded(text, names).map { $0 as Any } ?? NSNull()
+    case "remove": return hostsRemoved(text, names).map { $0 as Any } ?? NSNull()
     case "status":
         return hostsStatus(text, hostsList(fromJSON: op["list"]) ?? HostsList(), writable: op["writable"] as? Bool ?? true)
     case "groupName": return hostsGroupName(op["raw"] as! String).map { $0 as Any } ?? NSNull()
-    case "groupHeader": return hostsGroupHeader(op["raw"] as! String).map { $0 as Any } ?? NSNull()
-    case "importGroups": return hostsImportGroups(text)
     case "partnerName": return hostsPartnerName(op["raw"] as! String).map { $0 as Any } ?? NSNull()
     case "partnerSuffixes": return partnerDomainSuffixes(op["config"] as? [String: Any] ?? [:])
-    case "list": return hostsList(fromJSON: op["json"]).map { hostsListJSON($0) as Any } ?? NSNull()
+    case "list": return hostsList(fromJSON: op["json"]).map { listOut($0) as Any } ?? NSNull()
+    case "saved": return hostsListJSON(hostsList(fromJSON: op["json"])!)
     case "apply":
         let r = hostsApply(hostsList(fromJSON: op["list"])!, local: op["local"] as? [String] ?? [],
                            op["action"] as! [String: Any], partners: op["partners"] as? [String] ?? [])
-        return ["list": hostsListJSON(r.list), "local": r.local, "error": r.error.map { $0 as Any } ?? NSNull()]
+        return ["list": listOut(r.list), "local": r.local, "error": r.error.map { $0 as Any } ?? NSNull()]
     case "write":
-        return writeHostsBlock(names, path: op["path"] as! String, backupDir: op["backupDir"] as! String)
+        let edit = HostsEdit(added: op["added"] as? [String] ?? [], removed: op["removed"] as? [String] ?? [],
+                             toLocal: op["toLocal"] as? [String] ?? [], toProd: op["toProd"] as? [String] ?? [])
+        return writeHostsFile(edit, path: op["path"] as! String, backupDir: op["backupDir"] as! String)
             .map { $0 as Any } ?? NSNull()
     case "chromeScript": return chromeRefreshScript()
     case "missingFlags": return chromeMissingFlags(op["commandLine"] as! String)
@@ -2767,7 +2773,8 @@ const BLOCK_END = "# <<< extension manages <<<";
 // The markers before the rename: files written then still carry them.
 const LEGACY_START = "# >>> sprint-board hosts managed >>>";
 const LEGACY_END = "# <<< sprint-board hosts managed <<<";
-const withBlock = (text, names) => hostsOne({ op: "with", text, names });
+// A file with active lines in the managed block, as a fixture.
+const withBlock = (text, names) => `${text}${BLOCK_START}\n${names.map((name) => `127.0.0.1\t${name}\n`).join("")}${BLOCK_END}\n`;
 
 test("hostsName: a typed domain is normalised to the bare host name", { skip: !swiftAvailable }, () => {
   const cases = {
@@ -2840,75 +2847,62 @@ test("managedHosts: no block is [], a block gives its names, a broken block is n
   assert.deepEqual(out.slice(2), [null, null, null, null]);
 });
 
-test("hostsWithBlock: Local appends the block at the end and leaves every other byte alone", { skip: !swiftAvailable }, () => {
-  assert.equal(withBlock(SAMPLE_HOSTS, ["cdn.example.test"]),
-    `${SAMPLE_HOSTS}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n${BLOCK_END}\n`);
+test("hostsAdded: a new domain goes into a new block at the end, in Prod, and leaves every other byte alone", { skip: !swiftAvailable }, () => {
+  assert.equal(hostsOne({ op: "add", text: SAMPLE_HOSTS, names: ["cdn.example.test"] }),
+    `${SAMPLE_HOSTS}${BLOCK_START}\n#127.0.0.1\tcdn.example.test\n${BLOCK_END}\n`);
 });
 
-test("hostsWithBlock: an existing block is rewritten where it stands", { skip: !swiftAvailable }, () => {
+test("hostsAdded: an existing block takes the new line at its end, where it stands", { skip: !swiftAvailable }, () => {
   const [head, tail] = ["##\n127.0.0.1\tlocalhost\n", "# after the block\n10.0.0.5 pinned.example.test\n"];
   const text = `${head}${BLOCK_START}\n127.0.0.1\told.example.test\n${BLOCK_END}\n${tail}`;
-  assert.equal(withBlock(text, ["cdn.example.test", "api.example.test"]),
-    `${head}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n127.0.0.1\tapi.example.test\n${BLOCK_END}\n${tail}`);
+  assert.equal(hostsOne({ op: "add", text, names: ["cdn.example.test", "api.example.test"] }),
+    `${head}${BLOCK_START}\n127.0.0.1\told.example.test\n#127.0.0.1\tcdn.example.test\n#127.0.0.1\tapi.example.test\n${BLOCK_END}\n${tail}`);
 });
 
-test("hostsWithBlock: Prod removes the block and gives back the original file exactly", { skip: !swiftAvailable }, () => {
-  const local = withBlock(SAMPLE_HOSTS, ["cdn.example.test"]);
-  assert.equal(withBlock(local, []), SAMPLE_HOSTS);
-  assert.equal(withBlock(SAMPLE_HOSTS, []), SAMPLE_HOSTS, "Prod with no block changes nothing");
+test("hostsRemoved: the last line out takes the block with it and gives back the original file exactly", { skip: !swiftAvailable }, () => {
+  const added = hostsOne({ op: "add", text: SAMPLE_HOSTS, names: ["cdn.example.test", "api2.example.test"] });
+  const one = hostsOne({ op: "remove", text: added, names: ["api2.example.test"] });
+  assert.equal(one, `${SAMPLE_HOSTS}${BLOCK_START}\n#127.0.0.1\tcdn.example.test\n${BLOCK_END}\n`);
+  assert.equal(hostsOne({ op: "remove", text: one, names: ["cdn.example.test"] }), SAMPLE_HOSTS);
+  assert.equal(hostsOne({ op: "remove", text: SAMPLE_HOSTS, names: ["app.example.test"] }), SAMPLE_HOSTS, "a line outside the block stays");
 });
 
-test("hostsWithBlock: a file without a final newline also comes back exactly after Prod", { skip: !swiftAvailable }, () => {
+test("hostsRemoved: a file without a final newline also comes back exactly", { skip: !swiftAvailable }, () => {
   const text = "##\n127.0.0.1\tlocalhost";
-  const local = withBlock(text, ["cdn.example.test"]);
-  assert.equal(local, `${text}\n${BLOCK_START}\n127.0.0.1\tcdn.example.test\n${BLOCK_END}`);
-  assert.equal(withBlock(local, []), text);
+  const added = hostsOne({ op: "add", text, names: ["cdn.example.test"] });
+  assert.equal(added, `${text}\n${BLOCK_START}\n#127.0.0.1\tcdn.example.test\n${BLOCK_END}`);
+  assert.equal(hostsOne({ op: "remove", text: added, names: ["cdn.example.test"] }), text);
 });
 
-test("hostsWithBlock: names are checked again and de-duplicated before they are written", { skip: !swiftAvailable }, () => {
-  const out = withBlock(SAMPLE_HOSTS, ["cdn.example.test\n10.0.0.1 evil.example.test", "Cdn.Example.Test", "cdn.example.test"]);
-  assert.equal(out, `${SAMPLE_HOSTS}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n${BLOCK_END}\n`);
+test("hostsAdded: names are checked again and de-duplicated before they are written", { skip: !swiftAvailable }, () => {
+  const out = hostsOne({ op: "add", text: SAMPLE_HOSTS, names: ["cdn.example.test\n10.0.0.1 evil.example.test", "Cdn.Example.Test", "cdn.example.test", "app.example.test"] });
+  assert.equal(out, `${SAMPLE_HOSTS}${BLOCK_START}\n#127.0.0.1\tcdn.example.test\n${BLOCK_END}\n`, "a name already in the file is not added again");
   assert.doesNotMatch(out, /evil/);
 });
 
-test("hostsWithBlock: a broken block is never rewritten", { skip: !swiftAvailable }, () => {
-  assert.equal(withBlock(`${SAMPLE_HOSTS}${BLOCK_START}\n`, ["cdn.example.test"]), null);
+test("hostsAdded, hostsRemoved: a broken block is never rewritten", { skip: !swiftAvailable }, () => {
+  const text = `${SAMPLE_HOSTS}${BLOCK_START}\n`;
+  assert.deepEqual(hostsRun([{ op: "add", text, names: ["cdn.example.test"] }, { op: "remove", text, names: ["cdn.example.test"] }]), [null, null]);
 });
 
-test("hostsConflicts: listed domains still active outside the block are reported with their line", { skip: !swiftAvailable }, () => {
-  const names = ["app.example.test", "pinned.example.test", "old.example.test", "cdn.example.test"];
-  const local = withBlock(SAMPLE_HOSTS, names);
-  // The block's own lines are not conflicts; the commented old.example.test line is not active.
-  assert.deepEqual(hostsOne({ op: "conflicts", text: local, names }), [
-    { line: 7, address: "127.0.0.1", names: ["app.example.test"] },
-    { line: 9, address: "10.0.0.5", names: ["pinned.example.test"] },
-  ]);
-});
-
-test("hostsImportable: hand-kept local entries can be taken over, nothing else", { skip: !swiftAvailable }, () => {
-  // localhost is not a domain, broadcasthost and pinned.example.test do not point at this
-  // machine, old.example.test is commented out.
-  assert.deepEqual(hostsOne({ op: "importable", text: SAMPLE_HOSTS, names: [] }), ["app.example.test", "api.example.test"]);
-  assert.deepEqual(hostsOne({ op: "importable", text: SAMPLE_HOSTS, names: ["api.example.test"] }), ["app.example.test"]);
-  const local = withBlock(SAMPLE_HOSTS, ["cdn.example.test"]);
-  assert.deepEqual(hostsOne({ op: "importable", text: local, names: [] }), ["app.example.test", "api.example.test"],
-    "the block's own names are not offered for import");
-});
-
-test("hostsStatus: each domain's state comes from the file, with its groups", { skip: !swiftAvailable }, () => {
-  const list = { domains: ["cdn.example.test", "api.example.test"], groups: [{ name: "Web", domains: ["cdn.example.test"] }] };
+test("hostsStatus: each row and its state come from the file, with its groups", { skip: !swiftAvailable }, () => {
+  const list = { groups: [{ name: "Web", domains: ["cdn.example.test"] }] };
+  const text = withBlock(SAMPLE_HOSTS, ["cdn.example.test"]);
   const [state, damaged] = hostsRun([
-    { op: "status", text: withBlock(SAMPLE_HOSTS, ["cdn.example.test"]), list },
+    { op: "status", text, list },
     { op: "status", text: `${SAMPLE_HOSTS}${BLOCK_END}\n`, list, writable: false },
   ]);
   assert.equal(state.mode, "ok");
   assert.deepEqual(state.domains, [
-    { name: "cdn.example.test", local: true, groups: ["Web"] },
-    { name: "api.example.test", local: false, groups: [] },
+    { name: "app.example.test", local: true, removable: false, groups: [] },
+    { name: "api.example.test", local: true, removable: false, groups: [] },
+    { name: "old.example.test", local: false, removable: false, groups: [] },
+    { name: "cdn.example.test", local: true, removable: true, groups: ["Web"] },
   ]);
   assert.deepEqual(state.groups, ["Web"]);
   assert.equal(damaged.mode, "damaged");
   assert.equal(damaged.writable, false);
+  assert.ok(!("conflicts" in state) && !("importable" in state), "nothing is left to import");
 });
 
 const LIST = {
@@ -2956,20 +2950,17 @@ test("hostsGroupName: 1 to 40 characters on one line", { skip: !swiftAvailable }
 test("managedHosts: a block under the markers from before the rename is still the managed block", { skip: !swiftAvailable }, () => {
   const old = `${SAMPLE_HOSTS}${LEGACY_START}\n127.0.0.1\tcdn.example.test\n${LEGACY_END}\n`;
   assert.deepEqual(hostsOne({ op: "managed", text: old }), ["cdn.example.test"]);
-  assert.deepEqual(hostsOne({ op: "conflicts", text: old, names: ["cdn.example.test"] }), [], "its lines are not conflicts");
-  assert.deepEqual(hostsOne({ op: "importable", text: old, names: [] }), ["app.example.test", "api.example.test"],
-    "and not importable either");
   const both = `${old}${BLOCK_START}\n127.0.0.1\tapi.example.test\n${BLOCK_END}\n`;
   assert.equal(hostsOne({ op: "managed", text: both }), null, "a block under each kind of marker is a damaged file");
-  assert.equal(withBlock(both, ["cdn.example.test"]), null, "and a damaged file is never written");
+  assert.equal(hostsOne({ op: "add", text: both, names: ["cdn2.example.test"] }), null, "and a damaged file is never written");
 });
 
-test("hostsWithBlock: the next write puts an old block back in place under the current markers", { skip: !swiftAvailable }, () => {
+test("hostsAdded: the next write puts an old block back in place under the current markers", { skip: !swiftAvailable }, () => {
   const head = `${SAMPLE_HOSTS}# before\n`, tail = "# after\n";
   const old = `${head}${LEGACY_START}\n127.0.0.1\tcdn.example.test\n${LEGACY_END}\n${tail}`;
-  assert.equal(withBlock(old, ["cdn.example.test", "api.example.test"]),
-    `${head}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n127.0.0.1\tapi.example.test\n${BLOCK_END}\n${tail}`);
-  assert.equal(withBlock(old, []), `${head}${tail}`, "prod removes the old block as well");
+  assert.equal(hostsOne({ op: "add", text: old, names: ["cdn2.example.test"] }),
+    `${head}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n#127.0.0.1\tcdn2.example.test\n${BLOCK_END}\n${tail}`);
+  assert.equal(hostsOne({ op: "remove", text: old, names: ["cdn.example.test"] }), `${head}${tail}`, "the last line out removes the old block as well");
 });
 
 test("hostsApply: switching names changes only those domains; the rest keep their state", { skip: !swiftAvailable }, () => {
@@ -3031,20 +3022,6 @@ test("hostsApply: a domain joins and leaves groups without changing its state", 
   assert.ok(intoExisting.list.groups[0].domains.includes("shop.example.test"));
 });
 
-test("hostsApply: names already in the block but not in the list are adopted", { skip: !swiftAvailable }, () => {
-  const r = apply({ status: true }, ["handmade.example.test"], { domains: ["a.example.test"], groups: [] });
-  assert.deepEqual(r.list.domains, ["a.example.test", "handmade.example.test"]);
-  assert.deepEqual(r.local, ["handmade.example.test"]);
-  const odd = apply({ status: true }, ["my_app.example.test"], { domains: [], groups: [] });
-  assert.deepEqual(odd.list.domains, [], "a name the list could not read back is not adopted");
-});
-
-test("hostsApply: addMany imports into the selected group", { skip: !swiftAvailable }, () => {
-  const r = apply({ addMany: ["imp.example.test", "nova.example.test", "bad name"], group: "Shop" });
-  assert.deepEqual(r.list.domains.at(-1), "imp.example.test");
-  assert.deepEqual(r.list.groups[1].domains, ["shop.example.test", "shared.example.test", "imp.example.test", "nova.example.test"]);
-});
-
 function withHostsFile(content, mode, fn) {
   const dir = mkdtempSync(join(tmpdir(), "sprint-board-hostsfile-"));
   const path = join(dir, "hosts"), backupDir = join(dir, "state");
@@ -3058,11 +3035,12 @@ function withHostsFile(content, mode, fn) {
   }
 }
 
-test("writeHostsBlock: writes the block in place, keeps owner and mode, and backs the file up first", { skip: !swiftAvailable }, () => {
+test("writeHostsFile: writes in place, keeps owner and mode, and backs the file up first", { skip: !swiftAvailable }, () => {
   withHostsFile(SAMPLE_HOSTS, 0o664, ({ path, backupDir, read }) => {
     const before = statSync(path);
-    assert.equal(hostsOne({ op: "write", path, backupDir, names: ["cdn.example.test"] }), null);
-    assert.equal(read(), withBlock(SAMPLE_HOSTS, ["cdn.example.test"]));
+    const off = SAMPLE_HOSTS.replace("127.0.0.1 app.example.test api.example.test\n", "127.0.0.1 api.example.test\n#127.0.0.1\tapp.example.test\n");
+    assert.equal(hostsOne({ op: "write", path, backupDir, toProd: ["app.example.test"] }), null);
+    assert.equal(read(), off);
     const after = statSync(path);
     // In place: the same file, not a new one renamed over it (/etc is not writable by the user).
     assert.equal(after.ino, before.ino);
@@ -3071,52 +3049,52 @@ test("writeHostsBlock: writes the block in place, keeps owner and mode, and back
     assert.equal(readFileSync(join(backupDir, "hosts.bak"), "utf8"), SAMPLE_HOSTS);
     assert.equal(readFileSync(join(backupDir, "hosts.before-sprint-board"), "utf8"), SAMPLE_HOSTS);
 
-    assert.equal(hostsOne({ op: "write", path, backupDir, names: [] }), null);
-    assert.equal(read(), SAMPLE_HOSTS, "Prod gives back the original file");
-    assert.equal(readFileSync(join(backupDir, "hosts.bak"), "utf8"), withBlock(SAMPLE_HOSTS, ["cdn.example.test"]));
+    assert.equal(hostsOne({ op: "write", path, backupDir, toLocal: ["old.example.test"] }), null);
+    assert.equal(read(), off.replace("#127.0.0.1 old.example.test", "127.0.0.1 old.example.test"));
+    assert.equal(readFileSync(join(backupDir, "hosts.bak"), "utf8"), off);
     assert.equal(readFileSync(join(backupDir, "hosts.before-sprint-board"), "utf8"), SAMPLE_HOSTS,
       "the copy taken before the first change is never overwritten");
   });
 });
 
-test("writeHostsBlock: nothing to change means no write and no backup", { skip: !swiftAvailable }, () => {
+test("writeHostsFile: nothing to change means no write and no backup", { skip: !swiftAvailable }, () => {
   withHostsFile(SAMPLE_HOSTS, 0o644, ({ path, backupDir, read }) => {
-    assert.equal(hostsOne({ op: "write", path, backupDir, names: [] }), null);
+    assert.equal(hostsOne({ op: "write", path, backupDir }), null);
     assert.equal(read(), SAMPLE_HOSTS);
     assert.throws(() => statSync(join(backupDir, "hosts.bak")));
   });
 });
 
-test("writeHostsBlock: a file the user cannot write is reported and left alone", { skip: !swiftAvailable || process.getuid?.() === 0 }, () => {
+test("writeHostsFile: a file the user cannot write is reported and left alone", { skip: !swiftAvailable || process.getuid?.() === 0 }, () => {
   withHostsFile(SAMPLE_HOSTS, 0o444, ({ path, backupDir, read }) => {
-    assert.match(hostsOne({ op: "write", path, backupDir, names: ["cdn.example.test"] }), /not writable/);
+    assert.match(hostsOne({ op: "write", path, backupDir, toProd: ["app.example.test"] }), /not writable/);
     assert.equal(read(), SAMPLE_HOSTS);
   });
 });
 
-test("writeHostsBlock: a broken block is reported and the file left alone", { skip: !swiftAvailable }, () => {
+test("writeHostsFile: a broken block is reported and the file left alone", { skip: !swiftAvailable }, () => {
   const broken = `${SAMPLE_HOSTS}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n`;
   withHostsFile(broken, 0o644, ({ path, backupDir, read }) => {
-    assert.match(hostsOne({ op: "write", path, backupDir, names: [] }), /damaged/);
+    assert.match(hostsOne({ op: "write", path, backupDir, added: ["new.example.test"] }), /damaged/);
     assert.equal(read(), broken);
   });
 });
 
-test("writeHostsBlock: a byte-order mark at the start of the file survives Local and Prod", { skip: !swiftAvailable }, () => {
-  const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(SAMPLE_HOSTS)]);
+test("writeHostsFile: a byte-order mark at the start of the file survives a switch and its way back", { skip: !swiftAvailable }, () => {
+  const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("127.0.0.1 app.example.test\n")]);
   withHostsFile(bytes, 0o644, ({ path, backupDir }) => {
-    assert.equal(hostsOne({ op: "write", path, backupDir, names: ["cdn.example.test"] }), null);
+    assert.equal(hostsOne({ op: "write", path, backupDir, toProd: ["app.example.test"] }), null);
     assert.deepEqual(readFileSync(path).subarray(0, 3), Buffer.from([0xef, 0xbb, 0xbf]));
-    assert.equal(hostsOne({ op: "write", path, backupDir, names: [] }), null);
+    assert.equal(hostsOne({ op: "write", path, backupDir, toLocal: ["app.example.test"] }), null);
     assert.deepEqual(readFileSync(path), bytes);
     assert.deepEqual(readFileSync(join(backupDir, "hosts.before-sprint-board")), bytes, "backups keep the exact bytes");
   });
 });
 
-test("writeHostsBlock: a file that is not UTF-8 is refused, never read as empty", { skip: !swiftAvailable }, () => {
+test("writeHostsFile: a file that is not UTF-8 is refused, never read as empty", { skip: !swiftAvailable }, () => {
   const bytes = Buffer.from("# caf\xe9\n127.0.0.1 localhost\n", "latin1");
   withHostsFile(bytes, 0o644, ({ path, backupDir }) => {
-    assert.match(hostsOne({ op: "write", path, backupDir, names: ["cdn.example.test"] }), /Could not read/);
+    assert.match(hostsOne({ op: "write", path, backupDir, added: ["cdn.example.test"] }), /Could not read/);
     assert.deepEqual(readFileSync(path), bytes);
   });
 });
@@ -3236,10 +3214,13 @@ test("hostsApply: a partner domain added on its own joins the Partners group, ma
     "a 61-character one is listed but is not a partner");
 });
 
-test("hostsApply: only <partner>.<suffix> is a partner domain; addMany groups them too", { skip: !swiftAvailable }, () => {
-  const r = apply({ addMany: ["a.b.panel.example.test", "panel.example.test", "plain.example.test", ...partnerDomains("acme").slice(0, 2)] });
-  assert.deepEqual(r.list.groups.map((g) => g.name), ["NOVA", "Shop", "Partners"]);
-  assert.deepEqual(r.list.groups.at(-1).domains, partnerDomains("acme").slice(0, 2));
+test("hostsApply: only <partner>.<suffix> is a partner domain", { skip: !swiftAvailable }, () => {
+  let r = apply({ add: "a.b.panel.example.test" });
+  r = apply({ add: "panel.example.test" }, [], r.list);
+  r = apply({ add: "plain.example.test" }, [], r.list);
+  assert.deepEqual(r.list.groups.map((g) => g.name), ["NOVA", "Shop"]);
+  for (const name of partnerDomains("acme").slice(0, 2)) r = apply({ add: name }, [], r.list);
+  assert.deepEqual(r.list.groups.at(-1), { name: "Partners", domains: partnerDomains("acme").slice(0, 2) });
 });
 
 test("partnerDomainSuffixes: the config's list as domain names, repeats and non-domains dropped; none without it", { skip: !swiftAvailable }, () => {
@@ -3264,7 +3245,7 @@ test("hostsApply: without partner suffixes no partner is added and no domain joi
 test("Hosts tab: the partner suffixes come from the config with every state; the page offers Add partner only with some", () => {
   const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   assert.match(methodSource(swift, "replyHosts"), /state\["partnerSuffixes"\] = hostsPartnerSuffixes\(\)/);
-  assert.match(methodSource(swift, "hostsMessage"), /hostsApply\(before, local: block \?\? \[\], action, partners: self\.hostsPartnerSuffixes\(\)\)/);
+  assert.match(methodSource(swift, "hostsMessage"), /hostsApply\(before, local: wasLocal, body, partners: self\.hostsPartnerSuffixes\(\)\)/);
   assert.match(methodSource(swift, "hostsPartnerSuffixes"), /CONFIG_PATH[\s\S]*partnerDomainSuffixes\(config\)/);
   const page = readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8");
   assert.match(page, /\$\{canAddPartner \? `<button data-open="partner">\+ Add partner<\/button>` : ""\}/);
@@ -3278,51 +3259,6 @@ test("Hosts tab: the partner suffixes come from the config with every state; the
   assert.equal(labels(null), "");
   assert.deepEqual(JSON.parse(readFileSync(new URL("./config.example.json", import.meta.url), "utf8")).partnerDomainSuffixes, [],
     "off by default: the example is copied into every new config");
-});
-
-test("hostsGroupHeader: a \"# Group - XYZ\" line names XYZ; any other line names nothing", { skip: !swiftAvailable }, () => {
-  const lines = {
-    "# Group - NOVA": "NOVA", "#Group - Billing": "Billing", "# group -  Demo MCP  ": "Demo MCP", "## Group-XYZ": "XYZ",
-    "  # GROUP - A b": "A b", "# Groups - X": null, "# Group X": null, "# Group - ": null, "Group - X": null,
-    [`# Group - ${"x".repeat(41)}`]: null, "# All": null, "127.0.0.1 a.example.test # Group - X": null,
-  };
-  assert.deepEqual(hostsRun(Object.keys(lines).map((raw) => ({ op: "groupHeader", raw }))), Object.values(lines));
-});
-
-test("hostsImportGroups: lines under a header take its group up to the next line that starts with #", { skip: !swiftAvailable }, () => {
-  const text = [
-    SAMPLE_HOSTS.trimEnd(),
-    "# Group - Nova",
-    "127.0.0.1 nova.example.test api.nova.example.test",
-    "",
-    "::1 nova6.example.test",
-    "10.0.0.9 remote.example.test",
-    "#127.0.0.1 off.example.test",
-    "127.0.0.1 after-comment.example.test",
-    "# Group - Shop",
-    "127.0.0.1 shop.example.test   # inline note",
-    "# Group - Again",
-    "127.0.0.1 nova.example.test again.example.test",
-    "# Group - Block",
-    BLOCK_START, "127.0.0.1\tblocked.example.test", BLOCK_END,
-    "127.0.0.1 tail.example.test",
-    "",
-  ].join("\n");
-  assert.deepEqual(hostsOne({ op: "importGroups", text }), {
-    "nova.example.test": "Nova", "api.nova.example.test": "Nova", "nova6.example.test": "Nova",
-    "shop.example.test": "Shop", "again.example.test": "Again",
-  });
-});
-
-test("hostsApply: an import puts new names in their header's group, made when missing, and leaves listed ones alone", { skip: !swiftAvailable }, () => {
-  const r = apply({
-    addMany: ["n1.example.test", "nova.example.test", "n2.example.test", "n3.example.test"],
-    addManyGroups: { "n1.example.test": "Fresh", "nova.example.test": "Other", "n2.example.test": "nova", "n3.example.test": "x".repeat(41) },
-  });
-  assert.deepEqual(r.list.groups.map((g) => g.name), ["NOVA", "Shop", "Fresh"], "no group for a listed name or a refused header");
-  assert.deepEqual(r.list.groups.find((g) => g.name === "Fresh").domains, ["n1.example.test"]);
-  assert.ok(r.list.groups[0].domains.includes("n2.example.test"), "an existing group is found without regard to case");
-  assert.ok(r.list.domains.includes("n3.example.test"), "a name under a refused header is still imported");
 });
 
 test("hostsApply: deleting a group with its domains removes them everywhere, including the block", { skip: !swiftAvailable }, () => {
@@ -3560,7 +3496,7 @@ test("Hosts tab: rows as tall as the switch, 4 px apart; a local one fades from 
 test("Hosts tab: opening the tab only reads /etc/hosts; only a change writes it and refreshes Chrome", () => {
   const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   const message = methodSource(swift, "hostsMessage");
-  assert.match(message, /if body\["status"\] == nil, list == result\.list, Set\(result\.local\) != Set\(block \?\? \[\]\) \{/);
+  assert.match(message, /if body\["status"\] == nil, list == result\.list, !edit\.isEmpty \{/);
   // The Chrome refresh rides only on that write.
   assert.equal((message.match(/scheduleChromeRefresh\(\)/g) || []).length, 1);
   assert.ok(message.indexOf(`if body["status"] == nil,`) < message.indexOf("scheduleChromeRefresh()"));
@@ -3598,8 +3534,8 @@ test("Hosts tab: while an action waits, a state Swift sent on its own is not tak
   const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   assert.match(methodSource(swift, "replyHosts"), /state\["requestId"\] = body\["requestId"\]/);
   const message = methodSource(swift, "hostsMessage");
-  assert.equal((message.match(/replyHosts\(/g) || []).length, 4);
-  assert.equal((message.match(/self\.replyHosts\(state, to: body\)/g) || []).length, 4);
+  assert.equal((message.match(/replyHosts\(/g) || []).length, 5);
+  assert.equal((message.match(/self\.replyHosts\(state, to: body\)/g) || []).length, 5);
 });
 
 test("Hosts tab: a gear opens Settings, and the back arrow returns to Hosts", () => {
@@ -3819,17 +3755,18 @@ function appRun(input, env = {}) {
   if (!appDriver) {
     const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
     const consts = ["HOSTS_BLOCK_START", "HOSTS_BLOCK_END", "HOSTS_LEGACY_BLOCK_START", "HOSTS_LEGACY_BLOCK_END",
-      "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS", "JIRA_KEYCHAIN", "JIRA_OAUTH_KEYCHAIN"].map((name) => {
+      "HOSTS_SYSTEM_NAMES", "HOSTS_LOCAL_ADDRESSES", "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS", "JIRA_KEYCHAIN", "JIRA_OAUTH_KEYCHAIN"].map((name) => {
       const line = src.match(new RegExp(`^let ${name} = .*$`, "m"));
       assert.ok(line, `${name} not found in SprintBoard.swift`);
       return line[0];
     });
-    const decls = ["struct HostsGroup", "struct HostsList", "enum TokenResult"].map((header) => swiftDecl(src, header));
-    const funcs = ["hostsName", "hostsEntry", "hostsMarkers", "hostsBlockRange", "managedHosts", "hostsWithBlock",
-      "hostsConflicts", "hostsImportable", "hostsGroupHeader", "hostsImportGroups", "hostsPartnerName", "hostsGroupName",
-      "hostsList", "hostsListJSON", "hostsApply", "hostsStatus", "hostsFileText", "writeHostsBlock", "chromeMissingFlags",
+    const decls = ["struct HostsGroup", "struct HostsList", "struct HostsRow", "struct HostsEdit", "enum TokenResult"].map((header) => swiftDecl(src, header));
+    const funcs = ["hostsName", "hostsEntry", "hostsMarkers", "hostsBlockRange", "managedHosts", "hostsLocalLine", "hostsCommented",
+      "hostsUncommented", "hostsLineWithout", "hostsRows", "hostsSwitched", "hostsAdded", "hostsRemoved", "hostsEdited",
+      "hostsPartnerName", "hostsGroupName",
+      "hostsList", "hostsListJSON", "hostsApply", "hostsStatus", "hostsFileText", "writeHostsFile", "chromeMissingFlags",
       "partnerDomainSuffixes", "needsSetup"].map((name) => swiftSource(src, name));
-    const methods = ["readHostsList", "writeHostsList", "hostsMessage", "readHostsText", "hostsPartnerSuffixes", "scheduleChromeRefresh",
+    const methods = ["readHostsList", "writeHostsList", "migrateHostsList", "hostsMessage", "readHostsText", "hostsPartnerSuffixes", "scheduleChromeRefresh",
       "openInsecureChrome", "cachedKeychainGet", "forgetCachedTokens", "tokenPayload"].map((name) => methodSource(src, name));
     const driver = `import Foundation
 let env = ProcessInfo.processInfo.environment
@@ -3989,9 +3926,10 @@ FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: out)
     env: { ...process.env, SB_CONFIG: join(appDir, "config.json"), ...env } }));
 }
 
+const SAVED = { groups: LIST.groups };
 // One Hosts message on temp files: /etc/hosts, the saved list (in a folder of its own, so it can
 // be made read-only) and the backups.
-function hostsMessageRun(body, { hosts, list = JSON.stringify(LIST), lockHosts = false, lockList = false }) {
+function hostsMessageRun(body, { hosts, list = JSON.stringify(SAVED), lockHosts = false, lockList = false }) {
   const dir = mkdtempSync(join(tmpdir(), "sprint-board-message-"));
   const listDir = join(dir, "list");
   const env = { SB_HOSTS: join(dir, "hosts"), SB_LIST: join(listDir, "hosts.json"), SB_BACKUP: join(dir, "backup") };
@@ -4002,7 +3940,9 @@ function hostsMessageRun(body, { hosts, list = JSON.stringify(LIST), lockHosts =
   if (lockList) chmodSync(listDir, 0o555);
   try {
     const { reply } = appRun({ op: "hosts", body }, env);
-    return { reply, hosts: readFileSync(env.SB_HOSTS), list: readFileSync(env.SB_LIST, "utf8") };
+    const backup = join(env.SB_BACKUP, "hosts.json.before-file-rows");
+    return { reply, hosts: readFileSync(env.SB_HOSTS), list: readFileSync(env.SB_LIST, "utf8"),
+      listBackup: existsSync(backup) ? readFileSync(backup, "utf8") : null };
   } finally {
     chmodSync(listDir, 0o755);
     rmSync(dir, { recursive: true, force: true });
@@ -4014,18 +3954,18 @@ test("Hosts message: when /etc/hosts cannot be written, the saved list is rolled
   const hosts = withBlock(SAMPLE_HOSTS, ["shop.example.test"]);
   const r = hostsMessageRun({ remove: "shop.example.test" }, { hosts, lockHosts: true });
   assert.match(r.reply.error, /is not writable by your user/);
-  assert.deepEqual(JSON.parse(r.list), LIST);
+  assert.deepEqual(JSON.parse(r.list), SAVED);
   assert.deepEqual(r.hosts, Buffer.from(hosts));
-  assert.deepEqual(localDomains(r.reply), ["shop.example.test"]);
+  assert.ok(localDomains(r.reply).includes("shop.example.test"));
 });
 
 test("Hosts message: when the domain list cannot be saved, /etc/hosts is not written", { skip: !swiftAvailable }, () => {
   const hosts = withBlock(SAMPLE_HOSTS, ["shop.example.test"]);
   const r = hostsMessageRun({ remove: "shop.example.test" }, { hosts, lockList: true });
   assert.match(r.reply.error, /^Could not save the domain list/);
-  assert.deepEqual(JSON.parse(r.list), LIST);
+  assert.deepEqual(JSON.parse(r.list), SAVED);
   assert.deepEqual(r.hosts, Buffer.from(hosts));
-  assert.deepEqual(localDomains(r.reply), ["shop.example.test"]);
+  assert.ok(localDomains(r.reply).includes("shop.example.test"));
 });
 
 test("Hosts message: an /etc/hosts that is not text is shown as unreadable and nothing is applied", { skip: !swiftAvailable }, () => {
@@ -4033,7 +3973,7 @@ test("Hosts message: an /etc/hosts that is not text is shown as unreadable and n
   const r = hostsMessageRun({ add: "new.example.test" }, { hosts: bytes });
   assert.equal(r.reply.mode, "unreadable");
   assert.match(r.reply.error, /^Could not read \/etc\/hosts as text/);
-  assert.equal(r.list, JSON.stringify(LIST));
+  assert.equal(r.list, JSON.stringify(SAVED));
   assert.deepEqual(r.hosts, bytes);
 });
 
@@ -4045,20 +3985,204 @@ test("Hosts message: a domain list that does not parse is left as it is", { skip
   assert.deepEqual(r.hosts, Buffer.from(hosts));
 });
 
-test("Hosts message: with a damaged block only what leaves the block alone runs", { skip: !swiftAvailable }, () => {
+test("Hosts message: with a damaged block nothing that writes the file runs", { skip: !swiftAvailable }, () => {
   const damaged = `${SAMPLE_HOSTS}${BLOCK_START}\n127.0.0.1 shop.example.test\n`;
-  for (const body of [{ remove: "shop.example.test" }, { setMode: "prod", names: ["shop.example.test"] }, { groupDeleteWithDomains: "Shop" }]) {
+  for (const body of [{ remove: "shop.example.test" }, { setMode: "prod", names: ["shop.example.test"] }, { groupDeleteWithDomains: "Shop" }, { add: "new.example.test" }, { addPartner: "acme" }]) {
     const r = hostsMessageRun(body, { hosts: damaged });
     assert.match(r.reply.error, /block in \/etc\/hosts is damaged/, JSON.stringify(body));
-    assert.equal(r.list, JSON.stringify(LIST), JSON.stringify(body));
+    assert.equal(r.list, JSON.stringify(SAVED), JSON.stringify(body));
     assert.deepEqual(r.hosts, Buffer.from(damaged));
   }
-  const added = hostsMessageRun({ add: "new.example.test" }, { hosts: damaged });
-  assert.equal(added.reply.error ?? null, null);
-  assert.equal(added.reply.mode, "damaged");
-  assert.ok(JSON.parse(added.list).domains.includes("new.example.test"));
-  assert.deepEqual(added.hosts, Buffer.from(damaged));
+  const grouped = hostsMessageRun({ groupAdd: "Fresh" }, { hosts: damaged });
+  assert.equal(grouped.reply.error ?? null, null, "a group lives in hosts.json only");
+  assert.ok(JSON.parse(grouped.list).groups.some((g) => g.name === "Fresh"));
+  assert.deepEqual(grouped.hosts, Buffer.from(damaged));
   assert.equal(hostsMessageRun({ status: true }, { hosts: damaged }).reply.error ?? null, null);
+});
+
+// A hosts file as the Hosts tab finds it: system lines, hand-kept lines, a tool's own section.
+const HOSTS_FIXTURE = [
+  "##",
+  "# Host Database",
+  "##",
+  "127.0.0.1\tlocalhost",
+  "255.255.255.255\tbroadcasthost",
+  "::1             localhost",
+  "fe80::1%lo0\tlocalhost",
+  "",
+  "# 127.0.0.1 is where this machine answers",
+  "127.0.0.1 app.example.test",
+  "#127.0.0.1 off.example.test",
+  "127.0.0.1\tone.example.test  two.example.test three.example.test # shared",
+  "10.0.0.5 pinned.example.test",
+  "#10.0.0.6 away.example.test",
+  "#Host manager BEGIN",
+  "127.0.0.1 hm.example.test",
+  "#127.0.0.1 hmoff.example.test hmoff2.example.test",
+  "#Host manager END",
+  "",
+].join("\n");
+const swap = (text, from, to) => { assert.ok(text.includes(from), from); return text.replace(from, to); };
+const rowsOf = (text) => hostsOne({ op: "rows", text });
+
+test("Hosts rule: a row shows each local domain in the file, wherever its line is, in file order", { skip: !swiftAvailable }, () => {
+  assert.deepEqual(rowsOf(HOSTS_FIXTURE).map((r) => [r.name, r.local]), [
+    ["app.example.test", true], ["off.example.test", false], ["one.example.test", true], ["two.example.test", true], ["three.example.test", true],
+    ["hm.example.test", true], ["hmoff.example.test", false], ["hmoff2.example.test", false],
+  ]);
+});
+
+test("Hosts rule: the rows come from /etc/hosts on every load; hosts.json adds no row and no state", { skip: !swiftAvailable }, () => {
+  const list = JSON.stringify({ domains: ["gone.example.test", "app.example.test"], local: ["off.example.test"], groups: [] });
+  const first = hostsMessageRun({ status: true }, { hosts: HOSTS_FIXTURE, list });
+  assert.deepEqual(first.reply.domains.map((d) => [d.name, d.local]), rowsOf(HOSTS_FIXTURE).map((r) => [r.name, r.local]));
+  const edited = swap(HOSTS_FIXTURE, "127.0.0.1 app.example.test", "#127.0.0.1 app.example.test");
+  const next = hostsMessageRun({ status: true }, { hosts: edited });
+  assert.equal(next.reply.domains.find((d) => d.name === "app.example.test").local, false, "a hand edit shows on the next load");
+});
+
+test("Hosts rule: Prod keeps the line in its place as a comment, and Local makes it active again, byte for byte", { skip: !swiftAvailable }, () => {
+  const prod = hostsOne({ op: "switch", text: HOSTS_FIXTURE, names: ["hm.example.test"], local: false });
+  assert.equal(prod, swap(HOSTS_FIXTURE, "\n127.0.0.1 hm.example.test\n", "\n#127.0.0.1 hm.example.test\n"));
+  assert.equal(prod.split("\n").length, HOSTS_FIXTURE.split("\n").length, "no line is added or deleted");
+  assert.equal(hostsOne({ op: "switch", text: prod, names: ["hm.example.test"], local: true }), HOSTS_FIXTURE);
+  const spaced = "  # 127.0.0.1 note.example.test\n";
+  assert.equal(hostsOne({ op: "switch", text: spaced, names: ["note.example.test"], local: true }), "  127.0.0.1 note.example.test\n");
+});
+
+test("Hosts rule: on a line with several domains a switch changes only that domain", { skip: !swiftAvailable }, () => {
+  const prod = hostsOne({ op: "switch", text: HOSTS_FIXTURE, names: ["two.example.test"], local: false });
+  assert.equal(prod, swap(HOSTS_FIXTURE, "127.0.0.1\tone.example.test  two.example.test three.example.test # shared\n",
+    "127.0.0.1\tone.example.test three.example.test # shared\n#127.0.0.1\ttwo.example.test\n"));
+  assert.deepEqual(rowsOf(prod).filter((r) => r.local).map((r) => r.name),
+    ["app.example.test", "one.example.test", "three.example.test", "hm.example.test"]);
+  // The same from a commented line: the others stay commented.
+  const local = hostsOne({ op: "switch", text: HOSTS_FIXTURE, names: ["hmoff.example.test"], local: true });
+  assert.equal(local, swap(HOSTS_FIXTURE, "#127.0.0.1 hmoff.example.test hmoff2.example.test\n",
+    "#127.0.0.1 hmoff2.example.test\n127.0.0.1\thmoff.example.test\n"));
+  // All of a line's domains: the line itself turns.
+  const all = hostsOne({ op: "switch", text: HOSTS_FIXTURE, names: ["one.example.test", "two.example.test", "three.example.test"], local: false });
+  assert.equal(all, swap(HOSTS_FIXTURE, "127.0.0.1\tone.example.test", "#127.0.0.1\tone.example.test"));
+  // A name that is no row stays active with the rest of its line.
+  const odd = "127.0.0.1 myhost a.example.test\n";
+  assert.equal(hostsOne({ op: "switch", text: odd, names: ["a.example.test"], local: false }), "127.0.0.1 myhost\n#127.0.0.1\ta.example.test\n");
+});
+
+test("Hosts rule: a domain on two lines has one row; Prod turns both off, Local turns one on", { skip: !swiftAvailable }, () => {
+  const text = "127.0.0.1 a.example.test\n::1 a.example.test\n#127.0.0.1 b.example.test\n#::1 b.example.test\n";
+  assert.deepEqual(rowsOf(text).map((r) => [r.name, r.local]), [["a.example.test", true], ["b.example.test", false]]);
+  assert.equal(hostsOne({ op: "switch", text, names: ["a.example.test"], local: false }),
+    "#127.0.0.1 a.example.test\n#::1 a.example.test\n#127.0.0.1 b.example.test\n#::1 b.example.test\n");
+  assert.equal(hostsOne({ op: "switch", text, names: ["b.example.test"], local: true }),
+    "127.0.0.1 a.example.test\n::1 a.example.test\n127.0.0.1 b.example.test\n#::1 b.example.test\n");
+  const half = "127.0.0.1 c.example.test\n#::1 c.example.test\n";
+  assert.equal(hostsOne({ op: "switch", text: half, names: ["c.example.test"], local: true }), half, "already Local: nothing turns");
+});
+
+test("Hosts rule: only a comment that is clearly a host entry is a Prod row", { skip: !swiftAvailable }, () => {
+  const comments = ["# 127.0.0.1 is where this machine answers", "#Host manager BEGIN", "## 127.0.0.1 double.example.test", "# see a.example.test",
+    "#127.0.0.1", "#10.0.0.6 away.example.test", "#127.0.0.1 a.example.test and more", "#fe80::1 link.example.test"];
+  assert.deepEqual(rowsOf(`${comments.join("\n")}\n`), []);
+  assert.deepEqual(rowsOf("# 127.0.0.1 spaced.example.test\n#::1 six.example.test # why\n").map((r) => [r.name, r.local]),
+    [["spaced.example.test", false], ["six.example.test", false]]);
+});
+
+test("Hosts rule: system entries are never shown or changed", { skip: !swiftAvailable }, () => {
+  const system = ["127.0.0.1\tlocalhost", "255.255.255.255\tbroadcasthost", "::1             localhost", "fe80::1%lo0\tlocalhost",
+    "127.0.0.1 localhost app.example.test", "127.0.0.1 localhost.localdomain", "#127.0.0.1 localhost", "#127.0.0.1 broadcasthost"];
+  const text = `${system.join("\n")}\n`;
+  assert.deepEqual(rowsOf(text), [], "a line with a system name is left out as a whole");
+  const names = ["localhost", "broadcasthost", "app.example.test", "localhost.localdomain"];
+  assert.equal(hostsOne({ op: "switch", text, names, local: false }), text);
+  assert.equal(hostsOne({ op: "switch", text, names, local: true }), text);
+});
+
+test("Hosts rule: every other line stays byte for byte", { skip: !swiftAvailable }, () => {
+  const text = `\r\n${HOSTS_FIXTURE}   \n\t# indented\n#  two  spaces\n\n\n`.replace("\r\n", "\n");
+  const out = hostsOne({ op: "switch", text, names: ["app.example.test", "off.example.test", "hm.example.test"], local: false });
+  const [before, after] = [text.split("\n"), out.split("\n")];
+  assert.equal(after.length, before.length);
+  const changed = before.flatMap((line, i) => (line === after[i] ? [] : [[line, after[i]]]));
+  assert.deepEqual(changed, [["127.0.0.1 app.example.test", "#127.0.0.1 app.example.test"], ["127.0.0.1 hm.example.test", "#127.0.0.1 hm.example.test"]]);
+});
+
+test("Hosts rule: + adds to the managed block only; a switch outside it leaves the block alone", { skip: !swiftAvailable }, () => {
+  const added = hostsMessageRun({ add: "new.example.test" }, { hosts: HOSTS_FIXTURE });
+  assert.equal(added.hosts.toString(), `${HOSTS_FIXTURE}${BLOCK_START}\n#127.0.0.1\tnew.example.test\n${BLOCK_END}\n`);
+  const row = added.reply.domains.find((d) => d.name === "new.example.test");
+  assert.deepEqual([row.local, row.removable], [false, true]);
+  const switched = hostsMessageRun({ setMode: "prod", names: ["app.example.test"] }, { hosts: added.hosts.toString() });
+  assert.equal(switched.hosts.toString(), swap(added.hosts.toString(), "\n127.0.0.1 app.example.test\n", "\n#127.0.0.1 app.example.test\n"));
+  // A row outside the block has no delete: only the user's own edit removes that line.
+  const refused = hostsMessageRun({ remove: "app.example.test" }, { hosts: HOSTS_FIXTURE });
+  assert.match(refused.reply.error, /outside Sprint Board's block/);
+  assert.equal(refused.hosts.toString(), HOSTS_FIXTURE);
+  const gone = hostsMessageRun({ remove: "new.example.test" }, { hosts: added.hosts.toString() });
+  assert.equal(gone.hosts.toString(), HOSTS_FIXTURE);
+});
+
+test("Hosts rule: a group deleted with its domains removes the block's lines and leaves the other lines", { skip: !swiftAvailable }, () => {
+  const hosts = `${HOSTS_FIXTURE}${BLOCK_START}\n127.0.0.1\tnew.example.test\n${BLOCK_END}\n`;
+  const list = JSON.stringify({ groups: [{ name: "Mix", domains: ["new.example.test", "app.example.test"] }] });
+  const r = hostsMessageRun({ groupDeleteWithDomains: "Mix" }, { hosts, list });
+  assert.equal(r.hosts.toString(), HOSTS_FIXTURE, "app.example.test keeps its line and its state");
+  assert.deepEqual(JSON.parse(r.list), { groups: [] });
+});
+
+test("Hosts rule: Add them, the Found note and the also-active warning are gone", () => {
+  const page = readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8");
+  const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  for (const word of ["Add them", "importBtn", "local entr", "also active elsewhere", "toggleConflicts", "conflictsOpen", "importable", "s.conflicts"]) {
+    assert.ok(!page.includes(word), word);
+  }
+  for (const name of ["hostsConflicts", "hostsImportable", "hostsImportGroups", "hostsGroupHeader", "importAll", "addMany"]) {
+    assert.ok(!swift.includes(name), name);
+  }
+  // A row offers its delete only when its line is in the block.
+  assert.match(page, /const canDelete = d\.removable && canChange/);
+});
+
+test("Hosts rule: hosts.json keeps groups only", { skip: !swiftAvailable }, () => {
+  assert.deepEqual(hostsOne({ op: "saved", json: { domains: ["a.example.test"], groups: [{ name: "G", domains: ["a.example.test"] }] } }),
+    { groups: [{ name: "G", domains: ["a.example.test"] }] });
+  // A group may name a domain that is not in the file now; it is back in the group when the line returns.
+  assert.deepEqual(hostsOne({ op: "list", json: { groups: [{ name: "G", domains: ["later.example.test", "bad name"] }] } }),
+    { domains: [], groups: [{ name: "G", domains: ["later.example.test"] }] });
+  const r = hostsMessageRun({ setMode: "prod", names: ["app.example.test"] }, { hosts: HOSTS_FIXTURE });
+  assert.equal(r.list, JSON.stringify(SAVED), "a switch does not touch hosts.json");
+});
+
+test("Hosts rule: an old hosts.json is migrated once, with its group names and a copy of the file", { skip: !swiftAvailable }, () => {
+  const old = JSON.stringify({ domains: ["app.example.test", "gone.example.test"], groups: [{ name: "Keep", domains: ["app.example.test", "gone.example.test"] }, { name: "Empty", domains: [] }] });
+  const r = hostsMessageRun({ status: true }, { hosts: HOSTS_FIXTURE, list: old });
+  assert.deepEqual(JSON.parse(r.list), { groups: [{ name: "Keep", domains: ["app.example.test", "gone.example.test"] }, { name: "Empty", domains: [] }] });
+  assert.equal(r.listBackup, old);
+  assert.deepEqual(r.reply.groups, ["Keep", "Empty"]);
+  assert.deepEqual(r.reply.domains.find((d) => d.name === "app.example.test").groups, ["Keep"]);
+  assert.deepEqual(r.hosts, Buffer.from(HOSTS_FIXTURE), "opening the tab does not write /etc/hosts");
+  const again = hostsMessageRun({ status: true }, { hosts: HOSTS_FIXTURE, list: r.list });
+  assert.equal(again.list, r.list);
+  assert.equal(again.listBackup, null, "a migrated file is left alone");
+  // A list that cannot be saved stays as it is, and its groups still show.
+  const locked = hostsMessageRun({ status: true }, { hosts: HOSTS_FIXTURE, list: old, lockList: true });
+  assert.equal(locked.list, old);
+  assert.deepEqual(locked.reply.groups, ["Keep", "Empty"]);
+});
+
+test("Hosts rule: every write keeps the backup, the unwritable message and the Chrome refresh", { skip: !swiftAvailable }, () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const message = methodSource(src, "hostsMessage");
+  assert.match(message, /writeHostsFile\(edit, path: HOSTS_PATH, backupDir: HOSTS_BACKUP_DIR\)/);
+  // A switch and a removed local domain change what resolves; a new Prod line does not.
+  assert.match(message, /if edit\.changesResolution \{ self\.scheduleChromeRefresh\(\) \}/);
+  withHostsFile(HOSTS_FIXTURE, 0o644, ({ path, backupDir, read }) => {
+    assert.equal(hostsOne({ op: "write", path, backupDir, toProd: ["app.example.test"] }), null);
+    assert.equal(readFileSync(join(backupDir, "hosts.bak"), "utf8"), HOSTS_FIXTURE);
+    assert.notEqual(read(), HOSTS_FIXTURE);
+  });
+  const locked = hostsMessageRun({ setMode: "prod", names: ["app.example.test"] }, { hosts: HOSTS_FIXTURE, lockHosts: true });
+  assert.match(locked.reply.error, /is not writable by your user/);
+  assert.deepEqual(locked.hosts, Buffer.from(HOSTS_FIXTURE));
 });
 
 test("token cache: an empty read is not kept, and a read under way when the tokens are forgotten keeps nothing", { skip: !swiftAvailable }, () => {

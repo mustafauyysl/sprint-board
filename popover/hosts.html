@@ -227,7 +227,6 @@
   .warn .link { margin-left: auto; color: var(--acc-text); white-space: nowrap; }
   .note { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 12px; color: var(--t2); background: var(--fill); }
   .note.err { color: #ff8a80; background: rgba(255,69,58,.16); }
-  .lines { margin-top: 4px; color: var(--t1); font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; }
   .empty { padding: 14px 2px; color: var(--t3); font-size: 12px; }
   .hint { margin-top: 10px; color: var(--t3); font-size: 12px; }
 </style>
@@ -316,7 +315,6 @@
   let action = null;          // what sits under the header: "search", "pick" (the + choices), or the
                               // "domain", "partner" or "group" field picked there
   let chipsAll = false;       // every group shown, instead of one line and "+N"
-  let conflictsOpen = false;
   let chromeNote = null;      // why Chrome could not be refreshed after the last switch (Swift)
   let menuFor = null;         // the domain whose group list is open
   let groupQuery = "";        // the find-or-create text in a domain's group list
@@ -521,8 +519,6 @@
       : "";
     const unknownTitle = s.mode === "damaged" ? "Unknown while Sprint Board's block in /etc/hosts is damaged"
       : "Unknown while /etc/hosts cannot be read";
-    const conflictNames = new Set((s.conflicts || []).flatMap((c) => c.names));
-    const lines = (s.conflicts || []).map((c) => `line ${c.line}  ${c.address}  ${c.names.join(" ")}`).join("\n");
     const also = one() ? `, also in ${one()}` : "";
     const FIELDS = {
       search: { placeholder: "Search domains", hint: null },
@@ -565,7 +561,7 @@
         }).join("")}</div>` : ""}
         ${canCreate ? `<div class="gi create" id="groupCreate" data-key="create"><span class="cb">${PLUS}</span><span class="gn">Create “${esc(gq)}”</span></div>`
           : shown.length ? "" : `<div class="gnone" data-key="gnone">No groups yet. Type a name to create one.</div>`}</div></div>`;
-      const canDelete = canChange || (!blocked && !d.local);
+      const canDelete = d.removable && canChange;
       const state = blocked ? "unknown" : d.local ? "local" : "prod";
       return `<div class="row ${state}${open ? " open" : ""}" data-key="r:${esc(d.name)}" data-fx data-row="${esc(d.name)}" title="Click to change its groups">
           <span class="name">${domainName(d.name)}</span>${tags ? `<span class="tags${d.groups.length > 1 ? " multi" : ""}">${tags}<span class="tag more" data-key="tagmore" hidden></span></span>` : ""}
@@ -626,13 +622,6 @@
         </span>
       </div>
       ${visible.length ? `<div class="rows" data-key="rows" data-fx>${rows}</div>` : `<div class="empty" data-key="empty" data-fx>${empty}</div>`}
-      ${conflictNames.size ? `<div class="warn" data-key="w:conf" data-fx>${WARN}<span>${plural(conflictNames.size, "domain")} also active elsewhere in /etc/hosts</span>
-          <span class="link" id="toggleConflicts">${conflictsOpen ? "Hide" : "Show"}</span></div>
-        ${conflictsOpen ? `<div class="note" data-key="w:confnote" data-fx>They keep the address shown even in Prod. Comment those lines out by hand:
-          <div class="lines">${esc(lines)}</div></div>` : ""}` : ""}
-      ${s.importable && s.importable.length ? `<div class="warn" data-key="w:imp" data-fx title="${esc(s.importable.join(" "))}">${WARN}
-          <span>Found ${s.importable.length} local entr${s.importable.length === 1 ? "y" : "ies"} in /etc/hosts not in this list</span>
-          <span class="link" id="importBtn">${one() ? `Add to ${esc(one())}` : "Add them"}</span></div>` : ""}
       ${chromeNote ? `<div class="warn" data-key="w:chrome" data-fx>${WARN}<span>${esc(chromeNote)}</span>
           <span class="link" id="hideChromeNote">Hide</span></div>` : ""}
       <div class="hint">Click a domain to change its groups · hover a group and click ✎ to rename or delete it. A browser may keep the old address until the page is reloaded.</div>`;
@@ -927,9 +916,7 @@
       redraw();
     }
     else if ((el = at("[data-bulk]"))) act({ setMode: el.dataset.bulk, names: listed.map((d) => d.name) });
-    else if (at("#toggleConflicts")) { conflictsOpen = !conflictsOpen; redraw(); }
     else if (at("#hideChromeNote")) { chromeNote = null; redraw(); }
-    else if (at("#importBtn")) act({ importAll: true, group: one() });
   });
   // A press anywhere in the name field (its padding, the gap, the trash) must not take the focus
   // from the text: that would end the rename. On the padding it puts the caret in the text.

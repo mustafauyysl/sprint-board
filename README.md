@@ -36,8 +36,8 @@ Deliberately kept **outside** the code folder:
 - `~/.local/state/sprint-widget/` — `state.json` (the last seen most overdue task / broken CI /
   review record, which is what stops a sound repeating) + `notes.json`, and the Hosts tab's
   backups of `/etc/hosts`: `hosts.bak` before every write, `hosts.before-sprint-board` once
-- `~/.config/sprint-widget/hosts.json` — the Hosts tab's domains and groups (whether a domain
-  is local is read from `/etc/hosts` itself)
+- `~/.config/sprint-widget/hosts.json` — the Hosts tab's groups, nothing else. The domains and
+  their Local or Prod state are read from `/etc/hosts` on every load.
 - Jira token — **keychain**, service `sprint-board-jira` (overridable in config)
 - GitHub token — **keychain**, service `sprint-board-github`. Without one it falls
   back to `gh auth token`, so if `gh` is installed there is nothing extra to do.
@@ -169,14 +169,19 @@ page on screen. A fold moves the window edge with the same time and curve as the
   arrow to the tab it came from: Disconnect, GitHub organization, drafts, goal tracking and
   partner domains. **Settings…** in the menu opens the same page. With no sign-in, both open
   the sign-in screen
-- **Hosts** lists your domains, each with a switch between **Local** (a line in Sprint
-  Board's block in `/etc/hosts` points it at this Mac) and **Prod**. Group chips filter the
-  list; **All local** and **All prod** switch every domain shown. **+** adds domains (several at once:
-  `a.com,b.com`; URLs work too), a partner, or a group. Domains already in `/etc/hosts`
-  outside the block can be imported; a `# Group - XYZ` line above them names their group.
-  The app writes only inside its block, between `# >>> extension manages >>>` and
-  `# <<< extension manages <<<`, and never asks for an admin password: your user must be able
-  to write `/etc/hosts`, otherwise the tab says so and changes nothing
+- **Hosts** manages `/etc/hosts` directly, like iHosts. The file is the source of truth: each
+  local domain in it is a row, wherever its line is, and there is no copied list. An active
+  line is **Local**. A line kept as a comment is **Prod**. A switch keeps the line in its place
+  and changes no other line. On a line with several domains, the switched domain moves to a new
+  line right below, and the other domains stay as they are. A comment is a Prod row only when
+  it is clearly a host entry: one `#`, `127.0.0.1` or `::1`, then only host names. `localhost`,
+  `broadcasthost` and the other system lines are never shown or changed. Group chips filter the
+  list; **All local** and **All prod** switch every domain shown. **+** adds domains (several at
+  once: `a.com,b.com`; URLs work too), a partner, or a group. A new domain goes into Sprint
+  Board's block, between `# >>> extension manages >>>` and `# <<< extension manages <<<`, and
+  starts in Prod. Only a row in that block has a delete button; the other lines are yours to
+  remove by hand. The app never asks for an admin password: your user must be able to write
+  `/etc/hosts`, otherwise the tab says so and changes nothing
 - **Add partner** appears once Settings → **Partner domains** lists the domain endings a
   partner's environment answers on, separated by commas, e.g. `panel.example.com,
   api.example.com` (saved as `partnerDomainSuffixes` in the config). A partner name then adds
