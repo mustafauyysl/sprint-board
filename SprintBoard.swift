@@ -996,10 +996,8 @@ func symbolScript() -> WKUserScript? {
     return WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
 }
 
-/// The board's width, the same in the widget and in the menu bar panel.
+/// The board's width.
 let BOARD_WIDTH: CGFloat = 430
-/// The panel's height until its page reports one.
-let PANEL_START_HEIGHT: CGFloat = 420
 /// The panel's tabs, in order: segment title, page, and the message handler that page posts
 /// to. Each page reaches only its own handler, so the Hosts page cannot drive the board.
 let PANEL_TABS: [(title: String, page: String, handler: String)] = [
@@ -1032,10 +1030,24 @@ addEventListener('mousemove', (e) => {
 """
 /// Height of the tab header above the pages.
 let PANEL_HEADER_HEIGHT: CGFloat = 38
-let PANEL_TAB_KEY = "panelTab"
-/// What the panel's board shows while the widget waits on the setup screen (sign-in, or
-/// macOS refusing the token) and there is no data yet: setup lives in the widget.
-let SETUP_PENDING_RESULT = #"{"ok":false,"error":"Action needed: sign in or allow keychain access. Open Settings with the gear button."}"#
+
+/// A saved tab from another build may not exist in this one.
+func widgetTabIndex(_ saved: Int) -> Int {
+    PANEL_TABS.indices.contains(saved) ? saved : 0
+}
+
+/// The page the widget shows. The setup screen is `web` over the whole window; Settings goes over the tabs.
+func widgetPageName(onSetupScreen: Bool, settingsShown: Bool, tab: Int) -> String {
+    if onSetupScreen { return "setup.html" }
+    if settingsShown { return "popover/settings.html" }
+    return PANEL_TABS[widgetTabIndex(tab)].page
+}
+
+/// The window height for a page. The setup screen has no tab header.
+func widgetWindowHeight(pageHeight: CGFloat, onSetupScreen: Bool) -> CGFloat {
+    pageHeight + (onSetupScreen ? 0 : PANEL_HEADER_HEIGHT)
+}
+
 
 /// Dragging the top strip moves the window; everything else reaches the WebView
 /// as a normal click. (CSS -webkit-app-region is Electron-specific and does
@@ -1159,20 +1171,17 @@ final class BoardWindow: NSWindow {
 }
 
 final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate,
-    UNUserNotificationCenterDelegate, NSPopoverDelegate {
+    UNUserNotificationCenterDelegate {
     var window: BoardWindow!
     var web: DragWebView!
     var timer: Timer?
     var statusItem: NSStatusItem!
     var menuIcon = MenuIconState()
-    /// The right-click menu. Kept here because the status item no longer holds it.
-    var statusMenu: NSMenu!
-    let panel = NSPopover()
-    /// One WebView per PANEL_TABS entry, in the same order; panelWeb is the Sprint board's.
-    var panelTabs: [WKWebView] = []
-    /// The widget's own tab header and Hosts page. Its Sprint page is `web`.
+    /// The widget's tab header, Hosts page and Settings page. Its Sprint page is `web`.
     var widgetTabControl: NSSegmentedControl!
-    var widgetHostsWeb: WKWebView!
+    var hostsWeb: WKWebView!
+    var widgetSettingsWeb: WKWebView!
+    var widgetSettingsShown = false
     var widgetHeader: NSView?
     var widgetTint: NSView?
     /// The height each widget page last reported, so the window follows the active tab.
@@ -1180,19 +1189,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// The window height of the move under way, and a number that tells a newer move from an older one.
     var widgetFitTarget: CGFloat?
     var widgetFitRun = 0
-    var panelWeb: WKWebView!
-    var hostsWeb: WKWebView!
-    var tabControl: NSSegmentedControl!
-    /// The setup page (settings and sign-in) inside the panel, over the tabs, with a back arrow.
-    /// Everything the widget's setup screen does, the panel does too.
-    var panelSetupWeb: WKWebView!
-    var panelSettingsShown = false
     /// The setup page that started a sign-in; its errors go back there.
     var setupResultTarget: WKWebView?
-    /// Why sign-in is needed, for a panel setup page that opens after the widget took the error.
-    var setupReason: String?
-    /// The height each tab's page last reported; the panel fits the selected one.
-    var panelPageHeights: [WKWebView: CGFloat] = [:]
     var retryTimer: Timer?
     var retryCount = 0
     /// A fetch.mjs run (or the keychain read before it) is under way. Main thread only.
@@ -1200,7 +1198,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// Counts the times the board's data was dropped (Disconnect, a session that ended): a fetch
     /// started before belongs to the account that left. Main thread only.
     var boardGeneration = 0
-    /// Board pages (the widget's view.html, the panel's sprints.html) that have finished loading. A render sent
+    /// Board pages that have finished loading. A render sent
     /// to a page that is still loading is lost, so only these receive data.
     var loadedBoards = Set<WKWebView>()
     /// The last fetch result and the last successful one, replayed to a board page that
@@ -1209,9 +1207,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var lastOkJSON: String?
     /// Whether the widget was hidden when Settings borrowed it; the way back hides it again.
     var widgetHiddenBeforeSetup: Bool?
-    /// Event time of a click on the menu bar icon that closed the panel, so the same click
-    /// does not open it again.
-    var panelClosedByIconAt: TimeInterval?
     /// Set by "Refresh now" and the refresh button: the next result is reported as a notification.
     var manualRefreshPending = false
     /// The widget's frame before it was made to fill the screen; nil while it is normal size.
@@ -1292,13 +1287,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         for m in [mRefresh, mFront, mSetup, dockItem!] { m.target = self; menu.addItem(m) }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Sprint Board", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        // NOT `statusItem.menu = menu`: with a menu attached every click opens it and the
-        // button's action never fires. Left click opens the panel, right click this menu.
-        statusMenu = menu
-        statusItem.button?.target = self
-        statusItem.button?.action = #selector(statusItemClicked)
-        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        setUpPanel()
+        statusItem.menu = menu
 
         buildMainMenu()
 
@@ -1339,10 +1328,17 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.makeKeyAndOrderFront(nil)
     }
 
-    /// Settings… in the menu opens the panel's settings, so the widget is never needed.
+    /// Settings… in the menu and every gear come here. Sign-in has its own screen in the widget.
     @objc func menuSettings() {
-        if !panel.isShown { togglePanel() }
-        showPanelSettings()
+        if onSetupScreen {
+            // Already open in the widget, possibly behind other windows.
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        } else if needsSetup() {
+            menuSetup()
+        } else {
+            showWidgetSettings()
+        }
     }
 
     @objc func menuRefresh() {
@@ -1372,15 +1368,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     /// Cmd+Tab back to the app (only when it shows in the Dock) brings the widget back even
     /// after its close button hid it.
-    ///
-    /// Opening the panel also activates the app; that must not bring back a widget the user
-    /// closed. Activation finishes after the panel is shown and can hand key status back to
-    /// the widget, so the panel takes it again here (its inputs need it).
     func applicationDidBecomeActive(_ note: Notification) {
-        if panel.isShown {
-            panel.contentViewController?.view.window?.makeKey()
-            return
-        }
         if window != nil, !window.isVisible, !window.isMiniaturized { window.orderFront(nil) }
     }
 
@@ -1404,11 +1392,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         setupFromSettings = false
         browsingSettings = false
         manualRefreshPending = false
+        widgetSettingsShown = false
         onSetupScreen = true
         setupResultTarget = nil
         loadPage("setup.html")
         clearBoardData()
-        if panelSettingsShown { fillPanelSettings() }
     }
 
     /// Writes the board settings from the setup screen. fetch.mjs reads the config on every
@@ -1453,14 +1441,16 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     func toggleFill() {
         if let frame = restoreFrame {
             web.pageZoom = 1
-            widgetHostsWeb.pageZoom = 1
+            hostsWeb.pageZoom = 1
+            widgetSettingsWeb.pageZoom = 1
             // The animation runs a nested run loop: height reports must still wait until it ends.
             window.setFrame(frame, display: true, animate: true)
             restoreFrame = nil
         } else if let screen = window.screen ?? NSScreen.main {
             restoreFrame = window.frame
             web.pageZoom = 1.4
-            widgetHostsWeb.pageZoom = 1.4
+            hostsWeb.pageZoom = 1.4
+            widgetSettingsWeb.pageZoom = 1.4
             window.setFrame(screen.visibleFrame, display: true, animate: true)
         }
         // The zoom scales the card's CSS corners; the material must follow them.
@@ -1468,7 +1458,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.invalidateShadow()
         applyFillClass()
         if restoreFrame == nil {
-            for page in [web, widgetHostsWeb] as [WKWebView] {
+            for page in widgetPages {
                 page.evaluateJavaScript("window.sbFit && window.sbFit()") { _, err in
                     if let err { dbg("fit: \(err.localizedDescription)") }
                 }
@@ -1521,9 +1511,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     // MARK: widget tabs
 
-    /// The tab header holds the window buttons, so both tabs have them. The Hosts page stays
-    /// loaded behind the Sprint page, so each tab keeps its state, as in the panel. The setup
-    /// screen uses the whole window and brings its own card and window buttons.
+    /// The tab header holds the window buttons, so every page has them. The Hosts and Settings
+    /// pages stay loaded behind the Sprint page, so each keeps its state. The setup screen uses
+    /// the whole window and brings its own card and window buttons.
     func setUpWidgetTabs(in material: NSView) {
         let tint = NSView(frame: material.bounds)
         tint.wantsLayer = true
@@ -1533,12 +1523,15 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         material.addSubview(tint, positioned: .below, relativeTo: web)
         widgetTint = tint
 
-        widgetHostsWeb = makePanelWebView(handler: "hosts")
-        widgetHostsWeb.configuration.userContentController.addUserScript(WKUserScript(
-            source: WIDGET_PAGE_SCRIPT, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        widgetHostsWeb.autoresizingMask = [.width, .height]
-        widgetHostsWeb.isHidden = true
-        material.addSubview(widgetHostsWeb)
+        hostsWeb = makeTabWebView(handler: "hosts")
+        widgetSettingsWeb = makeTabWebView(handler: "sb")
+        for page in [hostsWeb, widgetSettingsWeb] as [WKWebView] {
+            page.configuration.userContentController.addUserScript(WKUserScript(
+                source: WIDGET_PAGE_SCRIPT, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            page.autoresizingMask = [.width, .height]
+            page.isHidden = true
+            material.addSubview(page)
+        }
 
         let width = material.bounds.width
         let header = NSView(frame: NSRect(x: 0, y: material.bounds.height - PANEL_HEADER_HEIGHT,
@@ -1573,13 +1566,41 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             header.addSubview(button)
         }
 
-        loadPage("popover/hosts.html", in: widgetHostsWeb)
+        loadPage("popover/hosts.html", in: hostsWeb)
+        loadPage("popover/settings.html", in: widgetSettingsWeb)
         let saved = UserDefaults.standard.integer(forKey: WIDGET_TAB_KEY)
-        widgetTabControl.selectedSegment = PANEL_TABS.indices.contains(saved) ? saved : 0
+        widgetTabControl.selectedSegment = widgetTabIndex(saved)
         layoutWidget()
     }
 
-    var widgetShownPage: WKWebView { widgetHostsWeb?.isHidden == false ? widgetHostsWeb : web }
+    var widgetPages: [WKWebView] { [web, hostsWeb, widgetSettingsWeb] }
+
+    /// Pages start with `nohover`, which the hover styles of the buttons that swap pages wait on;
+    /// the first real mouse move drops it.
+    func makeTabWebView(handler: String) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.userContentController.add(self, name: handler)
+        cfg.userContentController.addUserScript(WKUserScript(
+            source: PANEL_PAGE_SCRIPT, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        if let script = symbolScript() { cfg.userContentController.addUserScript(script) }
+        cfg.setValue(false, forKey: "drawsBackground")
+        let w = WKWebView(frame: .zero, configuration: cfg)
+        w.navigationDelegate = self
+        w.setValue(false, forKey: "drawsBackground")
+        return w
+    }
+
+    var widgetShownPage: WKWebView { widgetPages.first { !$0.isHidden } ?? web }
+
+    /// The page the widget's state asks for. Until the swap, `widgetShownPage` is the one on screen.
+    var widgetTargetPage: WKWebView {
+        switch widgetPageName(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown,
+                              tab: widgetTabControl.selectedSegment) {
+        case "popover/hosts.html": return hostsWeb
+        case "popover/settings.html": return widgetSettingsWeb
+        default: return web
+        }
+    }
 
     /// Places the header and the pages for the setup screen or the selected tab.
     func layoutWidget() {
@@ -1587,13 +1608,12 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         let tabs = !onSetupScreen
         let pageFrame = NSRect(x: 0, y: 0, width: material.bounds.width,
                                height: material.bounds.height - (tabs ? PANEL_HEADER_HEIGHT : 0))
-        web.frame = pageFrame
-        widgetHostsWeb.frame = pageFrame
+        for page in widgetPages { page.frame = pageFrame }
         header.isHidden = !tabs
         widgetTint?.isHidden = !tabs
-        let hostsShown = tabs && PANEL_TABS[widgetTabControl.selectedSegment].page == "popover/hosts.html"
-        web.isHidden = hostsShown
-        widgetHostsWeb.isHidden = !hostsShown
+        let target = widgetTargetPage
+        for page in widgetPages { page.isHidden = page !== target }
+        widgetTabControl.isHidden = target === widgetSettingsWeb
         fitWidget()
     }
 
@@ -1607,7 +1627,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         guard restoreFrame == nil, let height = widgetPageHeights[widgetShownPage] else { return }
         var f = window.frame
         let top = f.maxY
-        f.size.height = height + (onSetupScreen ? 0 : PANEL_HEADER_HEIGHT)
+        f.size.height = widgetWindowHeight(pageHeight: height, onSetupScreen: onSetupScreen)
         f.origin.y = top - f.height
         f = onScreen(f, near: window.frame)
         let now = window.frame
@@ -1636,7 +1656,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }, completionHandler: { [weak self] in
             guard let self, run == self.widgetFitRun else { return }
             self.widgetFitTarget = nil
-            for page in [self.web, self.widgetHostsWeb] as [WKWebView] { page.autoresizingMask = [.width, .height] }
+            for page in self.widgetPages { page.autoresizingMask = [.width, .height] }
             self.layoutWidget()
             self.window.invalidateShadow()
             self.saveFrame()
@@ -1646,7 +1666,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// Pages keep their top edge and height while the window moves under them.
     func pinWidgetPages(windowHeight: CGFloat) {
         let height = windowHeight - PANEL_HEADER_HEIGHT
-        for page in [web, widgetHostsWeb] as [WKWebView] {
+        for page in widgetPages {
             page.autoresizingMask = [.width, .minYMargin]
             guard height > page.frame.height else { continue }
             page.frame = NSRect(x: 0, y: page.frame.maxY - height, width: page.frame.width, height: height)
@@ -1655,10 +1675,77 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     @objc func widgetTabChanged() {
         UserDefaults.standard.set(widgetTabControl.selectedSegment, forKey: WIDGET_TAB_KEY)
-        widgetShownPage.evaluateJavaScript("document.documentElement.classList.add('nohover')")
-        layoutWidget()
-        // /etc/hosts may have been edited by hand since the tab was last drawn.
-        if widgetShownPage === widgetHostsWeb { hostsMessage(["status": true]) }
+        swapWidgetPage { [weak self] in
+            // /etc/hosts may have been edited by hand since the tab was last drawn.
+            guard let self, self.widgetShownPage === self.hostsWeb else { return }
+            self.hostsMessage(["status": true])
+        }
+    }
+
+    /// One way to change the page. A hidden WKWebView keeps the last mouse position it saw, so the
+    /// page being left turns hover off and paints that, then the two pages trade places in one step.
+    func swapWidgetPage(then after: @escaping () -> Void = {}) {
+        let leaving = widgetShownPage
+        let page = widgetTargetPage
+        var swapped = false
+        let swap = { [weak self] in
+            guard let self, !swapped else { return }
+            swapped = true
+            // A newer request took over; it does the swap.
+            guard self.widgetTargetPage === page else { return }
+            self.layoutWidget()
+            after()
+        }
+        let hoverOff = "document.documentElement.classList.add('nohover')"
+        guard leaving !== page, window.isVisible else {
+            leaving.evaluateJavaScript(hoverOff)
+            swap()
+            return
+        }
+        leaving.callAsyncJavaScript("\(hoverOff); await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))",
+                                   arguments: [:], in: nil, in: .page) { _ in swap() }
+        // Animation frames stop when the page cannot draw; the swap must happen anyway.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { swap() }
+    }
+
+    /// Settings over the tabs, with a back arrow. Partner domains are only on this page. It stays
+    /// loaded and is filled for each opening, then shown at its new height, so it opens in one step.
+    func showWidgetSettings() {
+        lendWidgetToSetup()
+        fillWidgetSettings { [weak self] height in
+            guard let self else { return }
+            if let height { self.widgetPageHeights[self.widgetSettingsWeb] = height }
+            self.widgetSettingsShown = true
+            NSApp.activate(ignoringOtherApps: true)
+            self.window.makeKeyAndOrderFront(nil)
+            self.swapWidgetPage()
+        }
+    }
+
+    /// Answers the page's height; nil before the page has loaded, and didFinish fills it then.
+    func fillWidgetSettings(_ done: @escaping (CGFloat?) -> Void = { _ in }) {
+        var context: Any = NSNull()
+        if let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
+           let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+           let signedIn = setupContext(cfg) {
+            context = signedIn
+        }
+        let args = (try? JSONSerialization.data(withJSONObject: [context, [String]()]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[null, []]"
+        widgetSettingsWeb.evaluateJavaScript("window.sbSettingsShow ? window.sbSettingsShow(...\(args)) : null") { height, _ in
+            done((height as? Double).map { CGFloat($0) })
+        }
+    }
+
+    func hideWidgetSettings() {
+        widgetSettingsShown = false
+        swapWidgetPage { [weak self] in
+            guard let self else { return }
+            // Partner domains may have changed, and /etc/hosts may have been edited by hand.
+            if self.widgetShownPage === self.hostsWeb { self.hostsMessage(["status": true]) }
+            if self.widgetHiddenBeforeSetup == true { self.window.orderOut(nil) }
+            self.widgetHiddenBeforeSetup = nil
+        }
     }
 
     @objc func widgetLightClicked(_ button: NSButton) {
@@ -1674,228 +1761,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
     }
 
-    // MARK: menu bar panel
-
-    /// A tab header (one segment per PANEL_TABS entry) over one WebView per tab. The Sprint
-    /// tab shows popover/sprints.html, fed the same data as the widget. All tab WebViews live as long as the app,
-    /// so a page keeps its state (and its handler registration) across tab switches.
-    func setUpPanel() {
-        let size = NSSize(width: BOARD_WIDTH, height: PANEL_HEADER_HEIGHT + PANEL_START_HEIGHT)
-        let container = NSView(frame: NSRect(origin: .zero, size: size))
-        panelTabs = PANEL_TABS.map { makePanelWebView(handler: $0.handler) }
-        for w in panelTabs {
-            w.frame = NSRect(x: 0, y: 0, width: size.width, height: PANEL_START_HEIGHT)
-            w.autoresizingMask = [.width, .height]
-            container.addSubview(w)
-        }
-        panelWeb = panelTabs[PANEL_TABS.firstIndex { $0.page == "popover/sprints.html" }!]
-        hostsWeb = panelTabs[PANEL_TABS.firstIndex { $0.page == "popover/hosts.html" }!]
-        // The setup page posts to "sb" as in the widget; the handler tells the two apart.
-        panelSetupWeb = makePanelWebView(handler: "sb")
-        panelSetupWeb.frame = NSRect(origin: .zero, size: size)
-        panelSetupWeb.autoresizingMask = [.width, .height]
-        panelSetupWeb.isHidden = true
-        container.addSubview(panelSetupWeb)
-
-        tabControl = NSSegmentedControl(labels: PANEL_TABS.map(\.title), trackingMode: .selectOne,
-                                        target: self, action: #selector(panelTabChanged))
-        tabControl.sizeToFit()
-        // AppKit's y grows upwards: the header band is the top PANEL_HEADER_HEIGHT points.
-        tabControl.frame.origin = NSPoint(x: (size.width - tabControl.frame.width) / 2,
-                                          y: size.height - (PANEL_HEADER_HEIGHT + tabControl.frame.height) / 2)
-        tabControl.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin]
-        container.addSubview(tabControl)
-
-        let content = NSViewController()
-        content.view = container
-        panel.contentViewController = content
-        panel.contentSize = size
-        panel.behavior = .transient
-        panel.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        // The board is a dark card; a light popover frame around it looks broken.
-        panel.appearance = NSAppearance(named: .darkAqua)
-        panel.delegate = self
-        for (w, tab) in zip(panelTabs, PANEL_TABS) { loadPage(tab.page, in: w) }
-        loadPage("popover/settings.html", in: panelSetupWeb)
-        let saved = UserDefaults.standard.integer(forKey: PANEL_TAB_KEY)
-        selectPanelTab(panelTabs.indices.contains(saved) ? saved : 0)
-    }
-
-    /// A document-start script starts every panel page with `nohover`, which the hover styles of
-    /// the buttons that swap pages wait on, and drops it on the first real mouse move (a moved
-    /// pointer; WebKit's own re-checks move nothing).
-    func makePanelWebView(handler: String) -> WKWebView {
-        let cfg = WKWebViewConfiguration()
-        cfg.userContentController.add(self, name: handler)
-        cfg.userContentController.addUserScript(WKUserScript(
-            source: PANEL_PAGE_SCRIPT, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        if let script = symbolScript() { cfg.userContentController.addUserScript(script) }
-        cfg.setValue(false, forKey: "drawsBackground")
-        let w = WKWebView(frame: .zero, configuration: cfg)
-        w.navigationDelegate = self
-        w.setValue(false, forKey: "drawsBackground")
-        return w
-    }
-
-    @objc func panelTabChanged() {
-        selectPanelTab(tabControl.selectedSegment)
-    }
-
-    /// The panel page on screen, or on its way there; the others are hidden.
-    var shownPanelPage: WKWebView?
-
-    /// Puts one page on screen in the panel. A hidden WKWebView keeps the hover it was left with
-    /// and showed it again on the way back (the gear after Back, the back arrow in Settings), and
-    /// WebKit takes hover from the real cursor only. So the page being left turns its hover
-    /// styles off (`nohover`) and paints that, two animation frames (~30 ms); then the two pages
-    /// trade places in one step. Hover returns on the next real mouse move.
-    func showPanelPage(_ page: WKWebView, then after: @escaping () -> Void = {}) {
-        let leaving = shownPanelPage
-        shownPanelPage = page
-        var swapped = false
-        let swap = { [weak self] in
-            guard let self, !swapped else { return }
-            swapped = true
-            // A newer request took over; it does the swap.
-            guard self.shownPanelPage === page else { return }
-            for w in self.panelTabs + [self.panelSetupWeb!] { w.isHidden = w !== page }
-            self.tabControl.isHidden = page === self.panelSetupWeb
-            after()
-        }
-        let hoverOff = "document.documentElement.classList.add('nohover')"
-        guard let leaving, leaving !== page, panel.isShown else {
-            leaving?.evaluateJavaScript(hoverOff)
-            swap()
-            return
-        }
-        leaving.callAsyncJavaScript("\(hoverOff); await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))",
-                                   arguments: [:], in: nil, in: .page) { _ in swap() }
-        // Animation frames stop when the page cannot draw; the swap must happen anyway.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { swap() }
-    }
-
-    func selectPanelTab(_ index: Int) {
-        tabControl.selectedSegment = index
-        UserDefaults.standard.set(index, forKey: PANEL_TAB_KEY)
-        showPanelPage(panelTabs[index]) { [weak self] in
-            guard let self else { return }
-            self.fitPanel()
-            // /etc/hosts may have been edited by hand since the tab was last drawn.
-            if self.panelTabs[index] === self.hostsWeb { self.hostsMessage(["status": true]) }
-        }
-    }
-
-    /// The setup page takes the whole panel, the tab header too; its back arrow returns to the
-    /// tab that was open. Like the tabs it stays loaded: it is filled for this opening first and
-    /// shown after, at its new height, so it opens in one step.
-    func showPanelSettings() {
-        panelSettingsShown = true
-        fillPanelSettings { [weak self] height in
-            guard let self, self.panelSettingsShown else { return }
-            if let height { self.panelPageHeights[self.panelSetupWeb] = height }
-            self.showPanelPage(self.panelSetupWeb) { [weak self] in self?.fitPanel() }
-        }
-    }
-
-    /// Fills the panel's setup page: the account and the settings, or the sign-in block while
-    /// sign-in is needed, and the reason the board stopped. Answers the page's height; nil before
-    /// the page has loaded, and didFinish fills it then.
-    func fillPanelSettings(_ done: @escaping (CGFloat?) -> Void = { _ in }) {
-        let signInNeeded = onSetupScreen && !setupFromSettings
-        var context: Any = NSNull()
-        if !signInNeeded, let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
-           let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
-           let signedIn = setupContext(cfg) {
-            context = signedIn
-        }
-        let errors = setupBlocksFetch ? [setupReason].compactMap { $0 } : []
-        let args = (try? JSONSerialization.data(withJSONObject: [context, errors]))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "[null, []]"
-        panelSetupWeb.evaluateJavaScript("window.sbSettingsShow ? window.sbSettingsShow(...\(args)) : null") { height, _ in
-            done((height as? Double).map { CGFloat($0) })
-        }
-    }
-
-    func hidePanelSettings() {
-        guard panelSettingsShown else { return }
-        panelSettingsShown = false
-        selectPanelTab(tabControl.selectedSegment)
-    }
-
-    func panelPageHeight(_ height: CGFloat, for w: WKWebView) {
-        panelPageHeights[w] = height
-        if w === shownPanelPage { fitPanel() }
-    }
-
-    @objc func statusItemClicked() {
-        guard let event = NSApp.currentEvent else { return }
-        if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
-            panel.performClose(nil)
-            statusItem.menu = statusMenu
-            statusItem.button?.performClick(nil)
-            statusItem.menu = nil
-            return
-        }
-        // A transient popover closes on the mouse-down outside it, even when that mouse-down
-        // is on the icon; without this check the same click's mouse-up would reopen it.
-        if let closedAt = panelClosedByIconAt, event.timestamp - closedAt < 1 {
-            panelClosedByIconAt = nil
-            return
-        }
-        panelClosedByIconAt = nil
-        togglePanel()
-    }
-
-    func togglePanel() {
-        if panel.isShown { panel.performClose(nil); return }
-        guard let button = statusItem.button else { return }
-        // Sign-in or keychain access is needed: the panel opens on the setup page.
-        if setupBlocksFetch, !panelSettingsShown { showPanelSettings() }
-        fitPanel()   // the icon's screen may differ from the last time
-        if shownPanelPage === hostsWeb, !panelSettingsShown { hostsMessage(["status": true]) }
-        panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        // An accessory app's popover gets no keystrokes (the note field) until the app is active.
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func popoverDidShow(_ note: Notification) {
-        panel.contentViewController?.view.window?.makeKey()
-    }
-
-    func popoverWillClose(_ note: Notification) {
-        // The page must not open next time with whatever was last clicked hovered; it paints
-        // that while the popover fades out.
-        shownPanelPage?.evaluateJavaScript("document.documentElement.classList.add('nohover')")
-        if let event = NSApp.currentEvent, event.type == .leftMouseDown,
-           event.window != nil, event.window === statusItem.button?.window {
-            panelClosedByIconAt = event.timestamp
-        }
-    }
-
-    /// Fits the panel to the selected tab's page, never taller than the screen; beyond that
-    /// the page scrolls.
-    func fitPanel() {
-        guard let shown = shownPanelPage else { return }
-        // The setup page has no tab header above it.
-        let header = shown === panelSetupWeb ? 0 : PANEL_HEADER_HEIGHT
-        let screen = statusItem.button?.window?.screen ?? NSScreen.main
-        let maxPage = (screen?.visibleFrame.height ?? 800) - 40 - header
-        let page = min(max(panelPageHeights[shown] ?? PANEL_START_HEIGHT, 40), maxPage)
-        panel.contentSize = NSSize(width: BOARD_WIDTH, height: header + page)
-    }
-
-    /// Settings opens in the widget: OAuth goes through the browser, and a transient panel
-    /// would close the moment the browser comes forward. Whether the widget was hidden is
-    /// remembered so showBoard() can hide it again.
+    /// Settings opens in the widget. Whether the widget was hidden is remembered so the way
+    /// back can hide it again.
     func lendWidgetToSetup() {
         // Minimised is not closed: a minimised widget reports isVisible == false too.
         if widgetHiddenBeforeSetup == nil { widgetHiddenBeforeSetup = !window.isVisible && !window.isMiniaturized }
-        panel.performClose(nil)
-        // A panel page that loaded before this point would otherwise keep counting
-        // "fetching data…" while nothing will arrive until setup is done.
-        if lastJSON == nil {
-            for w in loadedBoards where w !== web { render(SETUP_PENDING_RESULT, in: w) }
-        }
     }
 
     /// Back from the setup screen to the board, whichever way: Back to board or a finished
@@ -1905,26 +1775,20 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         setupFromSettings = false
         browsingSettings = false
         setupResultTarget = nil
-        setupReason = nil
-        hidePanelSettings()
+        widgetSettingsShown = false
         loadPage(WIDGET_BOARD_PAGE)
-        // With no data yet the panel still says "action needed"; reloading it shows the
-        // loading ticker until the first result.
-        if lastJSON == nil { loadPage("popover/sprints.html", in: panelWeb) }
         reload()
         if widgetHiddenBeforeSetup == true { window.orderOut(nil) }
         widgetHiddenBeforeSetup = nil
     }
 
     /// Signed out: no board, nor the menu bar icon, may keep showing the previous account.
-    /// Reloading the panel's page also drops the page's own copy of the last good data (LAST_OK).
     func clearBoardData() {
         lastJSON = nil
         lastOkJSON = nil
         boardGeneration += 1
         menuIcon = MenuIconState()
         statusItem.button?.image = ringIcon(18, menuIcon)
-        loadPage("popover/sprints.html", in: panelWeb)
     }
 
     // MARK: hosts
@@ -1954,11 +1818,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     func hostsMessage(_ body: [String: Any]) {
         if body["openChrome"] != nil {
             chromeQueue.async { [weak self] in self?.openInsecureChrome() }
-            return
-        }
-        // The gear: Settings over the tabs; its back arrow returns to Hosts.
-        if body["settings"] != nil {
-            showPanelSettings()
             return
         }
         // The page also posts its height here; that is not an action and must not be
@@ -2043,7 +1902,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     /// The page gets the partner suffixes with every state, so "Add partner" follows the config,
     /// and the requestId of the message answered, so it can tell its action's reply from a state
-    /// Swift sent on its own (the panel opened, a tab switch).
+    /// Swift sent on its own (a tab switch).
     func replyHosts(_ state: [String: Any], to body: [String: Any]) {
         var state = state
         state["partnerSuffixes"] = hostsPartnerSuffixes()
@@ -2051,10 +1910,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         let json = (try? JSONSerialization.data(withJSONObject: state))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         DispatchQueue.main.async {
-            for page in [self.hostsWeb, self.widgetHostsWeb] as [WKWebView] {
-                page.evaluateJavaScript("window.sbHosts && window.sbHosts(\(json))") { _, err in
-                    if let err { dbg("sbHosts: \(err.localizedDescription)") }
-                }
+            self.hostsWeb.evaluateJavaScript("window.sbHosts && window.sbHosts(\(json))") { _, err in
+                if let err { dbg("sbHosts: \(err.localizedDescription)") }
             }
         }
     }
@@ -2145,10 +2002,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         let arg = (try? JSONSerialization.data(withJSONObject: note.map { $0 as Any } ?? NSNull(), options: .fragmentsAllowed))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "null"
         DispatchQueue.main.async {
-            for page in [self.hostsWeb, self.widgetHostsWeb] as [WKWebView] {
-                page.evaluateJavaScript("window.sbHostsNote && window.sbHostsNote(\(arg))") { _, err in
-                    if let err { dbg("sbHostsNote: \(err.localizedDescription)") }
-                }
+            self.hostsWeb.evaluateJavaScript("window.sbHostsNote && window.sbHostsNote(\(arg))") { _, err in
+                if let err { dbg("sbHostsNote: \(err.localizedDescription)") }
             }
         }
     }
@@ -2237,7 +2092,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// The setup screen was opened from Settings while signed in, so it offers "Back to board".
     var setupFromSettings = false
     /// The user opened Settings while signed in: nothing is wrong, so refreshes go on behind it
-    /// and reach the panel. A setup screen that opened itself (sign-in needed, or macOS refused
+    /// and reach the board. A setup screen that opened itself (sign-in needed, or macOS refused
     /// the token read) stops them, or each one would ask again.
     var browsingSettings = false
     var setupBlocksFetch: Bool { onSetupScreen && !browsingSettings }
@@ -2562,14 +2417,12 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             self.browsingSettings = false
             self.manualRefreshPending = false
             self.pendingSetupError = reason
-            self.setupReason = reason
-            // The panel is in use, or the widget was closed: sign in happens in the panel, now or
-            // the next time it opens. The widget keeps the setup screen without coming forward.
+            self.widgetSettingsShown = false
+            // The widget was closed: it keeps the setup screen without coming forward.
             let widgetClosed = !self.window.isVisible && !self.window.isMiniaturized
-            if self.panel.isShown || widgetClosed {
+            if widgetClosed {
                 self.loadPage("setup.html")
                 if !canGoBack { self.clearBoardData() }
-                if self.panel.isShown { self.showPanelSettings() }
                 return
             }
             self.lendWidgetToSetup()
@@ -2705,8 +2558,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     }
 
     func webView(_ w: WKWebView, didFinish nav: WKNavigation!) {
-        // Opened before its first load finished (the panel opening on sign-in at launch).
-        if w === panelSetupWeb, panelSettingsShown { fillPanelSettings() }
+        // Opened before its first load finished.
+        if w === widgetSettingsWeb, widgetSettingsShown { fillWidgetSettings() }
         if w === web {
             if restoreFrame != nil { applyFillClass() }
             if onSetupScreen, setupFromSettings,
@@ -2729,11 +2582,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         // A page that loads after the data arrived gets it now. The last good result goes
         // first, so a failed latest refresh still shows as a strip over the old data.
         if let good = lastOkJSON, good != lastJSON { render(good, in: w) }
-        if let last = lastJSON {
-            render(last, in: w)
-        } else if onSetupScreen {
-            render(SETUP_PENDING_RESULT, in: w)
-        }
+        if let last = lastJSON { render(last, in: w) }
         pushNotes()
     }
 
@@ -2793,11 +2642,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     func userContentController(_ c: WKUserContentController, didReceive msg: WKScriptMessage) {
         guard let body = msg.body as? [String: Any] else { return }
-        // Every panel tab sizes the panel the same way, whatever its handler.
-        if let w = msg.webView, panelTabs.contains(w) || w === panelSetupWeb, let h = body["height"] as? Double {
-            panelPageHeight(CGFloat(h), for: w)
-        }
-        if let w = msg.webView, w === web || w === widgetHostsWeb, let posted = body["height"] as? Double, posted > 60 {
+        if let w = msg.webView, widgetPages.contains(w), let posted = body["height"] as? Double, posted > 60 {
             let known = widgetPageHeights[w] != nil
             widgetPageHeights[w] = CGFloat(posted)
             if w === widgetShownPage { fitWidget(animated: known && w === web && !onSetupScreen) }
@@ -2805,32 +2650,24 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         // Below is the board/setup protocol. Other tabs' pages post to their own handlers
         // and must not reach it.
         if msg.name == "hosts" {
-            // The widget's Hosts gear opens the widget's settings; the panel may be closed.
-            if msg.webView === widgetHostsWeb, body["settings"] != nil { menuSetup(); return }
-            hostsMessage(body)
+            // The gear: Settings over the tabs; its back arrow returns to Hosts.
+            if body["settings"] != nil { menuSettings() } else { hostsMessage(body) }
             return
         }
         guard msg.name == "sb" else { return }
-        // The panel's board and its setup page share this handler. Window keys belong to the
-        // widget; setup messages come from the widget or the panel's setup page, never the board.
+        // The board, the setup screen and the Settings page share this handler. Window keys belong
+        // to the widget page; setup messages come from the setup screen or Settings, never the board.
         let fromWidget = msg.webView === web
-        let fromPanelSetup = msg.webView === panelSetupWeb
-        let fromSetupPage = fromWidget || fromPanelSetup
+        let fromSettingsPage = msg.webView === widgetSettingsWeb
+        let fromSetupPage = fromWidget || fromSettingsPage
 
         if let urlStr = body["open"] as? String, let url = URL(string: urlStr),
            url.scheme == "https" || url.scheme == "http" {
             NSWorkspace.shared.open(url)
         }
         if body["refresh"] != nil {
-            if setupBlocksFetch, let w = msg.webView, loadedBoards.contains(w) {
-                // reload() does nothing while sign-in or token access is needed. Answer the panel's ⟳
-                // anyway, as a failed refresh: its spinner stops, and with old data on
-                // screen the board shows this as the "could not refresh" strip.
-                render(SETUP_PENDING_RESULT, in: w)
-            } else {
-                manualRefreshPending = true
-                reload()
-            }
+            manualRefreshPending = true
+            reload()
         }
         if body["atlassianLogin"] != nil, fromSetupPage {
             setupResultTarget = msg.webView
@@ -2845,27 +2682,12 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
         if let t = body["noteAdd"] as? String { addNote(t) }
         if let i = body["noteDel"] as? String { removeNote(i) }
-        // The panel's gear opens the panel's settings; the widget's opens the widget's.
-        if body["settings"] != nil, !fromWidget { showPanelSettings() }
-        if body["settings"] != nil, fromWidget {
-            if onSetupScreen {
-                // Already open in the widget, possibly behind other windows.
-                panel.performClose(nil)
-                NSApp.activate(ignoringOtherApps: true)
-                window.makeKeyAndOrderFront(nil)
-            } else {
-                menuSetup()
-            }
-        }
-        let setupOpen = (fromWidget && onSetupScreen) || fromPanelSetup
+        if body["settings"] != nil { menuSettings() }
+        let setupOpen = (fromWidget && onSetupScreen) || fromSettingsPage
         if let s = body["saveSettings"] as? [String: Any], setupOpen, let page = msg.webView { saveSettings(s, reply: page) }
         if body["disconnect"] != nil, setupOpen { disconnect() }
         if body["backToBoard"] != nil, fromWidget, onSetupScreen { showBoard() }
-        if body["backToBoard"] != nil, fromPanelSetup {
-            // Back from a setup page that stopped the refreshes (macOS refused the keychain read)
-            // tries again, as the widget's Back to board does; otherwise it only closes the page.
-            if setupBlocksFetch, setupFromSettings { showBoard() } else { hidePanelSettings() }
-        }
+        if body["backToBoard"] != nil, fromSettingsPage { hideWidgetSettings() }
         if fromWidget, let w = body["win"] as? String {
             windowAction(w)
         }
