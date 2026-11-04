@@ -180,8 +180,9 @@ page on screen. A fold moves the window edge with the same time and curve as the
   list; **All local** and **All prod** switch every domain shown. **+** adds domains (several at
   once: `a.com,b.com`; URLs work too), a partner, or a group. A new domain goes into Sprint
   Board's block, between `# >>> extension manages >>>` and `# <<< extension manages <<<`, and
-  starts in Prod. Only a row in that block has a delete button; the other lines are yours to
-  remove by hand. The app never asks for an admin password: your user must be able to write
+  starts in Prod. The trash icon on a row removes that domain from every line it is on, in the
+  block or outside it. The other domains and the trailing comment stay, and the last domain on
+  a line takes the line. The app never asks for an admin password: your user must be able to write
   `/etc/hosts`, otherwise the tab says so and changes nothing
 - **Add partner** appears once Settings → **Partner domains** lists the domain endings a
   partner's environment answers on, separated by commas, e.g. `panel.example.com,

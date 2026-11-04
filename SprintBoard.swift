@@ -516,30 +516,36 @@ func hostsLineWithout(_ line: String, _ names: Set<String>) -> String {
     return out + line[last.upperBound...]
 }
 
+/// The line that hostsLocalLine accepted, in the same state, without `names`: the "#" and the
+/// spaces after it stay. nil when no name is left on it.
+func hostsEntryWithout(_ line: String, _ names: Set<String>) -> String? {
+    var start = line.startIndex
+    if let mark = line.firstIndex(where: { $0 != " " && $0 != "\t" }), line[mark] == "#" {
+        start = line.index(after: mark)
+    }
+    let rest = hostsLineWithout(String(line[start...]), names)
+    return hostsEntry(rest) == nil ? nil : String(line[..<start]) + rest
+}
+
 /// One domain on the Hosts tab. A domain on several lines is one row: Local when any of them is
-/// active. Removable when all its lines are in the block; the app never deletes any other line.
+/// active.
 struct HostsRow: Equatable {
     var name: String
     var local: Bool
-    var removable: Bool
 }
 
 /// The rows of a hosts file, in file order.
 func hostsRows(_ text: String) -> [HostsRow] {
-    let lines = text.components(separatedBy: "\n")
-    let block = managedHosts(text) == nil ? nil : hostsBlockRange(lines)
     var rows: [HostsRow] = []
     var seen: [String: Int] = [:]
-    for i in lines.indices {
-        guard let entry = hostsLocalLine(lines[i]) else { continue }
-        let inBlock = block?.contains(i) == true
+    for line in text.components(separatedBy: "\n") {
+        guard let entry = hostsLocalLine(line) else { continue }
         for name in entry.names {
             if let row = seen[name] {
                 rows[row].local = rows[row].local || entry.active
-                rows[row].removable = rows[row].removable && inBlock
             } else {
                 seen[name] = rows.count
-                rows.append(HostsRow(name: name, local: entry.active, removable: inBlock))
+                rows.append(HostsRow(name: name, local: entry.active))
             }
         }
     }
@@ -559,14 +565,12 @@ func hostsSwitched(_ text: String, _ names: Set<String>, local: Bool) -> String 
         let hits = entry.names.filter(wanted.contains)
         guard !hits.isEmpty else { out.append(line); continue }
         if local { wanted.subtract(hits) }
-        let active = local ? hostsUncommented(line) : line
-        let rest = hostsLineWithout(active, Set(hits))
-        guard hostsEntry(rest) != nil else {
-            out.append(local ? active : hostsCommented(line))
+        guard let rest = hostsEntryWithout(line, Set(hits)) else {
+            out.append(local ? hostsUncommented(line) : hostsCommented(line))
             continue
         }
         let moved = "\(entry.address)\t\(hits.joined(separator: " "))"
-        out += local ? [hostsCommented(rest), moved] : [rest, "#\(moved)"]
+        out += [rest, local ? moved : "#\(moved)"]
     }
     return out.joined(separator: "\n")
 }
@@ -595,25 +599,25 @@ func hostsAdded(_ text: String, _ names: [String]) -> String? {
     return lines.joined(separator: "\n")
 }
 
-/// The file with `names` gone from Sprint Board's block; a block left empty goes too. Lines
-/// outside the block stay. nil when the block is damaged.
+/// The file with `names` gone from every line, active or commented, in the block or outside it.
+/// A line left without a name goes, with its trailing comment; a block left empty goes too. A
+/// line with a system name never counts as an entry, so it stays. nil when the block is damaged.
 func hostsRemoved(_ text: String, _ names: [String]) -> String? {
     guard managedHosts(text) != nil else { return nil }
-    var lines = text.components(separatedBy: "\n")
-    guard !names.isEmpty, let range = hostsBlockRange(lines) else { return text }
     let gone = Set(names)
-    var held: [String] = []
-    for line in lines[(range.lowerBound + 1)..<range.upperBound] {
-        guard let entry = hostsLocalLine(line), entry.names.contains(where: gone.contains) else {
-            held.append(line)
-            continue
+    func kept(_ lines: ArraySlice<String>) -> [String] {
+        lines.compactMap { line -> String? in
+            guard let entry = hostsLocalLine(line), entry.names.contains(where: gone.contains) else { return line }
+            return hostsEntryWithout(line, gone)
         }
-        let rest = entry.active ? hostsLineWithout(line, gone) : hostsCommented(hostsLineWithout(hostsUncommented(line), gone))
-        if hostsLocalLine(rest) != nil { held.append(rest) }
     }
+    let lines = text.components(separatedBy: "\n")
+    guard let range = hostsBlockRange(lines) else { return kept(lines[...]).joined(separator: "\n") }
+    let inside = Array(lines[(range.lowerBound + 1)..<range.upperBound])
+    let held = kept(inside[...])
     let empty = held.allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
-    lines.replaceSubrange(range, with: empty ? [] : [HOSTS_BLOCK_START] + held + [HOSTS_BLOCK_END])
-    return lines.joined(separator: "\n")
+    let block = held == inside ? Array(lines[range]) : empty ? [] : [HOSTS_BLOCK_START] + held + [HOSTS_BLOCK_END]
+    return (kept(lines[..<range.lowerBound]) + block + kept(lines[(range.upperBound + 1)...])).joined(separator: "\n")
 }
 
 /// What one Hosts action changes in the file.
@@ -830,7 +834,7 @@ func hostsApply(_ list: HostsList, local: [String], _ action: [String: Any], par
 /// the group names.
 func hostsStatus(_ text: String, _ list: HostsList, writable: Bool) -> [String: Any] {
     let domains: [[String: Any]] = hostsRows(text).map { row in
-        ["name": row.name, "local": row.local, "removable": row.removable,
+        ["name": row.name, "local": row.local,
          "groups": list.groups.filter { $0.domains.contains(row.name) }.map(\.name)]
     }
     return ["mode": managedHosts(text) == nil ? "damaged" : "ok", "domains": domains,
@@ -1931,9 +1935,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
                 self.replyHosts(state, to: body)
                 return
             }
-            if let name = body["remove"] as? String, rows.first(where: { $0.name == name })?.removable == false {
+            if let name = body["remove"] as? String, HOSTS_SYSTEM_NAMES.contains(name.lowercased()) {
                 var state = hostsStatus(text, before, writable: writable)
-                state["error"] = "“\(name)” is outside Sprint Board's block, so it stays. Remove its line from /etc/hosts by hand."
+                state["error"] = "“\(name)” is a system entry, so it stays."
                 self.replyHosts(state, to: body)
                 return
             }
@@ -1953,7 +1957,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             let edit = HostsEdit(added: result.list.domains.filter { !before.domains.contains($0) }, removed: gone,
                                  toLocal: result.local.filter { !wasLocal.contains($0) },
                                  toProd: wasLocal.filter { kept.contains($0) && !result.local.contains($0) },
-                                 removedLocal: rows.contains { $0.local && $0.removable && gone.contains($0.name) })
+                                 removedLocal: rows.contains { $0.local && gone.contains($0.name) })
             // Opening the tab only reads: a status never writes /etc/hosts or refreshes Chrome.
             if body["status"] == nil, list == result.list, !edit.isEmpty {
                 if let failed = writeHostsFile(edit, path: HOSTS_PATH, backupDir: HOSTS_BACKUP_DIR) {

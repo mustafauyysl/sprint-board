@@ -561,7 +561,7 @@
         }).join("")}</div>` : ""}
         ${canCreate ? `<div class="gi create" id="groupCreate" data-key="create"><span class="cb">${PLUS}</span><span class="gn">Create “${esc(gq)}”</span></div>`
           : shown.length ? "" : `<div class="gnone" data-key="gnone">No groups yet. Type a name to create one.</div>`}</div></div>`;
-      const canDelete = d.removable && canChange;
+      const canDelete = canChange;
       const state = blocked ? "unknown" : d.local ? "local" : "prod";
       return `<div class="row ${state}${open ? " open" : ""}" data-key="r:${esc(d.name)}" data-fx data-row="${esc(d.name)}" title="Click to change its groups">
           <span class="name">${domainName(d.name)}</span>${tags ? `<span class="tags${d.groups.length > 1 ? " multi" : ""}">${tags}<span class="tag more" data-key="tagmore" hidden></span></span>` : ""}
