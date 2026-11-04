@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,8 @@ import {
   goalJql,
   isGoalDone,
   goalRisk,
+  goalRiskStages,
+  DEFAULT_GOAL_RISK_STAGES,
   goalBand,
   withGoalMarks,
   conflictIds,
@@ -750,6 +752,383 @@ test("both screens: a trackpad swipe does not pull the card off the window", () 
   }
 });
 
+test("board page: panel-only rules hide the widget's window buttons and let a tall board scroll", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
+  // The popover's page has no window buttons; it shows the popover material behind the board.
+  assert.doesNotMatch(sprints, /class="lights"|data-win/);
+  assert.match(sprints, /#card \{ padding: 14px 16px 16px; \}/);
+  assert.match(sprints, /html, body \{[^}]*overflow-y: auto;/);
+  // The widget's own rule stays: its window is cut to the card and must never scroll.
+  assert.match(view, /html, body \{[^}]*overflow: hidden;/);
+});
+
+test("board page: the panel takes the Hosts tab's greys, the widget keeps the system greys", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
+  const css = sprints.slice(0, sprints.indexOf("</style>"));
+  assert.match(css, /--t1: rgba\(255,255,255,\.96\); --t2: rgba\(255,255,255,\.8\); --t3: rgba\(255,255,255,\.62\);/);
+  // A system grey written directly would fade on the popover.
+  assert.doesNotMatch(css, /-apple-system-(secondary|tertiary)-label/);
+  assert.match(view.slice(0, view.indexOf("</style>")), /color:-apple-system-secondary-label/);
+});
+
+test("board page: in the panel every status folds, Done and Released on Prod start folded, the widget draws them all", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
+  // The team goal's tasks open from its card, below the cards; they start folded.
+  assert.match(sprints, /const open = isOpen\("goals", false\);/);
+  assert.match(sprints, /\$\{g && isOpen\("goals", false\) \? foldBody\("goals", goalPanel\(g\)\) : ""\}/);
+  // Work still tracked (phase 0 and 1) starts open; finished and cancelled (phase 2 and 3) folded.
+  assert.match(sprints, /const key = "status:" \+ g\.status;\n\s*const open = isOpen\(key, g\.phase < 2\);/);
+  // A click flips what the list shows now (a second click while it moves too), so a list open
+  // by default can be folded.
+  assert.match(sprints, /toggleFold\(el\.dataset\.fold, isOpen\(el\.dataset\.fold, el\.dataset\.open === "1"\)\);/);
+  // The task's age stays in the row's tooltip; the popover has no age column.
+  assert.doesNotMatch(sprints, /class="age"/);
+  const start = sprints.indexOf("  const FOLD = new Map();");
+  const end = sprints.indexOf("\n", sprints.indexOf("  const isOpen = ", start));
+  const isOpen = new Function(`${sprints.slice(start, end)}\nreturn { FOLD, isOpen };`)();
+  assert.equal(isOpen.isOpen("status:Done", false), false);
+  assert.equal(isOpen.isOpen("status:In Review", true), true);
+  isOpen.FOLD.set("status:In Review", false);
+  assert.equal(isOpen.isOpen("status:In Review", true), false);
+  // The widget draws every status.
+  assert.match(view, /\n\s*\$\{g\.tasks\.map\(taskRow\)\.join\(""\)\}`\)\.join\(""\)\}/);
+  assert.doesNotMatch(view, /data-fold/);
+});
+
+test("board page: in the panel a list folds and opens with motion, and the popover gets its final height once", async () => {
+  const view = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  assert.match(view, /\$\{open \? foldBody\(key, g\.tasks\.map\(taskRow\)\.join\(""\)\) : ""\}/);
+  assert.match(view, /const foldBody = \(key, html\) => `<div class="fold-body" data-body="\$\{esc\(key\)\}">\$\{html\}<\/div>`;/);
+  // clip, not hidden: the rows' margins still merge with the next header's, so nothing moves.
+  assert.match(view, /\.fold-body \{ overflow: clip; \}/);
+  assert.match(view, /const fit = \(\) => \{\n\s*if \(foldMoving\) return;/);
+  assert.match(view, /@media \(prefers-reduced-motion: reduce\) \{\n\s*\* \{ transition: none !important; \}/);
+  const start = view.indexOf("  const FOLD_MOTION = ");
+  const end = view.indexOf("\n  };", view.indexOf("  const toggleFold = ", start));
+  assert.ok(start > 0 && end > start);
+  const KEY = "status:In Review";
+  // A card 723 px high with the list open, 698 with it gone and 702 with it squeezed to 0:
+  // the 4 px are the margins that merge once the list is gone.
+  const make = ({ reduced = false, listShown = true } = {}) => {
+    const log = [];
+    const runs = [];
+    let shown = listShown;
+    const body = {
+      offsetHeight: 21, style: { cssText: "" }, getAnimations: () => [],
+      animate: (frames, options) => {
+        log.push(["fold", frames.map((f) => `${f.height} ${f.marginBottom}`), options.fill ?? "none"]);
+        return { finished: new Promise((resolve, reject) => runs.push({ resolve, reject })) };
+      },
+    };
+    const chevron = { animate: (frames) => log.push(["turn", frames.map((f) => f.transform)]) };
+    const card = {
+      get offsetHeight() {
+        if (!shown || body.style.cssText === "display: none") return 698;
+        return body.style.cssText === "height: 0" ? 702 : 723;
+      },
+      querySelector: (selector) => selector.startsWith("[data-body") ? (shown ? body : null) : chevron,
+    };
+    const FOLD = new Map();
+    const env = {
+      FOLD, LAST: {}, CSS: { escape: (text) => text },
+      draw: () => { shown = FOLD.get(KEY); log.push(["draw"]); },
+      fit: () => log.push(["fit"]),
+      matchMedia: () => ({ matches: reduced }),
+      post: (message) => log.push(["post", message.height]),
+      document: { getElementById: () => card },
+    };
+    const toggleFold = new Function(...Object.keys(env), `let foldMoving = false;\n${view.slice(start, end + 5)}\nreturn toggleFold;`)(...Object.values(env));
+    return { toggleFold, log, runs };
+  };
+  const settled = () => new Promise(setImmediate);
+
+  const closing = make();
+  closing.toggleFold(KEY, true);
+  assert.deepEqual(closing.log, [["post", 698], ["turn", ["rotate(0deg)", "rotate(180deg)"]], ["fold", ["21px 0px", "0px -4px"], "forwards"]]);
+  closing.runs[0].resolve();
+  await settled();
+  assert.deepEqual(closing.log.slice(3), [["draw"], ["fit"]]);
+
+  const opening = make({ listShown: false });
+  opening.toggleFold(KEY, false);
+  assert.deepEqual(opening.log, [["draw"], ["post", 723], ["turn", ["rotate(180deg)", "rotate(0deg)"]], ["fold", ["0px -4px", "21px 0px"], "none"]]);
+  opening.runs[0].resolve();
+  await settled();
+  assert.deepEqual(opening.log.slice(4), [["fit"]]);
+
+  const still = make({ reduced: true });
+  still.toggleFold(KEY, true);
+  assert.deepEqual(still.log, [["draw"]]);
+
+  // A second click while the list folds opens it again: the fold still ends, on rows already
+  // replaced, and must not draw the list again.
+  const reopened = make();
+  reopened.toggleFold(KEY, true);
+  reopened.toggleFold(KEY, false);
+  reopened.runs[0].resolve();
+  reopened.runs[1].resolve();
+  await settled();
+  assert.deepEqual(reopened.log.filter(([kind]) => kind === "draw" || kind === "fit"), [["draw"], ["fit"]]);
+
+  // A second click while the list opens folds it again: the opening is cancelled and settles nothing.
+  const refolded = make({ listShown: false });
+  refolded.toggleFold(KEY, false);
+  refolded.toggleFold(KEY, true);
+  refolded.runs[0].reject(new Error("AbortError"));
+  refolded.runs[1].resolve();
+  await settled();
+  assert.deepEqual(refolded.log.filter(([kind]) => kind === "draw" || kind === "fit"), [["draw"], ["draw"], ["fit"]]);
+});
+
+test("board page: in the panel the goal counts leave out the empty ones and each row fades from its risk colour", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
+  const start = sprints.indexOf("  const RISK_WORD = {");
+  const end = sprints.indexOf("\n  const goalPanel = ", start);
+  assert.ok(start > 0 && end > start);
+  const esc = (text) => String(text);
+  const { goalPills, goalRows } = new Function("esc", `${sprints.slice(start, end)}\nreturn { goalPills, goalRows };`)(esc);
+  const pills = goalPills({ red: 2, yellow: 0, ok: 0, done: 1 });
+  assert.equal((pills.match(/class="gpill /g) || []).length, 2);
+  assert.match(pills, /<span class="gpill red" title="Critical for its stage: too few working days left for where it is">2 critical<\/span>/);
+  assert.match(pills, /<span class="gpill done" title="Done in Jira">1 done<\/span>/);
+  assert.doesNotMatch(pills, /at risk|on track/);
+  const row = goalRows([{ risk: "yellow", key: "DEMO-101", summary: "Task", owner: "Ada Yilmaz", ownerShort: "Ada", status: "Design Testing In Progress", stage: "Design UAT", url: "#" }]);
+  assert.match(row, /<div class="grow yellow"/);
+  // Two pills of one style: the board column and the owner's first name; both in full in the tooltip.
+  assert.match(row, /<span class="gstat">Design UAT<\/span>\s*<span class="gstat">Ada<\/span>/);
+  assert.match(row, /title="Task&#10;Design Testing In Progress · Ada Yilmaz"/);
+  assert.doesNotMatch(row, /class="dot/);
+  const bare = goalRows([{ risk: "ok", key: "DEMO-102", summary: "Task", owner: null, ownerShort: "", status: "Something New", stage: "", url: "#" }]);
+  assert.match(bare, /<span class="gstat">Something New<\/span>/, "without a column the pill shows the status");
+  assert.match(bare, /<span class="gstat">Unassigned<\/span>/);
+  // The pills stay at 18 px (a 20 px circle made every row 3 px taller), with 11 px text on white 10%,
+  // as the Hosts tab's group pills.
+  assert.match(sprints, /\.gstat \{[^}]*height: 18px; line-height: 18px;[^}]*font-size: 11px; color: var\(--t2\); background: rgba\(255,255,255,\.1\); \}/);
+  assert.doesNotMatch(sprints, /gwho/);
+  assert.match(sprints, /\.gpills \{ display: flex; gap: 6px; margin: 0 0 4px; \}/);
+  assert.match(sprints, /\.gpanel \{ margin-top: 8px; padding: 4px; border-radius: 10px;/);
+  assert.match(sprints, /return `<div class="gpanel"><div class="gpills">\$\{goalPills\(goalCounts\(g\)\)\}<\/div>\$\{goalRows\(g\.rows\)\}<\/div>`;/);
+  // No strip on the left: the risk colour fades in from the left instead, the other way round to the task rows.
+  assert.doesNotMatch(sprints, /\.grow::before/);
+  // Hovered, a row turns a flat light grey, strong enough to stand out next to the coloured rows.
+  assert.match(sprints, /\.grow:hover \{ background: var\(--hover\); \}/);
+  assert.match(sprints, /\.grow \{[^}]*padding: 2px 2px 2px 6px; margin: 2px 0px 0;[^}]*background: linear-gradient\(90deg, color-mix\(in srgb, var\(--risk\) 22%, transparent\), transparent\); \}/);
+  for (const [risk, colour] of [["red", "red"], ["yellow", "yellow"], ["ok", "gray"], ["done", "green"]]) {
+    assert.match(sprints, new RegExp(`\\.grow\\.${risk} \\{ --risk: -apple-system-${colour}; \\}`), risk);
+  }
+  // The widget's goal band keeps every count and its dots.
+  assert.match(view, /\$\{ok \? `<span class="val">/);
+  assert.match(view, /<div class="summary">\$\{\["red", "yellow", "ok", "done"\]\.map\(\(k\) =>\n\s*`<span><span class="dot \$\{k\}"><\/span>\$\{count\[k\]\} \$\{RISK_WORD\[k\]\}<\/span>`\)/);
+});
+
+test("board page: in the panel a row's gradient ends in its icon's colour", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  // One rule for the task, past-sprint and GitHub rows; white when the icon has no colour.
+  assert.match(sprints, /\.row, \.brow, \.item \{[^}]*--icon: #fff;\s*background: linear-gradient\(90deg, transparent, color-mix\(in srgb, var\(--icon\) 8%, transparent\)\); \}/);
+  // Every colour an icon class can carry has its gradient colour.
+  for (const c of ["red", "orange", "yellow", "green", "blue", "purple", "gray"]) {
+    assert.match(sprints, new RegExp(`:is\\(\\.row, \\.brow, \\.item\\):has\\(> \\.sym\\.c-${c}\\) \\{ --icon: -apple-system-${c}; \\}`), c);
+  }
+});
+
+test("board page: in the panel the icon of work under way follows its status", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
+  const of = (page, prefix) => {
+    const start = page.indexOf("  const workIcon = (t) => {");
+    const end = page.indexOf("\n  };", start);
+    assert.ok(start > 0 && end > start);
+    return new Function(`${prefix} const sym = (name) => name;\n${page.slice(start, end + 5)}\nreturn workIcon;`)();
+  };
+  const icon = of(sprints, "");
+  assert.equal(icon({ status: "In Review" }), "eye");
+  assert.equal(icon({ status: "Code Review" }), "eye");
+  assert.equal(icon({ status: "IN TESTING" }), "checklist");
+  assert.equal(icon({ status: "Ready To Test" }), "checklist");
+  assert.equal(icon({ status: "Design UAT" }), "checklist");
+  assert.equal(icon({ status: "In Progress" }), "circle.lefthalf.filled");
+  // The widget keeps one icon for all work under way.
+  assert.match(view, /: t\.statusCategory === "new" \? sym\("circle", "c-gray"\) : sym\("circle\.lefthalf\.filled", "c-blue"\);/);
+});
+
+test("board page: in the panel the header holds the buttons, cards replace the bars, and every PR stays reachable", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
+  // The buttons sit in the header in the popover, under the progress bar in the widget.
+  assert.match(sprints, /<div class="hdr">\s*<span class="name">[^\n]*<\/span>\s*<span class="tools"><span class="rf expand" id="rf"/);
+  assert.match(view, /<div class="under"><span>\$\{d\.done\} of \$\{d\.total\} done<\/span>\s*<span class="tools"><span class="rf" id="rf"/);
+  assert.match(sprints, /\$\{topHtml\(d\)\}/);
+  // The refresh button shows the data's age when hovered, kept current while the popover is open.
+  assert.match(sprints, /<span class="when" id="ago">Updated \$\{ago\(d\.generatedAt\)\}<\/span>/);
+  assert.match(sprints, /el\.textContent = "Updated " \+ ago\(LAST\.generatedAt\)/);
+  assert.match(sprints, /\.rf\.expand:hover \.when \{ max-width: 140px; opacity: 1; margin-right: 6px; \}/);
+  // The header buttons match the Hosts tab's: 30 x 26 boxes, 16 px icons.
+  assert.match(sprints, /\.rf \{[^}]*width: 30px; height: 26px;\s*border-radius: 6px;[^}]*\}\n\s*\.rf \.sym \{ width: 16px; height: 16px; \}/);
+  assert.match(readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8"), /\.icon \{ width: 30px; height: 26px;[\s\S]*?\.icon svg \{ display: block; width: 16px; height: 16px; \}/);
+  // Text in a task row sits on one baseline, so a small "no PR" lines up with the day count.
+  assert.match(sprints, /\.row \{ align-items: baseline; \}/);
+  // No state word: PR numbers that do not fit wrap instead of being cut off.
+  assert.doesNotMatch(sprints, /class="w"/);
+  assert.match(sprints, /\.rp \{ flex: 1; min-width: 0; text-align: right; font-size: 11px; \}/);
+  // A merged PR shows the merge mark and a deployed one a globe; the day count's tooltip also
+  // gives the task's age.
+  const start = sprints.indexOf("  const PR_STATE_MARK = ");
+  const end = sprints.indexOf("\n", sprints.indexOf("  const prStateMark = ", start));
+  assert.ok(start > 0 && end > start);
+  const mark = new Function(`const sym = (name, cls) => name + "/" + cls;\n${sprints.slice(start, end)}\nreturn prStateMark;`)();
+  assert.equal(mark("merged"), "arrow.triangle.merge/sm");
+  assert.equal(mark("deployed"), "globe/sm");
+  assert.equal(mark("open"), "");
+  assert.match(sprints, /#\$\{esc\(p\.number\)\}\$\{prMark\(p\.ci\)\}\$\{prStateMark\(p\.status\)\}<\/span>/);
+  assert.match(sprints, /<span class="d" title="[^"]*&#10;opened \$\{t\.ageDays\} business days ago">/);
+});
+
+test("board page: in the panel every section header under MY TASKS and GITHUB looks the same", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  assert.match(sprints, /<div class="h">My tasks/);
+  // Main headers and the section headers under them differ in brightness, weight and case.
+  assert.match(sprints, /\.h \{ display: flex;[^}]*font-size: 11px; font-weight: 700;\s*letter-spacing: \.1em; text-transform: uppercase; color: var\(--t1\); \}/);
+  assert.match(sprints, /\.ghd \{ display: flex;[^}]*font-weight: 500; color: var\(--t3\); \}/);
+  // The past sprints' header is a section header, without its icon.
+  assert.match(sprints, /<div class="ghd">Past sprints · awaiting release/);
+  // GITHUB and NOTES are main headers like MY TASKS; no zone header, no separators.
+  assert.match(sprints, /<div class="h">GitHub\$\{count\}<\/div>/);
+  assert.match(sprints, /<div class="h">Notes /);
+  assert.doesNotMatch(sprints, /zone|<hr/);
+});
+
+test("panel tabs: the Sprint and Hosts tabs share one list text size, 13 px", () => {
+  assert.match(readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8"), /body \{ font: 13px -apple-system/);
+  assert.match(readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8"), /body \{\s*font: 13px\/1\.35 -apple-system/);
+});
+
+test("board page: the panel shows how old the data is, not a time that reads as the clock", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const start = sprints.indexOf("  const ago = (iso) => {");
+  const end = sprints.indexOf("\n  };", start);
+  assert.ok(start > 0 && end > start);
+  const ago = new Function(`${sprints.slice(start, end + 5)}\nreturn ago;`)();
+  const before = (minutes) => new Date(Date.now() - minutes * 60000).toISOString();
+  assert.equal(ago(before(0)), "just now");
+  assert.equal(ago(before(12)), "12 min ago");
+  assert.equal(ago(before(59)), "59 min ago");
+  assert.equal(ago(before(90)), "1 h ago");
+});
+
+test("board page: in the panel GitHub splits into what needs you and what waits on others", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
+  const start = sprints.indexOf("  const githubSplit = (d) => {");
+  const end = sprints.indexOf("\n  };", start);
+  assert.ok(start > 0 && end > start);
+  const githubSplit = new Function(`${sprints.slice(start, end + 5)}\nreturn githubSplit;`)();
+  const split = githubSplit({
+    reviewRequests: [{ number: 1 }], waitingPrs: [{ number: 2 }],
+    pullRequests: [{ number: 3, kind: "conflict" }, { number: 4, kind: "checking" }],
+  });
+  assert.deepEqual(split.reviews.map((p) => p.number), [1]);
+  assert.deepEqual(split.blocked.map((p) => p.number), [3]);
+  assert.deepEqual(split.waiting.map((p) => p.number), [2]);
+  // GitHub has not settled the merge state yet: nothing for you to do.
+  assert.deepEqual(split.checking.map((p) => p.number), [4]);
+  assert.deepEqual(githubSplit({}), { reviews: [], blocked: [], waiting: [], checking: [] });
+  const from = sprints.indexOf("  const ghItem = ");
+  const to = sprints.indexOf("\n  };", sprints.indexOf("  const githubHtml = ", from));
+  const stubs = { esc: (t) => String(t), sym: (name) => `[${name}]`, isOpen: (key, byDefault) => key !== "github:waiting" && byDefault,
+    foldHeader: (cls, key, open, label) => `<div class="${cls} fold" data-fold="${key}" data-open="${open ? 1 : 0}">${label}</div>`,
+    foldBody: (key, html) => html };
+  const githubHtml = new Function(...Object.keys(stubs), `${sprints.slice(start, end + 5)}\n${sprints.slice(from, to + 5)}\nreturn githubHtml;`)(...Object.values(stubs));
+  const html = githubHtml({
+    reviewRequests: [{ number: 1, repo: "a", author: "Ada", days: 3 }], waitingPrs: [{ number: 2, repo: "b", checks: ["review"] }],
+    pullRequests: [{ number: 3, repo: "c", kind: "conflict", reasons: ["conflict"] }, { number: 4, repo: "d", kind: "checking" }],
+  });
+  const heads = [...html.matchAll(/<div class="(h|ghd[^"]*)"[^>]*>([^<]*)<span class="n">(\d+)<\/span>/g)].map((m) => `${m[2].trim()} ${m[3]}`);
+  // The widget's order: Waiting, Awaiting your review, Merge blocked.
+  assert.deepEqual(heads, ["GitHub 4", "Waiting For Review 1", "Awaiting Your Review 1", "Merge Blocked 2"]);
+  // A PR GitHub has not settled sits under Merge Blocked, after the blocked ones, as in the widget.
+  assert.ok(html.indexOf("Merge Blocked") < html.indexOf("c#3") && html.indexOf("c#3") < html.indexOf("d#4"));
+  const widget = view.slice(view.indexOf('<div class="zone">GITHUB</div>'), view.indexOf("${d.update"));
+  assert.ok(widget.indexOf('band("waiting"') < widget.indexOf('band("review"') && widget.indexOf('band("review"') < widget.indexOf("prBand("));
+  // A folded section keeps its header and drops its rows.
+  assert.match(html, /data-fold="github:waiting" data-open="0">Waiting For Review/);
+  assert.doesNotMatch(html, /b#2/);
+  assert.match(githubHtml({ prsAvailable: true }), /<div class="h">GitHub<\/div><div class="clear">/);
+  assert.match(sprints, /\$\{githubHtml\(d\)\}/);
+});
+
+test("board page: every SF Symbol the page names is in the list Swift injects", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  const list = read("./SprintBoard.swift").match(/^let PAGE_SYMBOLS = \[([\s\S]*?)^\]/m)?.[1] ?? "";
+  const known = new Set([...list.matchAll(/"([^"]+)"/g)].map((m) => m[1]));
+  // A name missing from the list draws nothing: the page has no other way to get the image.
+  const names = (page) => {
+    const mapped = [...page.matchAll(/const PR_(?:STATE_)?MARK = \{([^}]*)\}/g)].flatMap((m) => [...m[1].matchAll(/"([^"]+)"/g)].map((name) => name[1]));
+    // A symbol may be picked by a condition: sym(open ? "chevron.up" : "chevron.down", …).
+    const named = [...page.matchAll(/sym\((?:[\w.]+ \? )?"([^"]+)"(?: : "([^"]+)")?/g)].flatMap((m) => m.slice(1).filter(Boolean));
+    return { mapped, used: named.concat(mapped) };
+  };
+  const view = names(read("./view.html"));
+  const sprints = names(read("./popover/sprints.html"));
+  assert.ok(view.mapped.includes("checkmark"));
+  assert.ok(sprints.mapped.includes("arrow.triangle.merge") && sprints.mapped.includes("checkmark"));
+  assert.ok(sprints.used.includes("chevron.down") && sprints.used.includes("chevron.up"));
+  for (const [page, { used }] of [["view.html", view], ["popover/sprints.html", sprints]]) {
+    assert.deepEqual(used.filter((name) => !known.has(name)), [], page);
+  }
+});
+
+test("panel tabs: each tab's page exists and reports its height to its own handler", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  const block = read("./SprintBoard.swift").match(/^let PANEL_TABS[^\n]*\n([\s\S]*?)^\]/m)?.[1] ?? "";
+  const tabs = [...block.matchAll(/\("([^"]+)", "([^"]+)", "([^"]+)"\)/g)].map(([, title, page, handler]) => ({ title, page, handler }));
+  assert.deepEqual(tabs.map((t) => t.title), ["Sprint", "Hosts"]);
+  for (const { page, handler } of tabs) {
+    // A page posting to another tab's handler would be ignored, and the panel would stay
+    // at its start size. A page may post through a helper bound to its handler.
+    const html = read(`./${page}`);
+    const direct = new RegExp(`messageHandlers\\?\\.${handler}\\?\\.postMessage\\(\\{ height: `).test(html);
+    const viaPost = new RegExp(`const post = \\(message\\) => window\\.webkit\\?\\.messageHandlers\\?\\.${handler}\\?\\.postMessage\\(message\\);`).test(html)
+      && /post\(\{ height: /.test(html);
+    assert.ok(direct || viaPost, page);
+  }
+});
+
+test("panel tabs: panel pages get the SF Symbol style sheet, as the widget does", () => {
+  const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  // Without it every icon on the panel's board is blank, while the widget looks right.
+  const panel = swift.match(/func makePanelWebView[\s\S]*?\n    \}\n/)?.[0] ?? "";
+  assert.ok(panel, "makePanelWebView not found");
+  assert.match(panel, /addUserScript\(script\)/);
+  assert.match(swift, /if let script = symbolScript\(\) \{ cfg\.userContentController\.addUserScript\(script\) \}\n\n\s*let frame = savedFrame\(\)/);
+});
+
+test("signing: a Developer ID build may send Apple Events to Chrome", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  // Under the hardened runtime macOS refuses Apple Events without this entitlement and never
+  // asks, so the Chrome refresh after a Hosts switch would fail in every signed build.
+  assert.match(read("./app.entitlements"), /<key>com\.apple\.security\.automation\.apple-events<\/key><true\/>/);
+  assert.match(read("./build-app.sh"),
+    /^\s*codesign --force --timestamp --options runtime --entitlements app\.entitlements --sign "\$DEV_ID" "\$APP"$/m);
+});
+
+test("release build: every page is copied into the bundle", () => {
+  // A development build reads pages from the repo, so a page missing from this list only
+  // breaks the distributed app.
+  const script = readFileSync(new URL("./build-app.sh", import.meta.url), "utf8");
+  const line = script.match(/^\s*cp ([^\n]*\bview\.html\b[^\n]*)"\$APP\/Contents\/Resources\/"$/m)?.[1] ?? "";
+  const copied = line.trim().split(/\s+/);
+  const pages = readdirSync(new URL(".", import.meta.url)).filter((f) => f.endsWith(".html"));
+  assert.ok(pages.length >= 2);
+  for (const page of pages) assert.ok(copied.includes(page), `${page} is not in build-app.sh's release copy list`);
+  // The popover's pages travel as one folder.
+  assert.match(script, /^\s*cp -R popover "\$APP\/Contents\/Resources\/"$/m);
+  assert.deepEqual(readdirSync(new URL("./popover/", import.meta.url)).filter((f) => f.endsWith(".html")).sort(), ["hosts.html", "settings.html", "sprints.html"]);
+});
+
 test("addNote: every note gets a unique id", () => {
   const t = at("2026-08-20");
   const n = addNote(addNote([], "a", t), "b", t);
@@ -1375,22 +1754,72 @@ test("isGoalDone: done is the status category, not a status name", () => {
   assert.equal(isGoalDone(null), false);
 });
 
-test("goalRisk: a goal task is not coloured in the first week (day 7)", () => {
-  assert.equal(goalRisk(at("2026-08-16"), goalStart, goalEnd, { key: "indeterminate" }), "ok");
+// A real sprint: Thursday 22 Oct to Wednesday 4 Nov; Jira's end is Thursday 5 Nov 07:00.
+const riskStart = "2026-10-22T14:03:10.336Z";
+const riskEnd = "2026-11-05T07:00:00.000Z";
+const colourOn = (day, status, category = "indeterminate", stages) =>
+  goalRisk(at(day), riskStart, riskEnd, { key: category }, status, stages);
+
+test("goalRisk: the sprint's last day counts as its last 1 day, the Monday before as its last 3", () => {
+  assert.equal(businessDaysBetween(at("2026-11-04"), riskEnd), 1);
+  assert.equal(businessDaysBetween(at("2026-11-02"), riskEnd), 3);
+  assert.equal(businessDaysBetween(at("2026-10-22"), riskEnd), 10);
 });
 
-test("goalRisk: from day 8 an open goal task is yellow", () => {
-  assert.equal(goalRisk(at("2026-08-17"), goalStart, goalEnd, { key: "indeterminate" }), "yellow");
+test("goalRisk: each stage turns at risk and critical in its own last days", () => {
+  const cases = [
+    // [status, last day still on track, first at-risk day, first critical day]
+    ["To Do", "2026-10-27", "2026-10-28", "2026-10-30"],
+    ["In Progress", "2026-10-28", "2026-10-29", "2026-11-02"],
+    ["In Code Review", "2026-10-28", "2026-10-29", "2026-11-02"],
+    ["Ready To Test", "2026-10-29", "2026-10-30", "2026-11-03"],
+    ["IN TESTING", "2026-10-29", "2026-10-30", "2026-11-03"],
+    ["IN AUTO TESTING", "2026-10-29", "2026-10-30", "2026-11-03"],
+    ["Design UAT", "2026-10-30", "2026-11-02", "2026-11-04"],
+    ["UAT", "2026-10-30", "2026-11-02", "2026-11-04"],
+  ];
+  for (const [status, calm, risky, critical] of cases) {
+    assert.equal(colourOn(calm, status), "ok", `${status} on ${calm}`);
+    assert.equal(colourOn(risky, status), "yellow", `${status} on ${risky}`);
+    assert.equal(colourOn(critical, status), "red", `${status} on ${critical}`);
+  }
 });
 
-test("goalRisk: the 4th business day before the end is still yellow", () => {
-  assert.equal(goalRisk(at("2026-08-18"), goalStart, goalEnd, { key: "new" }), "yellow");
+test("goalRisk: security check is at risk in the last 2 days and never critical", () => {
+  assert.equal(colourOn("2026-11-02", "In Security Check"), "ok");
+  assert.equal(colourOn("2026-11-03", "In Security Check"), "yellow");
+  assert.equal(colourOn("2026-11-04", "In Security Check"), "yellow");
+  assert.equal(colourOn("2026-11-06", "In Security Check"), "yellow", "after the end too");
 });
 
-test("goalRisk: the 3rd business day before the end is red, across the weekend", () => {
-  assert.equal(goalRisk(at("2026-08-19"), goalStart, goalEnd, { key: "new" }), "red");
-  assert.equal(goalRisk(at("2026-08-21"), goalStart, goalEnd, { key: "new" }), "red");
-  assert.equal(goalRisk(at("2026-08-26"), goalStart, goalEnd, { key: "new" }), "red", "after the end it stays red");
+test("goalRisk: a status the board files under a later column follows that column, not its Jira category", () => {
+  assert.equal(colourOn("2026-11-02", "QA Check", "new"), "yellow", "QA, not To Do");
+  assert.equal(colourOn("2026-11-02", "Design Testing Done", "new"), "yellow", "Design UAT, not To Do");
+});
+
+test("goalRisk: a status is matched in any case; one no stage lists counts as In Progress", () => {
+  assert.equal(colourOn("2026-11-02", "in testing"), "yellow");
+  assert.equal(colourOn("2026-10-29", "Something New"), "yellow");
+  assert.equal(colourOn("2026-11-02", "Something New"), "red");
+});
+
+test("goalRisk: a waiting-for-release task is never coloured, and the config's stages replace the defaults", () => {
+  assert.equal(colourOn("2026-11-04", "Ready For Release", "done"), "done");
+  const stages = [{ name: "Waiting", never: true, statuses: ["Parked"] }, { name: "UAT", atRisk: 5, critical: 2, statuses: ["UAT"] }];
+  assert.equal(colourOn("2026-11-04", "Parked", "indeterminate", stages), "ok");
+  assert.equal(colourOn("2026-10-29", "UAT", "indeterminate", stages), "yellow");
+  assert.equal(colourOn("2026-11-03", "UAT", "indeterminate", stages), "red");
+  assert.equal(goalRiskStages({ goalRiskStages: stages }), stages);
+  assert.equal(goalRiskStages({ goalRiskStages: "broken" }), DEFAULT_GOAL_RISK_STAGES);
+  assert.equal(goalRiskStages(null), DEFAULT_GOAL_RISK_STAGES);
+});
+
+test("goalRisk: the default stages are the agreed table", () => {
+  const table = DEFAULT_GOAL_RISK_STAGES.map((st) => `${st.name} ${st.never ? "never" : `${st.atRisk}/${st.critical}`}`);
+  assert.deepEqual(table, ["To Do 6/4", "In Progress 5/3", "In Review 5/3", "Ready to Test 4/2", "QA 4/2",
+    "Automation Test 4/2", "Design UAT 3/1", "UAT 3/1", "Security 2/null", "Released never"]);
+  const example = JSON.parse(readFileSync(new URL("./config.example.json", import.meta.url), "utf8"));
+  assert.deepEqual(example.goalRiskStages, DEFAULT_GOAL_RISK_STAGES, "the example config shows the same list");
 });
 
 test("goalRisk: a done goal task is done whatever the date", () => {
@@ -1443,15 +1872,35 @@ test("goalBand: counts done goal tasks and takes the worst colour", () => {
   assert.equal(band.worst, "red");
   assert.deepEqual(band.rows.map((r) => [r.key, r.risk]), [["DEMO-2", "red"], ["DEMO-1", "done"]]);
   assert.deepEqual(band.rows[0], {
-    key: "DEMO-2", summary: "DEMO-2 summary", owner: "Ada Yilmaz", status: "In Progress",
+    key: "DEMO-2", summary: "DEMO-2 summary", owner: "Ada Yilmaz", ownerShort: "Ada", status: "In Progress", stage: "In Progress",
     risk: "red", url: "https://example.invalid/browse/DEMO-2",
   });
+});
+
+test("goalBand: a goal task's status name reaches its colour", () => {
+  const testing = goalIssue("DEMO-4", "indeterminate");
+  testing.fields.status.name = "In Testing";
+  const band = goalBand([goalIssue("DEMO-2", "indeterminate"), testing], [goalSprint], at("2026-08-19"), "example.invalid", "customfield_1");
+  assert.deepEqual(band.rows.map((r) => [r.key, r.risk]), [["DEMO-2", "red"], ["DEMO-4", "yellow"]]);
+  const calm = { goalRiskStages: [{ name: "Anything", atRisk: 1, critical: null, statuses: ["In Progress", "In Testing"] }] };
+  const configured = goalBand([goalIssue("DEMO-2", "indeterminate"), testing], [goalSprint], at("2026-08-19"), "example.invalid", "customfield_1", calm);
+  assert.deepEqual(configured.rows.map((r) => r.risk), ["ok", "ok"], "the config's stages reach every row");
+  assert.deepEqual(configured.rows.map((r) => r.stage), ["Anything", "Anything"]);
+  const unlisted = goalIssue("DEMO-5", "indeterminate");
+  unlisted.fields.status.name = "Something New";
+  assert.equal(goalBand([unlisted], [goalSprint], at("2026-08-19"), "example.invalid", "customfield_1").rows[0].stage, "",
+    "a status no stage lists has no column");
 });
 
 test("goalBand: an unassigned goal task and a sprint with no goal tasks", () => {
   const one = goalBand([goalIssue("DEMO-3", "new", { assignee: null })],
     [goalSprint], at("2026-08-12"), "example.invalid", "customfield_1");
   assert.equal(one.rows[0].owner, null);
+  assert.equal(one.rows[0].ownerShort, "");
+  // The first name follows the config's nameOverrides, like the QA name.
+  const named = goalBand([goalIssue("DEMO-3", "new")], [goalSprint], at("2026-08-12"), "example.invalid", "customfield_1",
+    { nameOverrides: { "Ada Yilmaz": "Ayşe" } });
+  assert.equal(named.rows[0].ownerShort, "Ayşe");
   assert.equal(one.worst, "ok");
   const none = goalBand([], [goalSprint], at("2026-08-12"), "example.invalid", "customfield_1");
   assert.deepEqual([none.done, none.total, none.worst, none.rows], [0, 0, "ok", []]);
@@ -1777,9 +2226,9 @@ test("--demo: with sprint goal tracking off there is no goal data and no GOAL ma
 
 test("--demo: with sprint goal tracking on the band shows every colour and my goal task is marked", () => {
   const out = runDemo({ host: "example.invalid", sprintGoalTracking: true });
-  assert.deepEqual(out.sprintGoal.rows.map((r) => r.risk), ["red", "yellow", "done"]);
+  assert.deepEqual(out.sprintGoal.rows.map((r) => r.risk), ["red", "yellow", "ok", "done"]);
   assert.equal(out.sprintGoal.worst, "red");
-  assert.deepEqual([out.sprintGoal.done, out.sprintGoal.total], [1, 3]);
+  assert.deepEqual([out.sprintGoal.done, out.sprintGoal.total], [1, 4]);
   assert.deepEqual(out.tasks.filter((t) => t.goal).map((t) => t.key), ["DEMO-102"]);
 });
 
@@ -2016,8 +2465,16 @@ const setupInputs = {
   disconnected: { githubOrg: "acme", showDraftPrs: false },
   emptyEmail: { email: "" },
   oauth: { email: "ada@example.invalid", authMode: "oauth", tokensOwnedByApp: true, githubOrg: "acme" },
-  token: { email: "ada@example.invalid", authMode: "token", tokensOwnedByApp: true, showDraftPrs: false, sprintGoalTracking: true },
+  token: { email: "ada@example.invalid", authMode: "token", tokensOwnedByApp: true, showDraftPrs: false, sprintGoalTracking: true,
+    partnerDomainSuffixes: ["panel.example.test", "API.example.test", "bad name"] },
   handMade: { email: "ada@example.invalid", keychainService: "sprint-board-jira" },
+};
+
+// A typed partner domain list and what Settings saves for it; null = refused.
+const partnerListInputs = {
+  "": [], " , ": [], "panel.example.test": ["panel.example.test"],
+  " Panel.Example.TEST , api.example.test,panel.example.test ": ["panel.example.test", "api.example.test"],
+  "panel.example.test, bad name": null, "single": null,
 };
 
 let swiftCache;
@@ -2034,6 +2491,9 @@ ${keychainConsts.join("\n")}
 ${swiftSource(src, "jiraCloudHost")}
 ${swiftSource(src, "appWrittenTokenService")}
 ${swiftSource(src, "githubOrgName")}
+${swiftSource(src, "hostsName")}
+${swiftSource(src, "partnerDomainSuffixes")}
+${swiftSource(src, "partnerSuffixList")}
 ${swiftSource(src, "resultNotifications")}
 ${swiftSource(src, "dockChoice")}
 ${swiftSource(src, "toggledDockChoice")}
@@ -2045,6 +2505,7 @@ let configs = input["configs"] as! [String: [String: Any]]
 var services: [String: Any] = [:]
 for (key, cfg) in configs { services[key] = appWrittenTokenService(cfg).map { $0 as Any } ?? NSNull() }
 let orgs: [Any] = (input["orgs"] as! [String]).map { o in githubOrgName(o).map { $0 as Any } ?? NSNull() }
+let partnerLists: [Any] = (input["partnerLists"] as! [String]).map { p in partnerSuffixList(p).map { $0 as Any } ?? NSNull() }
 var notes: [String: Any] = [:]
 for (key, r) in input["results"] as! [String: [String: Any]] {
   notes[key] = resultNotifications(r["obj"] as? [String: Any], ok: r["ok"] as! Bool,
@@ -2056,14 +2517,14 @@ let dock: [String: Bool] = [
 ]
 var contexts: [String: Any] = [:]
 for (key, cfg) in input["setups"] as! [String: [String: Any]] { contexts[key] = setupContext(cfg) ?? NSNull() }
-FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services, "orgs": orgs, "notes": notes, "dock": dock, "contexts": contexts]))
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["hosts": hosts, "services": services, "orgs": orgs, "notes": notes, "dock": dock, "contexts": contexts, "partnerLists": partnerLists]))
 `;
   const dir = mkdtempSync(join(tmpdir(), "sprint-board-swift-"));
   try {
     writeFileSync(join(dir, "main.swift"), driver);
     execFileSync("swiftc", [join(dir, "main.swift"), "-o", join(dir, "helpers")], { stdio: "pipe" });
     const out = JSON.parse(
-      execFileSync(join(dir, "helpers"), { input: JSON.stringify({ hosts: hostInputs, configs: configInputs, orgs: orgInputs, results: resultInputs, setups: setupInputs }) }),
+      execFileSync(join(dir, "helpers"), { input: JSON.stringify({ hosts: hostInputs, configs: configInputs, orgs: orgInputs, results: resultInputs, setups: setupInputs, partnerLists: Object.keys(partnerListInputs) }) }),
     );
     swiftCache = {
       host: Object.fromEntries(hostInputs.map((h, i) => [h, out.hosts[i]])),
@@ -2072,6 +2533,7 @@ FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: ["ho
       notes: out.notes,
       dock: out.dock,
       contexts: out.contexts,
+      partnerLists: Object.fromEntries(Object.keys(partnerListInputs).map((p, i) => [p, out.partnerLists[i]])),
     };
     return swiftCache;
   } finally {
@@ -2175,6 +2637,29 @@ test("setupContext: carries the board settings, with their defaults", { skip: !s
   assert.equal(contexts.token.showDraftPrs, false);
 });
 
+test("partnerSuffixList: a comma-separated list of domain names, trimmed, lower case and without repeats; any other entry refuses it all", { skip: !swiftAvailable }, () => {
+  assert.deepEqual(swiftHelpers().partnerLists, partnerListInputs);
+});
+
+test("setupContext: carries the partner domain suffixes, none by default", { skip: !swiftAvailable }, () => {
+  const { contexts } = swiftHelpers();
+  assert.deepEqual(contexts.token.partnerDomainSuffixes, ["panel.example.test", "api.example.test"]);
+  assert.deepEqual(contexts.oauth.partnerDomainSuffixes, []);
+});
+
+test("saveSettings: the popover's Settings saves the partner domains; a save that does not send them keeps them", () => {
+  const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const save = methodSource(swift, "saveSettings");
+  assert.match(save, /if let typed = s\["partnerDomainSuffixes"\] as\? String \{\n\s*guard let partners = partnerSuffixList\(typed\) else \{/);
+  assert.match(save, /cfg\["partnerDomainSuffixes"\] = partners/);
+  assert.match(save, /"partnerDomainSuffixes": partnerDomainSuffixes\(cfg\)\], to: page\)/);
+  const page = readFileSync(new URL("./popover/settings.html", import.meta.url), "utf8");
+  assert.match(page, /<input id="partners" placeholder="empty = no Add partner"/);
+  assert.match(page, /\$\("partners"\)\.value = \(s\.partnerDomainSuffixes \|\| \[\]\)\.join\(", "\);/);
+  assert.match(page, /partnerDomainSuffixes: \$\("partners"\)\.value \}/);
+  assert.doesNotMatch(readFileSync(new URL("./setup.html", import.meta.url), "utf8"), /partnerDomainSuffixes/, "the widget's Settings does not send them");
+});
+
 test("setupContext: sprint goal tracking is off unless the config turns it on", { skip: !swiftAvailable }, () => {
   const { contexts } = swiftHelpers();
   assert.equal(contexts.oauth.sprintGoalTracking, false);
@@ -2215,4 +2700,938 @@ test("toggledDockChoice: Show in Dock turns it on, a second click turns it off",
 test("resultNotifications: a failed refresh the user asked for says so", { skip: !swiftAvailable }, () => {
   assert.deepEqual(swiftHelpers().notes.boardManualFailed,
     [{ id: "refresh", title: "Refresh failed", body: "GitHub HTTP 502" }]);
+});
+
+// --- Hosts: Sprint Board's block in /etc/hosts -----------------------------------------
+// The functions are cut out of SprintBoard.swift and compiled once into a driver that takes
+// a list of operations on stdin. Writes only ever go to files in a temp dir — never to the
+// real /etc/hosts.
+
+// Like swiftSource, for a top-level declaration that is not a function (a struct).
+function swiftDecl(src, header) {
+  const start = src.indexOf(`\n${header}`);
+  const end = src.indexOf("\n}\n", start);
+  assert.ok(start >= 0 && end > start, `${header} not found in SprintBoard.swift`);
+  return src.slice(start + 1, end + 3);
+}
+
+let hostsDriver;
+function hostsRun(ops) {
+  if (!hostsDriver) {
+    const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+    const consts = ["HOSTS_BLOCK_START", "HOSTS_BLOCK_END", "HOSTS_LEGACY_BLOCK_START", "HOSTS_LEGACY_BLOCK_END",
+      "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS"].map((name) => {
+      const line = src.match(new RegExp(`^let ${name} = .*$`, "m"));
+      assert.ok(line, `${name} not found in SprintBoard.swift`);
+      return line[0];
+    });
+    const structs = ["struct HostsGroup", "struct HostsList"].map((header) => swiftDecl(src, header));
+    const funcs = ["hostsName", "hostsEntry", "hostsMarkers", "hostsBlockRange", "managedHosts", "hostsWithBlock",
+      "hostsConflicts", "hostsImportable", "hostsGroupHeader", "hostsImportGroups", "hostsPartnerName", "partnerDomainSuffixes", "hostsGroupName", "hostsList", "hostsListJSON", "hostsApply", "hostsStatus",
+      "hostsFileText", "writeHostsBlock", "chromeRefreshScript", "chromeRefreshNote", "chromeMissingFlags"].map((name) => swiftSource(src, name));
+    const driver = `import Foundation
+${consts.join("\n")}
+${structs.join("\n")}
+${funcs.join("\n")}
+let ops = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [[String: Any]]
+let results: [Any] = ops.map { op in
+    let text = op["text"] as? String ?? ""
+    let names = op["names"] as? [String] ?? []
+    switch op["op"] as! String {
+    case "name": return hostsName(op["raw"] as! String).map { $0 as Any } ?? NSNull()
+    case "managed": return managedHosts(text).map { $0 as Any } ?? NSNull()
+    case "with": return hostsWithBlock(text, names).map { $0 as Any } ?? NSNull()
+    case "conflicts": return hostsConflicts(text, names)
+    case "importable": return hostsImportable(text, names)
+    case "status":
+        return hostsStatus(text, hostsList(fromJSON: op["list"]) ?? HostsList(), writable: op["writable"] as? Bool ?? true)
+    case "groupName": return hostsGroupName(op["raw"] as! String).map { $0 as Any } ?? NSNull()
+    case "groupHeader": return hostsGroupHeader(op["raw"] as! String).map { $0 as Any } ?? NSNull()
+    case "importGroups": return hostsImportGroups(text)
+    case "partnerName": return hostsPartnerName(op["raw"] as! String).map { $0 as Any } ?? NSNull()
+    case "partnerSuffixes": return partnerDomainSuffixes(op["config"] as? [String: Any] ?? [:])
+    case "list": return hostsList(fromJSON: op["json"]).map { hostsListJSON($0) as Any } ?? NSNull()
+    case "apply":
+        let r = hostsApply(hostsList(fromJSON: op["list"])!, local: op["local"] as? [String] ?? [],
+                           op["action"] as! [String: Any], partners: op["partners"] as? [String] ?? [])
+        return ["list": hostsListJSON(r.list), "local": r.local, "error": r.error.map { $0 as Any } ?? NSNull()]
+    case "write":
+        return writeHostsBlock(names, path: op["path"] as! String, backupDir: op["backupDir"] as! String)
+            .map { $0 as Any } ?? NSNull()
+    case "chromeScript": return chromeRefreshScript()
+    case "missingFlags": return chromeMissingFlags(op["commandLine"] as! String)
+    case "insecureFlags": return CHROME_INSECURE_FLAGS
+    case "chromeNote":
+        return chromeRefreshNote(status: Int32(op["status"] as! Int), stderr: op["stderr"] as? String ?? "",
+                                 timedOut: op["timedOut"] as? Bool ?? false).map { $0 as Any } ?? NSNull()
+    default: return NSNull()
+    }
+}
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: results, options: [.fragmentsAllowed]))
+`;
+    const dir = mkdtempSync(join(tmpdir(), "sprint-board-hosts-"));
+    process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, "main.swift"), driver);
+    execFileSync("swiftc", [join(dir, "main.swift"), "-o", join(dir, "hosts")], { stdio: "pipe" });
+    hostsDriver = join(dir, "hosts");
+  }
+  return JSON.parse(execFileSync(hostsDriver, { input: JSON.stringify(ops) }));
+}
+const hostsOne = (op) => hostsRun([op])[0];
+
+const SAMPLE_HOSTS = [
+  "##",
+  "# Host Database",
+  "127.0.0.1\tlocalhost",
+  "255.255.255.255\tbroadcasthost",
+  "",
+  "# Hand-kept",
+  "127.0.0.1 app.example.test api.example.test",
+  "#127.0.0.1 old.example.test",
+  "10.0.0.5 pinned.example.test",
+  "",
+].join("\n");
+const BLOCK_START = "# >>> extension manages >>>";
+const BLOCK_END = "# <<< extension manages <<<";
+// The markers before the rename: files written then still carry them.
+const LEGACY_START = "# >>> sprint-board hosts managed >>>";
+const LEGACY_END = "# <<< sprint-board hosts managed <<<";
+const withBlock = (text, names) => hostsOne({ op: "with", text, names });
+
+test("hostsName: a typed domain is normalised to the bare host name", { skip: !swiftAvailable }, () => {
+  const cases = {
+    "  App.Example.TEST  ": "app.example.test",
+    "https://app.example.test:8080/path?q=1": "app.example.test",
+    "app.example.test.": "app.example.test",
+    "app.example.test:3000": "app.example.test",
+    "a-b.c1.example.test": "a-b.c1.example.test",
+  };
+  const out = hostsRun(Object.keys(cases).map((raw) => ({ op: "name", raw })));
+  assert.deepEqual(out, Object.values(cases));
+});
+
+test("hostsName: anything that is not a host name is refused, so it can never reach /etc/hosts", { skip: !swiftAvailable }, () => {
+  const bad = [
+    "", "localhost", "app", "a b.example.test", "app.example.test\n10.0.0.1 evil.example.test",
+    "app.example.test\t10.0.0.1", "-app.example.test", "app-.example.test", "app_x.example.test",
+    "1.2.3.4", "ünicode.example.test", "app..example.test", `${"a".repeat(64)}.example.test`,
+    `${"a.".repeat(127)}test`,
+  ];
+  assert.deepEqual(hostsRun(bad.map((raw) => ({ op: "name", raw }))), bad.map(() => null), "every input must be refused");
+});
+
+// The page checks an entry before it sends it (hosts.html: hostName, partnerName). Those checks
+// must answer as Swift's hostsName and hostsPartnerName do, or the page would refuse a name Swift
+// accepts, or the reverse; a comma-separated add relies on them for every entry.
+function pageChecks() {
+  const page = readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8");
+  const body = (name) => {
+    const start = page.indexOf(`  function ${name}(`);
+    assert.ok(start >= 0, `${name} not found in hosts.html`);
+    let depth = 0, end = page.indexOf("{", start);
+    for (; end < page.length; end++) {
+      if (page[end] === "{") depth++;
+      else if (page[end] === "}" && --depth === 0) break;
+    }
+    return page.slice(start, end + 1);
+  };
+  return new Function(`${body("hostName")}\n${body("partnerName")}\nreturn { hostName, partnerName };`)();
+}
+
+test("hosts.html checks domains and partner names exactly as Swift does", { skip: !swiftAvailable }, () => {
+  const { hostName, partnerName } = pageChecks();
+  const domains = [
+    "  App.Example.TEST  ", "https://app.example.test:8080/path?q=1", "app.example.test.", "app.example.test:3000",
+    "a-b.c1.example.test", "app.example.test:", "HTTP://X.Example.TEST/z#w", "",
+    "localhost", "app", "a b.example.test", "app.example.test\n10.0.0.1 evil.example.test", "app.example.test\t10.0.0.1",
+    "-app.example.test", "app-.example.test", "app_x.example.test", "1.2.3.4", "ünicode.example.test", "app..example.test",
+    `${"a".repeat(64)}.example.test`, `${"a.".repeat(127)}test`, "a.example.test,b.example.test", "host:",
+  ];
+  const partners = [
+    "demoshop", "DemoShop", "https://demoshop.panel.example.test/x", "demo-shop", "demo.shop", "bad name",
+    "-x", "x-", "a".repeat(60), "a".repeat(61), "", "ünï",
+  ];
+  assert.deepEqual(domains.map(hostName), hostsRun(domains.map((raw) => ({ op: "name", raw }))));
+  assert.deepEqual(partners.map(partnerName), hostsRun(partners.map((raw) => ({ op: "partnerName", raw }))));
+});
+
+test("managedHosts: no block is [], a block gives its names, a broken block is null", { skip: !swiftAvailable }, () => {
+  const local = withBlock(SAMPLE_HOSTS, ["cdn.example.test", "app.example.test"]);
+  const damaged = [
+    `${SAMPLE_HOSTS}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n`,                       // no end
+    `${SAMPLE_HOSTS}127.0.0.1\tcdn.example.test\n${BLOCK_END}\n`,                         // no start
+    `${SAMPLE_HOSTS}${BLOCK_END}\n${BLOCK_START}\n`,                                      // reversed
+    `${local}${BLOCK_START}\n${BLOCK_END}\n`,                                             // two blocks
+  ];
+  const out = hostsRun([SAMPLE_HOSTS, local, ...damaged].map((text) => ({ op: "managed", text })));
+  assert.deepEqual(out[0], []);
+  assert.deepEqual(out[1], ["cdn.example.test", "app.example.test"]);
+  assert.deepEqual(out.slice(2), [null, null, null, null]);
+});
+
+test("hostsWithBlock: Local appends the block at the end and leaves every other byte alone", { skip: !swiftAvailable }, () => {
+  assert.equal(withBlock(SAMPLE_HOSTS, ["cdn.example.test"]),
+    `${SAMPLE_HOSTS}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n${BLOCK_END}\n`);
+});
+
+test("hostsWithBlock: an existing block is rewritten where it stands", { skip: !swiftAvailable }, () => {
+  const [head, tail] = ["##\n127.0.0.1\tlocalhost\n", "# after the block\n10.0.0.5 pinned.example.test\n"];
+  const text = `${head}${BLOCK_START}\n127.0.0.1\told.example.test\n${BLOCK_END}\n${tail}`;
+  assert.equal(withBlock(text, ["cdn.example.test", "api.example.test"]),
+    `${head}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n127.0.0.1\tapi.example.test\n${BLOCK_END}\n${tail}`);
+});
+
+test("hostsWithBlock: Prod removes the block and gives back the original file exactly", { skip: !swiftAvailable }, () => {
+  const local = withBlock(SAMPLE_HOSTS, ["cdn.example.test"]);
+  assert.equal(withBlock(local, []), SAMPLE_HOSTS);
+  assert.equal(withBlock(SAMPLE_HOSTS, []), SAMPLE_HOSTS, "Prod with no block changes nothing");
+});
+
+test("hostsWithBlock: a file without a final newline also comes back exactly after Prod", { skip: !swiftAvailable }, () => {
+  const text = "##\n127.0.0.1\tlocalhost";
+  const local = withBlock(text, ["cdn.example.test"]);
+  assert.equal(local, `${text}\n${BLOCK_START}\n127.0.0.1\tcdn.example.test\n${BLOCK_END}`);
+  assert.equal(withBlock(local, []), text);
+});
+
+test("hostsWithBlock: names are checked again and de-duplicated before they are written", { skip: !swiftAvailable }, () => {
+  const out = withBlock(SAMPLE_HOSTS, ["cdn.example.test\n10.0.0.1 evil.example.test", "Cdn.Example.Test", "cdn.example.test"]);
+  assert.equal(out, `${SAMPLE_HOSTS}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n${BLOCK_END}\n`);
+  assert.doesNotMatch(out, /evil/);
+});
+
+test("hostsWithBlock: a broken block is never rewritten", { skip: !swiftAvailable }, () => {
+  assert.equal(withBlock(`${SAMPLE_HOSTS}${BLOCK_START}\n`, ["cdn.example.test"]), null);
+});
+
+test("hostsConflicts: listed domains still active outside the block are reported with their line", { skip: !swiftAvailable }, () => {
+  const names = ["app.example.test", "pinned.example.test", "old.example.test", "cdn.example.test"];
+  const local = withBlock(SAMPLE_HOSTS, names);
+  // The block's own lines are not conflicts; the commented old.example.test line is not active.
+  assert.deepEqual(hostsOne({ op: "conflicts", text: local, names }), [
+    { line: 7, address: "127.0.0.1", names: ["app.example.test"] },
+    { line: 9, address: "10.0.0.5", names: ["pinned.example.test"] },
+  ]);
+});
+
+test("hostsImportable: hand-kept local entries can be taken over, nothing else", { skip: !swiftAvailable }, () => {
+  // localhost is not a domain, broadcasthost and pinned.example.test do not point at this
+  // machine, old.example.test is commented out.
+  assert.deepEqual(hostsOne({ op: "importable", text: SAMPLE_HOSTS, names: [] }), ["app.example.test", "api.example.test"]);
+  assert.deepEqual(hostsOne({ op: "importable", text: SAMPLE_HOSTS, names: ["api.example.test"] }), ["app.example.test"]);
+  const local = withBlock(SAMPLE_HOSTS, ["cdn.example.test"]);
+  assert.deepEqual(hostsOne({ op: "importable", text: local, names: [] }), ["app.example.test", "api.example.test"],
+    "the block's own names are not offered for import");
+});
+
+test("hostsStatus: each domain's state comes from the file, with its groups", { skip: !swiftAvailable }, () => {
+  const list = { domains: ["cdn.example.test", "api.example.test"], groups: [{ name: "Web", domains: ["cdn.example.test"] }] };
+  const [state, damaged] = hostsRun([
+    { op: "status", text: withBlock(SAMPLE_HOSTS, ["cdn.example.test"]), list },
+    { op: "status", text: `${SAMPLE_HOSTS}${BLOCK_END}\n`, list, writable: false },
+  ]);
+  assert.equal(state.mode, "ok");
+  assert.deepEqual(state.domains, [
+    { name: "cdn.example.test", local: true, groups: ["Web"] },
+    { name: "api.example.test", local: false, groups: [] },
+  ]);
+  assert.deepEqual(state.groups, ["Web"]);
+  assert.equal(damaged.mode, "damaged");
+  assert.equal(damaged.writable, false);
+});
+
+const LIST = {
+  domains: ["nova.example.test", "cortex.example.test", "shared.example.test", "shop.example.test"],
+  groups: [
+    { name: "NOVA", domains: ["nova.example.test", "cortex.example.test", "shared.example.test"] },
+    { name: "Shop", domains: ["shop.example.test", "shared.example.test"] },
+  ],
+};
+// Invented partner domain suffixes; the app reads its own from the config (partnerDomainSuffixes).
+const PARTNER_SUFFIXES = ["panel.example.test", "api.example.test", "ops.example.test"];
+const apply = (action, local = [], list = LIST, partners = PARTNER_SUFFIXES) =>
+  hostsOne({ op: "apply", list, local, action, partners });
+
+test("hostsList: a list saved before groups reads as the same domains with no groups", { skip: !swiftAvailable }, () => {
+  assert.deepEqual(hostsOne({ op: "list", json: { domains: ["a.example.test", "B.example.test", "a.example.test", "bad name"] } }),
+    { domains: ["a.example.test", "b.example.test"], groups: [] });
+  assert.equal(hostsOne({ op: "list", json: { nope: true } }), null);
+});
+
+test("hostsList: groups keep only listed domains and the first of two names that differ only in case", { skip: !swiftAvailable }, () => {
+  const out = hostsOne({ op: "list", json: {
+    domains: ["a.example.test"],
+    groups: [{ name: " NOVA ", domains: ["a.example.test", "x.example.test"] }, { name: "nova", domains: [] }, { name: "", domains: [] }],
+  } });
+  assert.deepEqual(out.groups, [{ name: "NOVA", domains: ["a.example.test"] }]);
+});
+
+test("hostsList: a group of the wrong shape makes the file unreadable instead of being dropped", { skip: !swiftAvailable }, () => {
+  // Dropped quietly, the group would be lost for good at the next save.
+  const bad = [
+    { domains: ["a.example.test"], groups: {} },
+    { domains: ["a.example.test"], groups: [{ name: "Web", domains: ["a.example.test"] }, "oops"] },
+    { domains: ["a.example.test"], groups: [{ name: "Web", domains: ["a.example.test", 7] }] },
+    { domains: ["a.example.test"], groups: [{ name: 7, domains: [] }] },
+  ];
+  assert.deepEqual(hostsRun(bad.map((json) => ({ op: "list", json }))), [null, null, null, null]);
+});
+
+test("hostsGroupName: 1 to 40 characters on one line", { skip: !swiftAvailable }, () => {
+  assert.deepEqual(hostsRun(["  Cortex  ", "", "   ", "a\nb", "x".repeat(41), "x".repeat(40)].map((raw) => ({ op: "groupName", raw }))),
+    ["Cortex", null, null, null, null, "x".repeat(40)]);
+});
+
+test("managedHosts: a block under the markers from before the rename is still the managed block", { skip: !swiftAvailable }, () => {
+  const old = `${SAMPLE_HOSTS}${LEGACY_START}\n127.0.0.1\tcdn.example.test\n${LEGACY_END}\n`;
+  assert.deepEqual(hostsOne({ op: "managed", text: old }), ["cdn.example.test"]);
+  assert.deepEqual(hostsOne({ op: "conflicts", text: old, names: ["cdn.example.test"] }), [], "its lines are not conflicts");
+  assert.deepEqual(hostsOne({ op: "importable", text: old, names: [] }), ["app.example.test", "api.example.test"],
+    "and not importable either");
+  const both = `${old}${BLOCK_START}\n127.0.0.1\tapi.example.test\n${BLOCK_END}\n`;
+  assert.equal(hostsOne({ op: "managed", text: both }), null, "a block under each kind of marker is a damaged file");
+  assert.equal(withBlock(both, ["cdn.example.test"]), null, "and a damaged file is never written");
+});
+
+test("hostsWithBlock: the next write puts an old block back in place under the current markers", { skip: !swiftAvailable }, () => {
+  const head = `${SAMPLE_HOSTS}# before\n`, tail = "# after\n";
+  const old = `${head}${LEGACY_START}\n127.0.0.1\tcdn.example.test\n${LEGACY_END}\n${tail}`;
+  assert.equal(withBlock(old, ["cdn.example.test", "api.example.test"]),
+    `${head}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n127.0.0.1\tapi.example.test\n${BLOCK_END}\n${tail}`);
+  assert.equal(withBlock(old, []), `${head}${tail}`, "prod removes the old block as well");
+});
+
+test("hostsApply: switching names changes only those domains; the rest keep their state", { skip: !swiftAvailable }, () => {
+  const local = apply({ setMode: "local", names: ["nova.example.test", "cortex.example.test"] }, ["shop.example.test"]);
+  assert.deepEqual(local.local, ["nova.example.test", "cortex.example.test", "shop.example.test"], "in list order");
+  const prod = apply({ setMode: "prod", names: ["nova.example.test", "shop.example.test"] }, local.local);
+  assert.deepEqual(prod.local, ["cortex.example.test"]);
+  assert.deepEqual(apply({ setMode: "local", names: ["unknown.example.test"] }).local, [], "only listed domains can be switched");
+});
+
+test("hostsApply: a domain in two groups has one state", { skip: !swiftAvailable }, () => {
+  // Switching the NOVA group to prod turns shared.example.test off for Shop too: the file has one line for it.
+  const r = apply({ setMode: "prod", names: LIST.groups[0].domains }, ["shared.example.test", "shop.example.test"]);
+  assert.deepEqual(r.local, ["shop.example.test"]);
+});
+
+test("hostsApply: add puts a new domain in prod, in the selected group, and refuses non-domains", { skip: !swiftAvailable }, () => {
+  const r = apply({ add: "New.Example.Test", group: "nova" }, ["nova.example.test"]);
+  assert.deepEqual(r.list.domains.at(-1), "new.example.test");
+  assert.deepEqual(r.list.groups[0].domains.at(-1), "new.example.test");
+  assert.deepEqual(r.local, ["nova.example.test"], "a new domain starts in prod");
+  assert.equal(r.error, null);
+  const bad = apply({ add: "not a domain" });
+  assert.match(bad.error, /not a domain name/);
+  assert.deepEqual(bad.list, LIST);
+});
+
+test("hostsApply: remove deletes a domain everywhere, including from the block", { skip: !swiftAvailable }, () => {
+  const r = apply({ remove: "shared.example.test" }, ["shared.example.test", "nova.example.test"]);
+  assert.ok(!r.list.domains.includes("shared.example.test"));
+  assert.ok(r.list.groups.every((g) => !g.domains.includes("shared.example.test")));
+  assert.deepEqual(r.local, ["nova.example.test"]);
+});
+
+test("hostsApply: groups are created, renamed and deleted; deleting one keeps its domains", { skip: !swiftAvailable }, () => {
+  const added = apply({ groupAdd: "Template" });
+  assert.deepEqual(added.list.groups.map((g) => g.name), ["NOVA", "Shop", "Template"]);
+  assert.match(apply({ groupAdd: "nova" }).error, /already a group/);
+  const renamed = apply({ groupRename: { from: "shop", to: "Store" } });
+  assert.deepEqual(renamed.list.groups.map((g) => g.name), ["NOVA", "Store"]);
+  assert.match(apply({ groupRename: { from: "Shop", to: "NOVA" } }).error, /already a group/);
+  const deleted = apply({ groupDelete: "NOVA" }, ["nova.example.test"]);
+  assert.deepEqual(deleted.list.groups.map((g) => g.name), ["Shop"]);
+  assert.deepEqual(deleted.list.domains, LIST.domains);
+  assert.deepEqual(deleted.local, ["nova.example.test"], "deleting a group switches nothing");
+});
+
+test("hostsApply: a domain joins and leaves groups without changing its state", { skip: !swiftAvailable }, () => {
+  const joined = apply({ member: { domain: "nova.example.test", group: "Shop", on: true } }, ["nova.example.test"]);
+  assert.deepEqual(joined.list.groups[1].domains, ["shop.example.test", "shared.example.test", "nova.example.test"]);
+  const left = apply({ member: { domain: "shared.example.test", group: "NOVA", on: false } }, ["shared.example.test"]);
+  assert.deepEqual(left.list.groups[0].domains, ["nova.example.test", "cortex.example.test"]);
+  assert.deepEqual(joined.local, ["nova.example.test"]);
+  assert.deepEqual(left.local, ["shared.example.test"]);
+  const fromMenu = apply({ groupAdd: "Template", domain: "shop.example.test" });
+  assert.deepEqual(fromMenu.list.groups[2], { name: "Template", domains: ["shop.example.test"] });
+  const intoExisting = apply({ groupAdd: "nova", domain: "shop.example.test" });
+  assert.equal(intoExisting.error, null, "New group… with an existing name just adds the domain to it");
+  assert.ok(intoExisting.list.groups[0].domains.includes("shop.example.test"));
+});
+
+test("hostsApply: names already in the block but not in the list are adopted", { skip: !swiftAvailable }, () => {
+  const r = apply({ status: true }, ["handmade.example.test"], { domains: ["a.example.test"], groups: [] });
+  assert.deepEqual(r.list.domains, ["a.example.test", "handmade.example.test"]);
+  assert.deepEqual(r.local, ["handmade.example.test"]);
+  const odd = apply({ status: true }, ["my_app.example.test"], { domains: [], groups: [] });
+  assert.deepEqual(odd.list.domains, [], "a name the list could not read back is not adopted");
+});
+
+test("hostsApply: addMany imports into the selected group", { skip: !swiftAvailable }, () => {
+  const r = apply({ addMany: ["imp.example.test", "nova.example.test", "bad name"], group: "Shop" });
+  assert.deepEqual(r.list.domains.at(-1), "imp.example.test");
+  assert.deepEqual(r.list.groups[1].domains, ["shop.example.test", "shared.example.test", "imp.example.test", "nova.example.test"]);
+});
+
+function withHostsFile(content, mode, fn) {
+  const dir = mkdtempSync(join(tmpdir(), "sprint-board-hostsfile-"));
+  const path = join(dir, "hosts"), backupDir = join(dir, "state");
+  try {
+    writeFileSync(path, content);
+    chmodSync(path, mode);
+    fn({ path, backupDir, read: () => readFileSync(path, "utf8") });
+  } finally {
+    chmodSync(path, 0o644);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("writeHostsBlock: writes the block in place, keeps owner and mode, and backs the file up first", { skip: !swiftAvailable }, () => {
+  withHostsFile(SAMPLE_HOSTS, 0o664, ({ path, backupDir, read }) => {
+    const before = statSync(path);
+    assert.equal(hostsOne({ op: "write", path, backupDir, names: ["cdn.example.test"] }), null);
+    assert.equal(read(), withBlock(SAMPLE_HOSTS, ["cdn.example.test"]));
+    const after = statSync(path);
+    // In place: the same file, not a new one renamed over it (/etc is not writable by the user).
+    assert.equal(after.ino, before.ino);
+    assert.equal(after.mode & 0o777, 0o664);
+    assert.equal(after.uid, before.uid);
+    assert.equal(readFileSync(join(backupDir, "hosts.bak"), "utf8"), SAMPLE_HOSTS);
+    assert.equal(readFileSync(join(backupDir, "hosts.before-sprint-board"), "utf8"), SAMPLE_HOSTS);
+
+    assert.equal(hostsOne({ op: "write", path, backupDir, names: [] }), null);
+    assert.equal(read(), SAMPLE_HOSTS, "Prod gives back the original file");
+    assert.equal(readFileSync(join(backupDir, "hosts.bak"), "utf8"), withBlock(SAMPLE_HOSTS, ["cdn.example.test"]));
+    assert.equal(readFileSync(join(backupDir, "hosts.before-sprint-board"), "utf8"), SAMPLE_HOSTS,
+      "the copy taken before the first change is never overwritten");
+  });
+});
+
+test("writeHostsBlock: nothing to change means no write and no backup", { skip: !swiftAvailable }, () => {
+  withHostsFile(SAMPLE_HOSTS, 0o644, ({ path, backupDir, read }) => {
+    assert.equal(hostsOne({ op: "write", path, backupDir, names: [] }), null);
+    assert.equal(read(), SAMPLE_HOSTS);
+    assert.throws(() => statSync(join(backupDir, "hosts.bak")));
+  });
+});
+
+test("writeHostsBlock: a file the user cannot write is reported and left alone", { skip: !swiftAvailable || process.getuid?.() === 0 }, () => {
+  withHostsFile(SAMPLE_HOSTS, 0o444, ({ path, backupDir, read }) => {
+    assert.match(hostsOne({ op: "write", path, backupDir, names: ["cdn.example.test"] }), /not writable/);
+    assert.equal(read(), SAMPLE_HOSTS);
+  });
+});
+
+test("writeHostsBlock: a broken block is reported and the file left alone", { skip: !swiftAvailable }, () => {
+  const broken = `${SAMPLE_HOSTS}${BLOCK_START}\n127.0.0.1\tcdn.example.test\n`;
+  withHostsFile(broken, 0o644, ({ path, backupDir, read }) => {
+    assert.match(hostsOne({ op: "write", path, backupDir, names: [] }), /damaged/);
+    assert.equal(read(), broken);
+  });
+});
+
+test("writeHostsBlock: a byte-order mark at the start of the file survives Local and Prod", { skip: !swiftAvailable }, () => {
+  const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(SAMPLE_HOSTS)]);
+  withHostsFile(bytes, 0o644, ({ path, backupDir }) => {
+    assert.equal(hostsOne({ op: "write", path, backupDir, names: ["cdn.example.test"] }), null);
+    assert.deepEqual(readFileSync(path).subarray(0, 3), Buffer.from([0xef, 0xbb, 0xbf]));
+    assert.equal(hostsOne({ op: "write", path, backupDir, names: [] }), null);
+    assert.deepEqual(readFileSync(path), bytes);
+    assert.deepEqual(readFileSync(join(backupDir, "hosts.before-sprint-board")), bytes, "backups keep the exact bytes");
+  });
+});
+
+test("writeHostsBlock: a file that is not UTF-8 is refused, never read as empty", { skip: !swiftAvailable }, () => {
+  const bytes = Buffer.from("# caf\xe9\n127.0.0.1 localhost\n", "latin1");
+  withHostsFile(bytes, 0o644, ({ path, backupDir }) => {
+    assert.match(hostsOne({ op: "write", path, backupDir, names: ["cdn.example.test"] }), /Could not read/);
+    assert.deepEqual(readFileSync(path), bytes);
+  });
+});
+
+test("chromeRefreshScript: flushes in an open web tab of every window, active tab first, opens nothing, never starts Chrome", { skip: !swiftAvailable }, () => {
+  const script = hostsOne({ op: "chromeScript" });
+  for (const part of ["chrome.benchmarking.clearHostResolverCache()", "chrome.benchmarking.closeConnections()",
+    "repeat with w in (every window)", "set candidates to {activeTab}", `starts with "http"`,
+    `if application id "com.google.Chrome" is not running then return`, "with timeout of", "9101", "-1728"]) {
+    assert.ok(script.includes(part), `missing: ${part}`);
+  }
+  assert.ok(!/make new (tab|window)/.test(script), "no tab or window is opened");
+});
+
+const chromeInstalled = existsSync("/Applications/Google Chrome.app");
+test("chromeRefreshScript: is valid AppleScript", { skip: !swiftAvailable || !chromeInstalled }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "sprint-board-chrome-"));
+  try {
+    writeFileSync(join(dir, "refresh.applescript"), hostsOne({ op: "chromeScript" }));
+    execFileSync("osacompile", ["-o", join(dir, "refresh.scpt"), join(dir, "refresh.applescript")], { stdio: "pipe" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("chromeRefreshNote: what the Hosts tab says after a Chrome refresh", { skip: !swiftAvailable }, () => {
+  const off = "Executing JavaScript through AppleScript is turned off. To turn it on, from the menu bar, go to View > Developer > Allow JavaScript from Apple Events. For more information: https://support.google.com/chrome/?p=applescript";
+  const notes = hostsRun([
+    { op: "chromeNote", status: 0, stderr: "" },
+    { op: "chromeNote", status: 1, stderr: `214:1180: execution error: ${off} (12)\n` },
+    { op: "chromeNote", status: 1, stderr: `1:2: execution error: Google Chrome got an error: ${off} (12)\n` },
+    { op: "chromeNote", status: 1, stderr: "1:2: execution error: Not authorized to send Apple events to Google Chrome. (-1743)\n" },
+    { op: "chromeNote", status: 1, stderr: "1:2: execution error: Google Chrome got an error: Application isn’t running. (-600)\n" },
+    { op: "chromeNote", status: 1, stderr: "1:2: execution error: Google Chrome got an error: Connection is invalid. (-609)\n" },
+    { op: "chromeNote", status: 15, stderr: "", timedOut: true },
+    { op: "chromeNote", status: 1, stderr: "1:2: execution error: Chrome answered missing value (9102)\n" },
+    { op: "chromeNote", status: 1, stderr: "" },
+    { op: "chromeNote", status: 1, stderr: "1:2: execution error: Chrome was not started with --enable-net-benchmarking (9101)\n" },
+  ]);
+  assert.equal(notes[0], null, "success says nothing");
+  assert.match(notes[1], /Allow JavaScript from Apple Events/);
+  assert.match(notes[2], /Allow JavaScript from Apple Events/, "Chrome's own error prefix too");
+  assert.match(notes[3], /Privacy & Security › Automation/);
+  assert.equal(notes[4], null, "Chrome quit meanwhile: nothing to refresh");
+  assert.equal(notes[5], null, "Chrome quit meanwhile: nothing to refresh");
+  assert.match(notes[6], /did not answer/);
+  assert.match(notes[7], /Chrome answered missing value/, "an unknown failure keeps its own text");
+  assert.ok(notes[8], "a failure without output is still reported");
+  assert.match(notes[9], /open it with the Chrome button/);
+});
+
+test("chromeMissingFlags: which insecure-Chrome flags a running Chrome lacks", { skip: !swiftAvailable }, () => {
+  const bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  const flags = hostsOne({ op: "insecureFlags" });
+  assert.deepEqual(flags, ["--ignore-certificate-errors", "--allow-insecure-localhost", "--enable-net-benchmarking"]);
+  const missing = hostsRun([
+    { op: "missingFlags", commandLine: `${bin} ${flags.join(" ")}` },
+    { op: "missingFlags", commandLine: `${bin} --enable-net-benchmarking --ignore-certificate-errors --lang=tr --allow-insecure-localhost` },
+    { op: "missingFlags", commandLine: bin },
+    { op: "missingFlags", commandLine: `${bin} --ignore-certificate-errors --allow-insecure-localhost` },
+    { op: "missingFlags", commandLine: `${bin} --enable-net-benchmarking-x --ignore-certificate-errors-spki-list=abc` },
+  ]);
+  assert.deepEqual(missing[0], [], "all present");
+  assert.deepEqual(missing[1], [], "order and extra flags do not matter");
+  assert.deepEqual(missing[2], flags, "a plain Chrome lacks them all");
+  assert.deepEqual(missing[3], ["--enable-net-benchmarking"]);
+  assert.deepEqual(missing[4], flags, "a longer flag is not the flag");
+});
+
+// A partner's domains under the tests' invented suffixes.
+const partnerDomains = (p) => PARTNER_SUFFIXES.map((suffix) => `${p}.${suffix}`);
+
+test("hostsPartnerName: a panel name, or the first label of a pasted partner domain", { skip: !swiftAvailable }, () => {
+  const ok = {
+    " DemoPartner ": "demopartner", "demo-partner2": "demo-partner2", "demopartner.panel.example.test": "demopartner",
+    "https://demopartner.panel.example.test/": "demopartner", ["x".repeat(60)]: "x".repeat(60),
+  };
+  const bad = ["", "-demo", "demo-", "demo partner", "demo_partner", "ünicode", "x".repeat(61)];
+  assert.deepEqual(hostsRun(Object.keys(ok).map((raw) => ({ op: "partnerName", raw }))), Object.values(ok));
+  assert.deepEqual(hostsRun(bad.map((raw) => ({ op: "partnerName", raw }))), bad.map(() => null));
+});
+
+test("hostsApply: addPartner adds the three partner domains in prod, in the Partners group", { skip: !swiftAvailable }, () => {
+  const r = apply({ addPartner: "DemoPartner" }, ["nova.example.test"]);
+  assert.deepEqual(r.list.domains.slice(-3), partnerDomains("demopartner"));
+  assert.deepEqual(r.list.groups.at(-1), { name: "Partners", domains: partnerDomains("demopartner") });
+  assert.deepEqual(apply({ addPartner: "acme" }, [], r.list).list.groups.at(-1).domains,
+    [...partnerDomains("demopartner"), ...partnerDomains("acme")], "every partner goes into the one group");
+  assert.deepEqual(r.local, ["nova.example.test"], "new domains start in prod");
+  assert.equal(r.error, null);
+});
+
+test("hostsApply: addPartner also joins the selected group and reuses an existing Partners group", { skip: !swiftAvailable }, () => {
+  const list = { domains: [], groups: [{ name: "Picked", domains: [] }, { name: "PARTNERS", domains: [] }] };
+  const r = apply({ addPartner: "demopartner", group: "picked" }, [], list);
+  assert.deepEqual(r.list.groups, [
+    { name: "Picked", domains: partnerDomains("demopartner") },
+    { name: "PARTNERS", domains: partnerDomains("demopartner") },
+  ], "no group of the partner's own name is made");
+  assert.match(apply({ addPartner: "demo partner" }).error, /not a partner name/);
+});
+
+test("hostsApply: a partner domain added on its own joins the Partners group, made when missing", { skip: !swiftAvailable }, () => {
+  const [panel, api] = partnerDomains("demopartner");
+  let r = apply({ add: `https://${panel.toUpperCase()}/x` });
+  assert.deepEqual(r.list.groups.at(-1), { name: "Partners", domains: [panel] });
+  r = apply({ add: api, group: "Shop" }, [], r.list);
+  assert.deepEqual(r.list.groups.find((g) => g.name === "Partners").domains, [panel, api], "the Partners group is reused");
+  assert.ok(r.list.groups.find((g) => g.name === "Shop").domains.includes(api), "and the selected group is joined too");
+  const list = { domains: [], groups: [{ name: "partners", domains: [] }] };
+  assert.deepEqual(apply({ add: panel }, [], list).list.groups, [{ name: "partners", domains: [panel] }],
+    "the group is found without regard to case");
+  const [long] = partnerDomains("x".repeat(60)), [tooLong] = partnerDomains("x".repeat(61));
+  assert.deepEqual(apply({ add: long }).list.groups.at(-1), { name: "Partners", domains: [long] }, "a 60-character partner joins");
+  r = apply({ add: tooLong });
+  assert.ok(r.list.domains.includes(tooLong) && !r.list.groups.some((g) => g.name === "Partners"),
+    "a 61-character one is listed but is not a partner");
+});
+
+test("hostsApply: only <partner>.<suffix> is a partner domain; addMany groups them too", { skip: !swiftAvailable }, () => {
+  const r = apply({ addMany: ["a.b.panel.example.test", "panel.example.test", "plain.example.test", ...partnerDomains("acme").slice(0, 2)] });
+  assert.deepEqual(r.list.groups.map((g) => g.name), ["NOVA", "Shop", "Partners"]);
+  assert.deepEqual(r.list.groups.at(-1).domains, partnerDomains("acme").slice(0, 2));
+});
+
+test("partnerDomainSuffixes: the config's list as domain names, repeats and non-domains dropped; none without it", { skip: !swiftAvailable }, () => {
+  const [listed, missing, wrong] = hostsRun([
+    { op: "partnerSuffixes", config: { partnerDomainSuffixes: ["Panel.Example.TEST", "api.example.test", "panel.example.test", "bad name", "single"] } },
+    { op: "partnerSuffixes", config: {} },
+    { op: "partnerSuffixes", config: { partnerDomainSuffixes: "panel.example.test" } },
+  ]);
+  assert.deepEqual(listed, ["panel.example.test", "api.example.test"]);
+  assert.deepEqual(missing, []);
+  assert.deepEqual(wrong, [], "a string is not a list");
+});
+
+test("hostsApply: without partner suffixes no partner is added and no domain joins Partners", { skip: !swiftAvailable }, () => {
+  const r = apply({ addPartner: "demopartner" }, [], LIST, []);
+  assert.match(r.error, /partnerDomainSuffixes in the config/);
+  assert.deepEqual(r.list, LIST);
+  const [panel] = partnerDomains("demopartner");
+  assert.ok(!apply({ add: panel }, [], LIST, []).list.groups.some((g) => g.name === "Partners"));
+});
+
+test("Hosts tab: the partner suffixes come from the config with every state; the page offers Add partner only with some", () => {
+  const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(methodSource(swift, "replyHosts"), /state\["partnerSuffixes"\] = hostsPartnerSuffixes\(\)/);
+  assert.match(methodSource(swift, "hostsMessage"), /hostsApply\(before, local: block \?\? \[\], action, partners: self\.hostsPartnerSuffixes\(\)\)/);
+  assert.match(methodSource(swift, "hostsPartnerSuffixes"), /CONFIG_PATH[\s\S]*partnerDomainSuffixes\(config\)/);
+  const page = readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8");
+  assert.match(page, /\$\{canAddPartner \? `<button data-open="partner">\+ Add partner<\/button>` : ""\}/);
+  const start = page.indexOf("  const partnerSuffixes = ");
+  const end = page.indexOf("\n  };", page.indexOf("  const partnerLabels = ", start));
+  assert.ok(start > 0 && end > start);
+  const labels = (state) => new Function("last", `${page.slice(start, end + 5)}\nreturn partnerLabels();`)(state);
+  assert.equal(labels({ partnerSuffixes: PARTNER_SUFFIXES }), ".panel, .api and .ops");
+  assert.equal(labels({ partnerSuffixes: ["panel.example.test"] }), ".panel");
+  assert.equal(labels({}), "");
+  assert.equal(labels(null), "");
+  assert.deepEqual(JSON.parse(readFileSync(new URL("./config.example.json", import.meta.url), "utf8")).partnerDomainSuffixes, [],
+    "off by default: the example is copied into every new config");
+});
+
+test("hostsGroupHeader: a \"# Group - XYZ\" line names XYZ; any other line names nothing", { skip: !swiftAvailable }, () => {
+  const lines = {
+    "# Group - NOVA": "NOVA", "#Group - Billing": "Billing", "# group -  Demo MCP  ": "Demo MCP", "## Group-XYZ": "XYZ",
+    "  # GROUP - A b": "A b", "# Groups - X": null, "# Group X": null, "# Group - ": null, "Group - X": null,
+    [`# Group - ${"x".repeat(41)}`]: null, "# All": null, "127.0.0.1 a.example.test # Group - X": null,
+  };
+  assert.deepEqual(hostsRun(Object.keys(lines).map((raw) => ({ op: "groupHeader", raw }))), Object.values(lines));
+});
+
+test("hostsImportGroups: lines under a header take its group up to the next line that starts with #", { skip: !swiftAvailable }, () => {
+  const text = [
+    SAMPLE_HOSTS.trimEnd(),
+    "# Group - Nova",
+    "127.0.0.1 nova.example.test api.nova.example.test",
+    "",
+    "::1 nova6.example.test",
+    "10.0.0.9 remote.example.test",
+    "#127.0.0.1 off.example.test",
+    "127.0.0.1 after-comment.example.test",
+    "# Group - Shop",
+    "127.0.0.1 shop.example.test   # inline note",
+    "# Group - Again",
+    "127.0.0.1 nova.example.test again.example.test",
+    "# Group - Block",
+    BLOCK_START, "127.0.0.1\tblocked.example.test", BLOCK_END,
+    "127.0.0.1 tail.example.test",
+    "",
+  ].join("\n");
+  assert.deepEqual(hostsOne({ op: "importGroups", text }), {
+    "nova.example.test": "Nova", "api.nova.example.test": "Nova", "nova6.example.test": "Nova",
+    "shop.example.test": "Shop", "again.example.test": "Again",
+  });
+});
+
+test("hostsApply: an import puts new names in their header's group, made when missing, and leaves listed ones alone", { skip: !swiftAvailable }, () => {
+  const r = apply({
+    addMany: ["n1.example.test", "nova.example.test", "n2.example.test", "n3.example.test"],
+    addManyGroups: { "n1.example.test": "Fresh", "nova.example.test": "Other", "n2.example.test": "nova", "n3.example.test": "x".repeat(41) },
+  });
+  assert.deepEqual(r.list.groups.map((g) => g.name), ["NOVA", "Shop", "Fresh"], "no group for a listed name or a refused header");
+  assert.deepEqual(r.list.groups.find((g) => g.name === "Fresh").domains, ["n1.example.test"]);
+  assert.ok(r.list.groups[0].domains.includes("n2.example.test"), "an existing group is found without regard to case");
+  assert.ok(r.list.domains.includes("n3.example.test"), "a name under a refused header is still imported");
+});
+
+test("hostsApply: deleting a group with its domains removes them everywhere, including the block", { skip: !swiftAvailable }, () => {
+  const added = apply({ addPartner: "demopartner", group: "Shop" }, ["nova.example.test"]);
+  const local = apply({ setMode: "local", names: partnerDomains("demopartner") }, added.local, added.list);
+  const r = apply({ groupDeleteWithDomains: "partners" }, local.local, local.list);
+  assert.deepEqual(r.list.domains, LIST.domains);
+  assert.deepEqual(r.list.groups, LIST.groups, "gone from the other group too, and the Partners group is deleted");
+  assert.deepEqual(r.local, ["nova.example.test"]);
+});
+
+test("menu bar icon: the exclamation mark lights only for a late review or a PR that cannot merge", { skip: !swiftAvailable }, () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const dir = mkdtempSync(join(tmpdir(), "sprint-board-icon-"));
+  try {
+    writeFileSync(join(dir, "main.swift"), `import Foundation
+${swiftDecl(src, "struct MenuIconState")}
+${swiftSource(src, "menuIconState")}
+let steps = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [[String: Any]]
+var state = MenuIconState()
+let out: [[String: Any]] = steps.map { step in
+    state = menuIconState(step["obj"] as? [String: Any], ok: step["ok"] as! Bool, previous: state)
+    return ["progress": state.progress.map { $0 as Any } ?? NSNull(), "needsYou": state.needsYou, "stale": state.stale]
+}
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: out))
+`);
+    execFileSync("swiftc", [join(dir, "main.swift"), "-o", join(dir, "icon")], { stdio: "pipe" });
+    const run = (steps) => JSON.parse(execFileSync(join(dir, "icon"), { input: JSON.stringify(steps) }));
+    const base = { ok: true, done: 5, total: 8, reviewRequests: [], pullRequests: [] };
+    const one = (obj) => run([{ ok: true, obj }])[0];
+    assert.deepEqual(one(base), { progress: 0.625, needsYou: false, stale: false });
+    // A fresh review request or a PR GitHub is still checking is no alert.
+    assert.equal(one({ ...base, reviewRequests: [{ days: 1 }], pullRequests: [{ kind: "checking" }] }).needsYou, false);
+    assert.equal(one({ ...base, reviewRequests: [{ days: 2 }] }).needsYou, true);
+    assert.equal(one({ ...base, pullRequests: [{ kind: "conflict" }] }).needsYou, true);
+    assert.equal(one({ ...base, pullRequests: [{ kind: "ci" }] }).needsYou, true);
+    // An overdue task stays in the popover; the icon would otherwise never leave the alert.
+    assert.equal(one({ ...base, overdue: { key: "DEMO-1" } }).needsYou, false);
+    assert.equal(one({ ...base, total: 0, done: 0 }).progress, 0);
+    // A failed refresh keeps the last state, faded; before any data it is the loading dots.
+    const [first, failed] = run([{ ok: true, obj: { ...base, pullRequests: [{ kind: "ci" }] } }, { ok: false }]);
+    assert.deepEqual(failed, { ...first, stale: true });
+    assert.deepEqual(run([{ ok: false }])[0], { progress: null, needsYou: false, stale: true });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("menu bar icon: it is redrawn from every fetch result", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(src, /self\.menuIcon = menuIconState\(obj, ok: ok, previous: self\.menuIcon\)\n\s*self\.statusItem\.button\?\.image = ringIcon\(18, self\.menuIcon\)/);
+  assert.match(swiftSource(src, "ringIcon"), /img\.isTemplate = true/);
+});
+
+test("settings: while the user browses Settings the panel keeps refreshing; a setup screen that opened itself stops it", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(src, /var setupBlocksFetch: Bool \{ onSetupScreen && !browsingSettings \}/);
+  // Only Settings opened by the user while signed in lets refreshes through.
+  assert.match(src, /func menuSetup\(\) \{\n\s*manualRefreshPending = false\n\s*setupFromSettings = !needsSetup\(\)\n\s*browsingSettings = setupFromSettings/);
+  assert.match(src, /self\.setupFromSettings = canGoBack\n\s*self\.browsingSettings = false/);
+  // The refresh, its result and the panel's ⟳ all ask the same question.
+  assert.match(src, /if setupBlocksFetch \{ manualRefreshPending = false; return \}/);
+  assert.match(src, /if self\.setupBlocksFetch \{ return \}/);
+  assert.match(src, /if setupBlocksFetch, let w = msg\.webView, loadedBoards\.contains\(w\) \{/);
+  assert.doesNotMatch(src, /if self\.onSetupScreen \{ return \}/);
+});
+
+// A method of the App class: indented one level, @objc or not.
+function methodSource(src, name) {
+  const at = src.search(new RegExp(`\\n    (?:@objc )?func ${name}\\(`));
+  const end = src.indexOf("\n    }\n", at);
+  assert.ok(at >= 0 && end > at, `${name} not found in SprintBoard.swift`);
+  return src.slice(at + 1, end + 7);
+}
+
+test("settings in the panel: the gear and Settings… open the setup page inside the panel, never the widget", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  // The panel's own setup page, on the board's handler, over the whole panel.
+  assert.match(src, /panelSetupWeb = makePanelWebView\(handler: "sb"\)\n\s*panelSetupWeb\.frame = NSRect\(origin: \.zero, size: size\)/);
+  assert.match(src, /if body\["settings"\] != nil, !fromWidget \{ showPanelSettings\(\) \}/);
+  assert.match(src, /NSMenuItem\(title: "Settings…", action: #selector\(menuSettings\)/);
+  assert.match(methodSource(src, "menuSettings"), /if !panel\.isShown \{ togglePanel\(\) \}\n\s*showPanelSettings\(\)/);
+  // Shown over the tabs and their header; the back arrow returns to the tab that was open.
+  const show = methodSource(src, "showPanelSettings");
+  // Loaded once, with the tabs; each opening fills it first and shows it after, at its new height.
+  assert.equal((src.match(/loadPage\("popover\/settings\.html", in: panelSetupWeb\)/g) || []).length, 1);
+  assert.match(methodSource(src, "setUpPanel"), /loadPage\("popover\/settings\.html", in: panelSetupWeb\)/);
+  assert.match(show, /fillPanelSettings \{ \[weak self\] height in[\s\S]*?self\.panelPageHeights\[self\.panelSetupWeb\] = height[\s\S]*?self\.showPanelPage\(self\.panelSetupWeb\)/);
+  assert.match(methodSource(src, "fillPanelSettings"), /window\.sbSettingsShow \? window\.sbSettingsShow\(\.\.\.\\\(args\)\) : null/);
+  assert.match(methodSource(src, "showPanelPage"), /self\.tabControl\.isHidden = page === self\.panelSetupWeb/);
+  assert.match(methodSource(src, "hidePanelSettings"), /selectPanelTab\(tabControl\.selectedSegment\)/);
+  assert.match(methodSource(src, "fitPanel"), /let header = shown === panelSetupWeb \? 0 : PANEL_HEADER_HEIGHT/);
+  assert.match(src, /panelTabs\.contains\(w\) \|\| w === panelSetupWeb, let h = body\["height"\]/);
+  // The board's message no longer sends anyone to the widget.
+  assert.doesNotMatch(src, /Action needed in the Sprint Board window/);
+  assert.match(src, /Open Settings with the gear button\./);
+});
+
+test("settings in the panel: it signs in, saves and disconnects like the widget; the board page cannot", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(src, /let fromSetupPage = fromWidget \|\| fromPanelSetup/);
+  assert.match(src, /if body\["atlassianLogin"\] != nil, fromSetupPage \{\n\s*setupResultTarget = msg\.webView/);
+  assert.match(src, /if fromSetupPage, let t = body\["tokenLogin"\][\s\S]{0,200}?setupResultTarget = msg\.webView/);
+  assert.match(src, /let setupOpen = \(fromWidget && onSetupScreen\) \|\| fromPanelSetup/);
+  assert.match(src, /if let s = body\["saveSettings"\] as\? \[String: Any\], setupOpen, let page = msg\.webView \{ saveSettings\(s, reply: page\) \}/);
+  assert.match(src, /if body\["disconnect"\] != nil, setupOpen \{ disconnect\(\) \}/);
+  // Results go back to the page that asked.
+  assert.match(methodSource(src, "setupFailed"), /\(self\.setupResultTarget \?\? self\.web\)\.evaluateJavaScript/);
+  assert.match(methodSource(src, "settingsResult"), /page\.evaluateJavaScript/);
+  // Back: closes the page, or retries when the page stopped the refreshes (keychain refused).
+  assert.match(src, /if setupBlocksFetch, setupFromSettings \{ showBoard\(\) \} else \{ hidePanelSettings\(\) \}/);
+  // A finished sign-in or Back to board closes the panel's page too; Disconnect shows its sign-in block.
+  assert.match(methodSource(src, "showBoard"), /hidePanelSettings\(\)/);
+  assert.match(methodSource(src, "disconnect"), /if panelSettingsShown \{ fillPanelSettings\(\) \}/);
+});
+
+test("settings in the panel: the page stays loaded, so each opening first clears what the last one left", () => {
+  const page = readFileSync(new URL("./popover/settings.html", import.meta.url), "utf8");
+  const start = page.indexOf("  window.sbSettingsShow = (ctx, errors) => {");
+  const end = page.indexOf("\n  };", start);
+  assert.ok(start > 0 && end > start);
+  const show = page.slice(start, end);
+  for (const reset of ['clearTimeout(disarm);', '$("disconnect").classList.remove("armed");', "resetSignInButtons();",
+    '$("tokenForm").hidden = true;', '$("useToken").hidden = false;', '[$("host"), $("email"), $("token")].forEach((el) => { el.value = ""; });',
+    '$("saved").textContent = "";', '$("err").hidden = true;', '$("signin").hidden = false;']) {
+    assert.ok(show.includes(reset), reset);
+  }
+  // Cleared before it is filled; the height is answered last.
+  assert.ok(show.indexOf('$("signin").hidden = false;') < show.indexOf("window.sbSetupContext(ctx);"));
+  assert.match(show, /if \(errors\.length\) window\.sbSetupResult\(\{ errors \}\);\n\s*return \$\("card"\)\.offsetHeight;$/);
+});
+
+test("settings in the panel: a needed sign-in opens in the panel and a closed widget stays closed", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const login = methodSource(src, "requireLogin");
+  assert.match(login, /let widgetClosed = !self\.window\.isVisible && !self\.window\.isMiniaturized\n\s*if self\.panel\.isShown \|\| widgetClosed \{/);
+  assert.ok(login.indexOf("widgetClosed {") < login.indexOf("self.lendWidgetToSetup()"), "the panel path comes before the widget is lent");
+  assert.match(methodSource(src, "togglePanel"), /if setupBlocksFetch, !panelSettingsShown \{ showPanelSettings\(\) \}/);
+  // The panel's page shows the account only when no sign-in is needed, and the reason when it is.
+  const fill = methodSource(src, "fillPanelSettings");
+  assert.match(fill, /let signInNeeded = onSetupScreen && !setupFromSettings/);
+  assert.match(fill, /if !signInNeeded, let raw = [\s\S]*?let signedIn = setupContext\(cfg\)/);
+  assert.match(fill, /let errors = setupBlocksFetch \? \[setupReason\]\.compactMap \{ \$0 \} : \[\]/);
+  // Opened before its first load finished: filled when it finishes.
+  assert.match(src, /if w === panelSetupWeb, panelSettingsShown \{ fillPanelSettings\(\) \}/);
+});
+
+test("panel pages: the gear and the back arrow never come back hovered after their page swaps", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const view = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const setup = readFileSync(new URL("./popover/settings.html", import.meta.url), "utf8");
+  // Every panel page starts with hover off and turns it on at the first real mouse move only.
+  const script = src.match(/let PANEL_PAGE_SCRIPT = """\n([\s\S]*?)\n"""/)[1];
+  assert.match(script, /classList\.add\('nohover'\)/);
+  assert.match(script, /if \(e\.movementX \|\| e\.movementY\) document\.documentElement\.classList\.remove\('nohover'\)/);
+  assert.match(src, /source: PANEL_PAGE_SCRIPT, injectionTime: \.atDocumentStart/);
+  // One way to change the page: the page being left turns hover off and paints that, then the
+  // two pages trade places in one step (no overlap); a stuck frame cannot block the swap.
+  const swap = methodSource(src, "showPanelPage");
+  assert.match(swap, /leaving\.callAsyncJavaScript\("\\\(hoverOff\); await new Promise\(\(done\) => requestAnimationFrame\(\(\) => requestAnimationFrame\(done\)\)\)"/);
+  assert.match(swap, /for w in self\.panelTabs \+ \[self\.panelSetupWeb!\] \{ w\.isHidden = w !== page \}/);
+  assert.match(swap, /asyncAfter\(deadline: \.now\(\) \+ 0\.2\) \{ swap\(\) \}/);
+  // Only a closed panel (nothing on screen to paint) or the first page swaps at once.
+  assert.match(swap, /guard let leaving, leaving !== page, panel\.isShown else \{\n\s*leaving\?\.evaluateJavaScript\(hoverOff\)\n\s*swap\(\)/);
+  assert.match(swap, /guard self\.shownPanelPage === page else \{ return \}/);
+  assert.match(methodSource(src, "selectPanelTab"), /showPanelPage\(panelTabs\[index\]\)/);
+  assert.match(methodSource(src, "popoverWillClose"), /shownPanelPage\?\.evaluateJavaScript\("document\.documentElement\.classList\.add\('nohover'\)"\)/);
+  // Only the two buttons that swap pages wait for the move; no other hover is touched.
+  assert.match(view, /\n  :where\(html:not\(\.nohover\)\) \.rf:hover \{ background: var\(--hover\); color: -apple-system-label; \}/);
+  assert.match(setup, /:where\(html:not\(\.nohover\)\) \.back:hover \{/);
+  assert.match(setup, /\.nohover \.back \{ transition: none; \}/);
+  assert.equal((view.match(/nohover/g) || []).length, 2, "sprints.html: the gear only");
+  assert.equal((setup.match(/nohover/g) || []).length, 3, "settings.html: the back arrow only");
+});
+
+test("panel tabs: every grey hover is one colour, white 12%, on every popover page", () => {
+  const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
+  const pages = { sprints: read("./popover/sprints.html"), hosts: read("./popover/hosts.html"), settings: read("./popover/settings.html") };
+  for (const [name, page] of Object.entries(pages)) {
+    assert.match(page, /--hover: rgba\(255,255,255,\.12\);/, name);
+    // No hover writes a grey of its own; only Settings' filled buttons brighten their own fill.
+    const own = [...page.matchAll(/^\s*([^{\n]*:hover[^{\n]*)\{[^}]*background: rgba\(255,255,255,/gm)].map((m) => m[1].trim());
+    assert.deepEqual(own, name === "settings" ? ["button:hover"] : [], name);
+  }
+  // Rows, headers, cards and buttons all take it.
+  assert.match(pages.sprints, /\.grow:hover \{ background: var\(--hover\); \}/);
+  assert.match(pages.sprints, /\.row:hover, \.brow:hover, \.item:hover \{ background: var\(--hover\); \}/);
+  assert.match(pages.sprints, /\.tile\.fold:hover, \.tile\.open \{ background: var\(--hover\); \}/);
+  assert.match(pages.sprints, /\.fold:hover \{ background: var\(--hover\); \}/);
+  assert.match(pages.hosts, /\.row:hover \{ background: var\(--hover\); \}/);
+  assert.match(pages.hosts, /\.gi:hover \{ background: var\(--hover\); \}/);
+  // An open Hosts row and its group menu read as one block.
+  assert.match(pages.hosts, /\.row\.open \{ background: var\(--hover\);/);
+  assert.match(pages.hosts, /\.gmenu \{[^}]*background: var\(--hover\); \}/);
+  assert.match(pages.settings, /\.back:hover \{ color: -apple-system-label; background: var\(--hover\); \}/);
+  assert.doesNotMatch(Object.values(pages).join(""), /--row-hover/);
+});
+
+test("Hosts tab: rows as tall as the switch, 4 px apart; a local one fades from yellow on the left, sliding in", () => {
+  const page = readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8");
+  assert.match(page, /\.row \{[^}]*height: 28px;/);
+  assert.match(page, /\.sw \{[^}]*height: 24px;/, "the switch fits the row");
+  assert.match(page, /\.row \+ \.row \{ margin-top: 4px; \}/);
+  // The gradient is a layer under the row's content, so it can slide in from the left as the domain turns local.
+  assert.match(page, /\.row \{[^}]*position: relative; isolation: isolate;/);
+  const layer = page.match(/\.row::before \{([^}]*)\}/)[1].replace(/\s+/g, " ");
+  for (const rule of ["position: absolute", "inset: 0", "z-index: -1", "border-radius: inherit",
+    "background: linear-gradient(90deg, color-mix(in srgb, var(--y) 22%, transparent), transparent)",
+    "opacity: 0", "transform: scaleX(.3)", "transform-origin: left", "transition: opacity .2s, transform .2s var(--ease)"]) {
+    assert.ok(layer.includes(rule), rule);
+  }
+  assert.match(page, /\.row\.local::before \{ opacity: 1; transform: none; \}/);
+  // Hover and an open row show their own fill in its place.
+  assert.match(page, /\.row\.local:hover::before, \.row\.local\.open::before \{ opacity: 0; \}/);
+  assert.doesNotMatch(page, /\.row\.local \{ background/);
+  // The group pills as the team goal's: 11 px on white 10%.
+  assert.match(page, /\.tag \{[^}]*font-size: 11px;[^}]*background: rgba\(255,255,255,\.1\);/);
+});
+
+test("Hosts tab: a gear opens Settings, and the back arrow returns to Hosts", () => {
+  const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(methodSource(swift, "hostsMessage"), /if body\["settings"\] != nil \{\n\s*showPanelSettings\(\)\n\s*return\n\s*\}/);
+  assert.match(methodSource(swift, "hidePanelSettings"), /selectPanelTab\(tabControl\.selectedSegment\)/);
+  assert.match(swift.match(/^let PAGE_SYMBOLS = \[([\s\S]*?)^\]/m)[1], /"gearshape"/);
+  const page = readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8");
+  // The last header button, as the gear is on the Sprint tab.
+  assert.match(page, /<button class="icon" id="gearBtn" title="Settings" aria-label="Settings"><i class="sym s-gearshape"><\/i><\/button>\n\s*<\/span>/);
+  assert.match(page, /else if \(at\("#gearBtn"\)\) post\(\{ settings: true \}\);/);
+  // It swaps the page, so its hover waits for a real mouse move; the other buttons keep theirs.
+  assert.match(page, /:where\(html:not\(\.nohover\)\) #gearBtn:hover \{/);
+  assert.match(page, /\.icon:not\(#gearBtn\):hover, \.icon\.on \{/);
+});
+
+test("setup screen: in the panel the back arrow, buttons and inputs follow the board's", () => {
+  const setup = readFileSync(new URL("./popover/settings.html", import.meta.url), "utf8");
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  // The back arrow is an SF Symbol in the header button's box, as the Sprint page's gear.
+  assert.match(setup, /<span class="back" id="back" role="button" title="Back"><i class="sym s-chevron-left"><\/i><\/span>/);
+  assert.match(swift.match(/^let PAGE_SYMBOLS = \[([\s\S]*?)^\]/m)[1], /"chevron\.left"/);
+  assert.match(sprints, /\.rf \{[^}]*width: 30px; height: 26px;\s*border-radius: 6px;/);
+  assert.match(sprints, /\.rf \.sym \{ width: 16px; height: 16px; \}/);
+  assert.match(setup, /\.back \{[^}]*width: 30px; height: 26px;[^}]*border-radius: 6px;/);
+  assert.match(setup, /\.back \.sym \{ display: block; width: 16px; height: 16px;/);
+  // Save is a filled blue button like the sign-in ones; the inputs are the note field's.
+  assert.match(setup, /<button id="saveSettings" class="primary">Save settings<\/button>/);
+  assert.match(setup, /button\.primary \{ color: #fff; background: -apple-system-control-accent; \}/);
+  assert.match(setup, /button \{ display: block; width: 100%; height: 28px;/);
+  const note = sprints.match(/\.notes \.ninput \{([^}]*)\}/)[1].replace(/\s+/g, " ");
+  const input = setup.match(/input:not\(\[type="checkbox"\]\) \{([^}]*)\}/)[1].replace(/\s+/g, " ");
+  for (const rule of ["height: 26px", "padding: 0 10px", "border-radius: 7px", "background: rgba(255,255,255,.12)", "border: 1px solid rgba(255,255,255,.14)"]) {
+    assert.ok(note.includes(rule) && input.includes(rule), rule);
+  }
+});
+
+test("setup screen: in the panel a back arrow and a Settings title replace the window buttons", () => {
+  const setup = readFileSync(new URL("./popover/settings.html", import.meta.url), "utf8");
+  assert.match(setup, /<h1><span class="back" id="back" role="button" title="Back">[^\n]*<\/span>Settings<\/h1>/);
+  assert.match(setup, /\$\("back"\)\.addEventListener\("click", \(\) => post\(\{ backToBoard: true \}\)\);/);
+  // The widget's own controls are not on the popover's page; the popover material shows through.
+  assert.doesNotMatch(setup, /class="lights"|data-win|Back to board/);
+  assert.match(setup, /#card \{ padding: 14px 16px 16px; \}/);
+});
+
+test("board page: in the panel the could-not-refresh strip keeps clear of the header buttons", () => {
+  assert.match(readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8"), /\.stale \{ margin: 10px 0 0;/);
+});
+
+test("board page: in the panel the task rows and the GitHub rows share one box and are set in alike", () => {
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  // Task rows, past sprints' rows and GitHub rows: one box, the same spacing.
+  assert.match(sprints, /\.row, \.brow, \.item \{ display: flex; align-items: center; gap: 6px; margin: 0 0 4px 6px; padding: 2px 4px; border-radius: 8px;/);
+  assert.match(sprints, /\.ghd \{[^}]*margin: 8px 0 4px; padding: 2px 8px;/);
+  // The late review keeps its yellow box over the common fill.
+  assert.match(sprints, /\.item\.late \{ background: color-mix\(in srgb, -apple-system-yellow 16%, transparent\); \}/);
+});
+
+test("panel tabs: neither page shows a scroll bar, so a tab switch or an opened list does not flash one", () => {
+  for (const page of [readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8"), readFileSync(new URL("./popover/settings.html", import.meta.url), "utf8")]) {
+    assert.match(page, /html, body \{[^}]*scrollbar-width: none; \}\n\s*html::-webkit-scrollbar, body::-webkit-scrollbar \{ display: none; \}/);
+  }
+  assert.match(readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8"), /html, body \{ scrollbar-width: none; \}\n\s*html::-webkit-scrollbar, body::-webkit-scrollbar \{ display: none; \}/);
 });

@@ -36,5 +36,121 @@
   ],
   "releasedStatuses": [
     "Released on Prod"
-  ]
+  ],
+  "goalRiskStages": [
+    {
+      "name": "To Do",
+      "atRisk": 6,
+      "critical": 4,
+      "statuses": [
+        "Dev Check",
+        "Priority Change",
+        "To Do",
+        "Waiting for KickOff",
+        "Backlog",
+        "Block",
+        "Epic To Do",
+        "Unsolved",
+        "Pool",
+        "Blocked",
+        "NEEDS GROOMING"
+      ]
+    },
+    {
+      "name": "In Progress",
+      "atRisk": 5,
+      "critical": 3,
+      "statuses": [
+        "In Progress",
+        "UX Writing In Progress",
+        "Epic In Development",
+        "UX Writing"
+      ]
+    },
+    {
+      "name": "In Review",
+      "atRisk": 5,
+      "critical": 3,
+      "statuses": [
+        "In Code Review",
+        "In Review",
+        "UX Writing In Review"
+      ]
+    },
+    {
+      "name": "Ready to Test",
+      "atRisk": 4,
+      "critical": 2,
+      "statuses": [
+        "Ready To Test"
+      ]
+    },
+    {
+      "name": "QA",
+      "atRisk": 4,
+      "critical": 2,
+      "statuses": [
+        "IN TESTING",
+        "User Testing",
+        "QA Check",
+        "TEST BLOCKED"
+      ]
+    },
+    {
+      "name": "Automation Test",
+      "atRisk": 4,
+      "critical": 2,
+      "statuses": [
+        "IN AUTO TESTING"
+      ]
+    },
+    {
+      "name": "Design UAT",
+      "atRisk": 3,
+      "critical": 1,
+      "statuses": [
+        "Design Testing In Progress",
+        "Design Testing Done",
+        "Design Review",
+        "Design UAT"
+      ]
+    },
+    {
+      "name": "UAT",
+      "atRisk": 3,
+      "critical": 1,
+      "statuses": [
+        "UAT",
+        "Dev/PM Alignment"
+      ]
+    },
+    {
+      "name": "Security",
+      "atRisk": 2,
+      "critical": null,
+      "statuses": [
+        "In Security Check"
+      ]
+    },
+    {
+      "name": "Released",
+      "never": true,
+      "statuses": [
+        "Ready For Release",
+        "Awaiting Release",
+        "Pending for Release",
+        "Waiting for Release",
+        "Waiting for SDK Release",
+        "Released on Prod",
+        "Done",
+        "Resolved",
+        "Closed",
+        "Epic is Done",
+        "Question",
+        "Rejected",
+        "Unresolved"
+      ]
+    }
+  ],
+  "partnerDomainSuffixes": []
 }

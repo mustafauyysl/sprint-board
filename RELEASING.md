@@ -44,6 +44,14 @@ gate.
 spctl -a -vvv "dist/Sprint Board.app"
 ```
 
+The app must also carry its Apple Events entitlement (`com.apple.security.automation.apple-events`
+from `app.entitlements`); without it the Hosts tab's Chrome refresh fails with -1743 and macOS
+never asks:
+
+```bash
+codesign -d --entitlements - "dist/Sprint Board.app"
+```
+
 **5. Publish the release**
 
 ```bash

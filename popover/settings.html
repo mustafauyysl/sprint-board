@@ -1,0 +1,241 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sprint Board — Settings</title>
+<style>
+  /* The popover's Settings page, over the tabs, with a back arrow. The popover's material shows
+     through the page. */
+  :root { color-scheme: dark; --fill: rgba(255,255,255,.05);
+          /* Every grey hover, on every popover page */
+          --hover: rgba(255,255,255,.12); }
+  * { box-sizing: border-box; }
+  /* button's display: block would beat the browser's own [hidden] rule */
+  [hidden] { display: none; }
+  html, body { margin: 0; padding: 0; background: transparent; scrollbar-width: none; }
+  html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }
+  html { overflow-y: auto; overscroll-behavior: none; }
+  body { font: 13px/1.4 -apple-system, system-ui; color: -apple-system-label; -webkit-user-select: none; user-select: none; }
+  #card { padding: 14px 16px 16px; }
+
+  h1 { display: flex; align-items: center; gap: 6px; margin: 0 0 12px; font-size: 13px; font-weight: 600; }
+  /* The back arrow is the Sprint page's header button: a 30 x 26 box, a 16 px SF Symbol, the same greys */
+  .back { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 26px; margin-left: -8px;
+          border-radius: 6px; color: rgba(255,255,255,.8); cursor: pointer; transition: background-color .15s, color .15s; }
+  .back .sym { display: block; width: 16px; height: 16px; background-color: currentColor;
+               -webkit-mask-size: contain; -webkit-mask-repeat: no-repeat; -webkit-mask-position: center; }
+  /* The back arrow swaps the page on click; after a swap it waits for a real mouse move (nohover) */
+  :where(html:not(.nohover)) .back:hover { color: -apple-system-label; background: var(--hover); }
+  .nohover .back { transition: none; }
+
+  .sub { margin: 0 0 12px; font-size: 12px; color: -apple-system-secondary-label; }
+  .hint { margin-top: 4px; font-size: 12px; color: -apple-system-secondary-label; }
+  a { color: -apple-system-link; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  label { display: block; margin-top: 10px; font-size: 12px; font-weight: 600; color: -apple-system-secondary-label; }
+  label.check { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 400; color: -apple-system-label; }
+  label.check input { margin: 0; }
+  /* Inputs as the Sprint page's "Add a note" field */
+  input:not([type="checkbox"]) { display: block; width: 100%; height: 26px; margin-top: 4px; padding: 0 10px; border-radius: 7px;
+      font: 12px -apple-system, system-ui; color: inherit; outline: none; -webkit-appearance: none; appearance: none;
+      -webkit-user-select: text; user-select: text; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.14); }
+
+  /* Filled buttons: blue for the action the page is for, a light fill for the others */
+  button { display: block; width: 100%; height: 28px; margin-top: 12px; padding: 0 12px; border: 0; border-radius: 7px;
+           -webkit-appearance: none; appearance: none; font: 600 13px -apple-system, system-ui; color: -apple-system-label;
+           background: rgba(255,255,255,.12); cursor: pointer; transition: background-color .15s, filter .15s; }
+  button:hover { background: rgba(255,255,255,.18); }
+  button.primary { color: #fff; background: -apple-system-control-accent; }
+  button.primary:hover { background: -apple-system-control-accent; filter: brightness(1.12); }
+  button.primary:active { filter: brightness(.9); }
+  button:disabled { opacity: .5; cursor: default; }
+
+  /* The account; Disconnect is destructive: red text in a red outline, the second click fills it.
+     Both labels share one grid cell, so arming never changes the button's width. */
+  #current { margin: 0 0 4px; padding: 8px 10px; border-radius: 7px; background: var(--fill); }
+  #current .row { display: flex; align-items: center; gap: 8px; }
+  #current .who { flex: 1; }
+  #disconnect { display: grid; width: auto; height: auto; margin: 0; padding: 2px 10px; border-radius: 6px; font-size: 11px; font-weight: 400;
+                color: -apple-system-red; background: transparent; border: 1px solid -apple-system-red; }
+  #disconnect > span { grid-area: 1 / 1; }
+  #disconnect:not(.armed) > :last-child, #disconnect.armed > :first-child { visibility: hidden; }
+  #disconnect.armed { color: white; background: -apple-system-red; }
+  #tokenForm { margin-top: 4px; }
+  #settings { margin-top: 12px; padding-top: 2px; border-top: 1px solid -apple-system-separator; }
+  .err { margin-top: 12px; padding: 6px 8px; border-radius: 7px; font-size: 11px; color: -apple-system-label;
+         background: color-mix(in srgb, -apple-system-red 14%, transparent); }
+  .err ul { margin: 0; padding-left: 16px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div id="card">
+<h1><span class="back" id="back" role="button" title="Back"><i class="sym s-chevron-left"></i></span>Settings</h1>
+<div id="current" hidden>
+  <div class="row"><span class="who" id="who"></span><button id="disconnect"><span>Disconnect</span><span>Click again</span></button></div>
+  <div class="hint"><span id="hintText"></span> <a href="#" id="hintLink"></a></div>
+</div>
+<div id="signin">
+  <p class="sub">Sign in and the rest follows — your Jira site, your email and your
+  permissions are read from your account. Nothing is written to a file; it goes to the keychain.</p>
+  <button id="atlassian" class="primary">Sign in with Atlassian</button>
+  <div class="hint">A browser opens, you approve, it closes. Read-only access:
+    nothing in Jira is ever modified.</div>
+  <button id="useToken">Use an API token instead</button>
+  <div id="tokenForm" hidden>
+    <label for="host">Jira site</label>
+    <input id="host" placeholder="yourcompany.atlassian.net" autocomplete="off" spellcheck="false">
+    <label for="email">Email</label>
+    <input id="email" placeholder="you@company.com" autocomplete="off" spellcheck="false">
+    <label for="token">API token</label>
+    <input id="token" type="password" placeholder="paste your token" autocomplete="off">
+    <div class="hint">Create one at <a href="#" data-url="https://id.atlassian.com/manage-profile/security/api-tokens">id.atlassian.com → API tokens</a>.
+      It is checked against Jira, then stored in the keychain.</div>
+    <button id="saveToken" class="primary">Save token</button>
+  </div>
+</div>
+<div id="settings" hidden>
+  <label for="org">GitHub organization</label>
+  <input id="org" placeholder="empty = all your PRs" autocomplete="off" spellcheck="false">
+  <div class="hint">Only PRs in this organization are watched. The board uses it at the next refresh.</div>
+  <label class="check"><input id="drafts" type="checkbox"> Show draft PRs</label>
+  <div class="hint">Drafts appear in Merge blocked, marked "draft". They never appear in Waiting.</div>
+  <label class="check"><input id="goals" type="checkbox"> Sprint goal tracking</label>
+  <div class="hint">Shows the flagged tasks of your sprint under Sprint progress, whoever owns them.</div>
+  <label for="partners">Partner domains</label>
+  <input id="partners" placeholder="empty = no Add partner" autocomplete="off" spellcheck="false">
+  <div class="hint">In the Hosts tab, Add partner adds &lt;partner&gt;.&lt;domain&gt; for each of these. Separate them with commas.</div>
+  <button id="saveSettings" class="primary">Save settings</button>
+  <div id="saved" class="hint"></div>
+</div>
+<div id="err" class="err" hidden></div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const post = (message) => window.webkit?.messageHandlers?.sb?.postMessage(message);
+
+  // The popover follows the card's height.
+  new ResizeObserver(() => post({ height: $("card").offsetHeight })).observe($("card"));
+
+  // Links open in the default browser; inside the page they would replace it.
+  document.addEventListener("click", (e) => {
+    const link = e.target.closest("a");
+    if (!link) return;
+    e.preventDefault();
+    if (link.dataset.url) post({ open: link.dataset.url });
+  });
+  // Swift closes the page, or tries again when the page stopped the refreshes.
+  $("back").addEventListener("click", () => post({ backToBoard: true }));
+
+  const showSettings = (s) => {
+    $("org").value = s.githubOrg || "";
+    $("drafts").checked = s.showDraftPrs !== false;
+    $("goals").checked = s.sprintGoalTracking === true;
+    $("partners").value = (s.partnerDomainSuffixes || []).join(", ");
+  };
+
+  // Signed in: the account and the settings; the sign-in block is for the first run and after Disconnect.
+  window.sbSetupContext = (ctx) => {
+    if (!ctx || !ctx.email) return;
+    $("who").textContent = "Connected as " + ctx.email + " · " + (ctx.mode === "oauth" ? "Atlassian sign-in" : "API token");
+    const hint = ctx.hint || {};
+    $("hintText").textContent = hint.text || "";
+    $("hintLink").textContent = hint.url ? (hint.link || hint.url) : "";
+    $("hintLink").dataset.url = hint.url || "";
+    $("current").hidden = false;
+    $("signin").hidden = true;
+    showSettings(ctx);
+    $("settings").hidden = false;
+  };
+
+  $("saveSettings").addEventListener("click", () => {
+    $("err").hidden = true;
+    $("saved").textContent = "";
+    post({ saveSettings: { githubOrg: $("org").value, showDraftPrs: $("drafts").checked, sprintGoalTracking: $("goals").checked,
+      partnerDomainSuffixes: $("partners").value } });
+  });
+  [$("org"), $("partners")].forEach((el) =>
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter") $("saveSettings").click(); }));
+  window.sbSettingsResult = (res) => {
+    if (!res || !res.saved) {
+      window.sbSetupResult(res);
+      return;
+    }
+    showSettings(res);
+    $("saved").textContent = "Saved. The board uses it at the next refresh.";
+  };
+
+  // Two clicks, so a stray one never signs you out.
+  let disarm = null;
+  $("disconnect").addEventListener("click", () => {
+    if ($("disconnect").classList.contains("armed")) {
+      clearTimeout(disarm);
+      post({ disconnect: true });
+      return;
+    }
+    $("disconnect").classList.add("armed");
+    disarm = setTimeout(() => $("disconnect").classList.remove("armed"), 3000);
+  });
+
+  $("atlassian").addEventListener("click", () => {
+    $("atlassian").disabled = true;
+    $("atlassian").textContent = "Browser opened, waiting for approval…";
+    $("err").hidden = true;
+    post({ atlassianLogin: true });
+  });
+  $("useToken").addEventListener("click", () => {
+    $("tokenForm").hidden = false;
+    $("useToken").hidden = true;
+    $("host").focus();
+  });
+  $("saveToken").addEventListener("click", () => {
+    const host = $("host").value.trim(), email = $("email").value.trim(), token = $("token").value.trim();
+    if (!host || !email || !token) {
+      window.sbSetupResult({ errors: ["Fill in the Jira site, your email and the token."] });
+      return;
+    }
+    $("saveToken").disabled = true;
+    $("saveToken").textContent = "Checking with Jira…";
+    $("err").hidden = true;
+    post({ tokenLogin: { host, email, token } });
+  });
+  [$("host"), $("email"), $("token")].forEach((el) =>
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter") $("saveToken").click(); }));
+
+  const resetSignInButtons = () => {
+    $("atlassian").disabled = false;
+    $("atlassian").textContent = "Sign in with Atlassian";
+    $("saveToken").disabled = false;
+    $("saveToken").textContent = "Save token";
+  };
+
+  // Swift hands a sign-in or save error back through this.
+  window.sbSetupResult = (res) => {
+    resetSignInButtons();
+    const list = document.createElement("ul");
+    for (const error of (res && res.errors) || ["unknown error"]) {
+      list.appendChild(document.createElement("li")).textContent = String(error);
+    }
+    $("err").replaceChildren(list);
+    $("err").hidden = false;
+  };
+
+  // The page stays loaded, as the tabs do, and Swift fills it each time it opens: the account
+  // and the settings, or the sign-in block (ctx null), and the reason the board stopped. What
+  // the last visit left goes first: an error, a typed token, an armed Disconnect. Answers the
+  // height, so the panel opens at the right size in one step.
+  window.sbSettingsShow = (ctx, errors) => {
+    clearTimeout(disarm);
+    $("disconnect").classList.remove("armed");
+    resetSignInButtons();
+    $("tokenForm").hidden = true;
+    $("useToken").hidden = false;
+    [$("host"), $("email"), $("token")].forEach((el) => { el.value = ""; });
+    $("saved").textContent = "";
+    $("err").hidden = true;
+    $("current").hidden = true;
+    $("settings").hidden = true;
+    $("signin").hidden = false;
+    window.sbSetupContext(ctx);
+    if (errors.length) window.sbSetupResult({ errors });
+    return $("card").offsetHeight;
+  };
+</script>

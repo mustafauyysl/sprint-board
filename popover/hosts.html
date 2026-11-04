@@ -1,0 +1,1012 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Hosts</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --y: #ffd60a; --acc: #0a84ff; --acc-text: #5cb0ff; --red: #ff6961;
+    /* The popover is translucent, lighter still when it is not focused: dim text is white with
+       alpha, so it stays lighter than whatever shows through. Fixed greys vanished there. */
+    --t1: rgba(255,255,255,.96); --t2: rgba(255,255,255,.8); --t3: rgba(255,255,255,.62);
+    --fill: rgba(255,255,255,.12); --line: rgba(255,255,255,.14);
+    /* Every grey hover, on every popover page: rows, menus and buttons */
+    --hover: rgba(255,255,255,.12);
+    --ease: cubic-bezier(.2,.7,.3,1);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  /* As on the Sprint tab: the popover grows a moment after the page, and a scroll bar flashed
+     meanwhile. The page still scrolls, it shows no bar. */
+  html, body { scrollbar-width: none; }
+  html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }
+  body {
+    font: 13px/1.35 -apple-system, system-ui, sans-serif; color: var(--t1);
+    -webkit-user-select: none; user-select: none; cursor: default;
+  }
+  button { font: inherit; color: inherit; }
+  ::placeholder { color: var(--t3); opacity: 1; }
+  /* Everything that does something on click shows the pointer. */
+  button:not(:disabled), .row, .tag .tx, .del, .link, .ed { cursor: pointer; }
+  #card { padding: 14px 16px 16px; }
+  #card.busy { opacity: .6; pointer-events: none; }
+  .leaving { pointer-events: none; }
+
+  .top { display: flex; align-items: center; gap: 8px; }
+  .title { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
+  .count { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--t2); }
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px;
+          font-weight: 500; color: var(--y); background: rgba(255,214,10,.16); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--y); flex-shrink: 0; }
+  .tools { margin-left: auto; display: flex; gap: 2px; }
+  .icon { width: 30px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px;
+          color: var(--t2); background: transparent; transition: background-color .15s, color .15s; }
+  .icon:not(#gearBtn):hover, .icon.on { color: var(--t1); background: var(--hover); }
+  /* The gear swaps the page on click; after a swap it waits for a real mouse move (nohover) */
+  :where(html:not(.nohover)) #gearBtn:hover { color: var(--t1); background: var(--hover); }
+  .icon svg { display: block; width: 16px; height: 16px; }
+  .icon .sym { display: block; width: 16px; height: 16px; background-color: currentColor;
+               -webkit-mask-size: contain; -webkit-mask-repeat: no-repeat; -webkit-mask-position: center; }
+
+  /* The field under the header: search, or the add/new-group entry the + menu picked. */
+  .action { display: flex; gap: 6px; margin-top: 10px; height: 26px; }
+  .adds { display: flex; gap: 6px; margin-top: 10px; }
+  .adds button { flex: 1; height: 26px; padding: 0; border: 0; border-radius: 999px; font-size: 12px;
+                 color: var(--acc-text); background: rgba(10,132,255,.18); transition: background-color .15s; }
+  .adds button:hover { background: rgba(10,132,255,.28); }
+  .action input { flex: 1; min-width: 0; height: 26px; padding: 0 10px; border-radius: 7px; font: inherit; font-size: 12px;
+                  color: inherit; background: var(--fill); border: 1px solid var(--line); outline: none;
+                  -webkit-user-select: text; user-select: text; transition: border-color .15s; }
+  .action input:focus { border-color: var(--acc); }
+  /* An entry the page (or Swift) refused: red ring, and the reason in place of the hint. */
+  .action input.bad { border-color: var(--red); box-shadow: 0 0 0 1px rgba(255,105,97,.45); }
+  .action button { height: 26px; padding: 0 12px; border: 0; border-radius: 7px; font-size: 12px; color: #fff; background: var(--acc); }
+  .action button.ghost { padding: 0 10px; color: var(--t2); background: var(--fill); }
+  .sub { margin-top: 4px; color: var(--t3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* A refusal may name several entries (a comma-separated add): it wraps instead of cutting off. */
+  .sub.err { color: #ff8a80; white-space: normal; }
+
+  /* Groups take one line; the rest hide behind "+N" (fitChips), or all show when expanded. */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .chips.one { height: 24px; overflow: hidden; }
+  /* A group with local domains gets a yellow outline: an outline takes no room, so the chip keeps
+     its width (a dot or a border would change it, and the line would jump). */
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border: 0; border-radius: 999px;
+          font-size: 12px; color: var(--t1); background: var(--fill); white-space: nowrap;
+          outline: 1px solid transparent; outline-offset: -1px;
+          transition: background-color .2s, color .2s, outline-color .2s; }
+  .chip.local { outline-color: var(--y); }
+  .chip.sel { color: #fff; background: var(--acc); }
+  .chip[hidden] { display: none; }
+  /* The count, and on hover the pencil in its place: both in one cell, so the chip keeps its width. */
+  .chip .n { display: inline-grid; color: var(--t3); font-variant-numeric: tabular-nums; }
+  .chip.sel .n { color: rgba(255,255,255,.8); }
+  .chip .n > * { grid-area: 1 / 1; justify-self: end; align-self: center; transition: opacity .15s; }
+  .chip .ed { display: flex; color: var(--t2); opacity: 0; }
+  .chip .ed svg { display: block; width: 12px; height: 12px; }
+  .chip:hover .ed { opacity: 1; }
+  .chip:hover .ed + .cnt { opacity: 0; }
+  /* The count is drawn over the pencil; clicks must reach the pencil underneath. */
+  .chip .cnt { pointer-events: none; }
+  .chip .ed:hover { color: var(--t1); }
+  .chip.sel .ed { color: #fff; }
+  .chip.new { padding: 0 10px; color: var(--acc-text); background: transparent; border: 1px dashed rgba(92,176,255,.6); }
+  .chip.more { color: var(--acc-text); background: transparent; box-shadow: inset 0 0 0 1px rgba(92,176,255,.55); }
+  /* The selected group is among the hidden ones: "+N" takes the selected look and its name. */
+  .chip.more.sel { color: #fff; background: var(--acc); box-shadow: none; }
+  .chip.more .mn { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+  .chip.more .mc { color: rgba(255,255,255,.8); }
+  /* A group being renamed: the chip turns into its name field, with a trash to delete the group. */
+  .redit { display: inline-flex; align-items: center; gap: 2px; height: 24px; padding: 0 3px 0 10px;
+           border-radius: 999px; background: var(--fill); box-shadow: inset 0 0 0 1px var(--acc); overflow: hidden; }
+  .redit input { flex: 1; min-width: 0; height: 22px; padding: 0; border: 0; outline: none; background: transparent;
+                 font: inherit; font-size: 12px; color: inherit; -webkit-user-select: text; user-select: text; }
+  .rdel { display: grid; place-items: center; flex-shrink: 0; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%;
+          color: var(--t2); background: transparent; transition: color .15s, background-color .15s; }
+  .rdel:hover { color: var(--red); background: rgba(255,105,97,.16); }
+  .rdel svg { display: block; width: 14px; height: 14px; }
+
+  .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 14px;
+          padding: 0 2px 6px; border-bottom: 1px solid var(--line); }
+  .head .label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                 font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--t2); }
+  .acts { display: flex; gap: 4px; flex-shrink: 0; }
+  .act { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border: 0; border-radius: 6px;
+         font-size: 12px; color: var(--t1); background: var(--fill); transition: opacity .2s, background-color .15s; }
+  .act svg { display: block; width: 13px; height: 13px; }
+  .act:disabled { opacity: .4; }
+
+  /* About 15 rows; the rest scrolls inside the list. */
+  .rows { position: relative; margin-top: 4px; max-height: 510px; overflow-y: auto; scrollbar-width: none; }
+  /* No scroll bar: it sat over the switches. While rows wait below (fade) or above (fade-up), that edge
+     fades instead, as in a domain's group list. */
+  .rows::-webkit-scrollbar { display: none; }
+  .rows.fade { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent); }
+  .rows.fade-up { -webkit-mask-image: linear-gradient(to top, #000 calc(100% - 24px), transparent); }
+  .rows.fade.fade-up { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 24px, #000 calc(100% - 24px), transparent); }
+  /* As tall as the switch needs, 4 px apart as the Sprint tab's rows */
+  .row { position: relative; isolation: isolate; display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px;
+         border-radius: 8px; transition: background-color .15s, border-radius .2s; }
+  .row + .row { margin-top: 4px; }
+  .row:hover { background: var(--hover); }
+  /* A local domain fades from yellow on the left, so it shows without reading the switches. A layer
+     under the row's content: a background gradient cannot move, the layer slides in from the left as
+     the domain turns local. The hover and open fills replace it. */
+  .row::before { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit;
+                 background: linear-gradient(90deg, color-mix(in srgb, var(--y) 22%, transparent), transparent);
+                 opacity: 0; transform: scaleX(.3); transform-origin: left; transition: opacity .2s, transform .2s var(--ease); }
+  .row.local::before { opacity: 1; transform: none; }
+  .row.local:hover::before, .row.local.open::before { opacity: 0; }
+  .name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .name b { font-weight: 500; transition: color .2s, font-weight .2s; }
+  .name i { font-style: normal; color: var(--t3); }
+  .row.prod .name b, .row.unknown .name b { font-weight: 400; color: var(--t2); }
+  /* A domain's other groups, as small pills so they do not read as part of its name. They give
+     way first when the row is short of room: pills that do not fit wrap out of sight, and a
+     single pill too long for what is left ends in an ellipsis. */
+  /* A pill never gets narrower than three letters and its ellipsis, and the row keeps room for one: with a long
+     domain name, the name gives way (ends in an ellipsis) before a pill becomes unreadable. */
+  .tags { flex: 0 100 auto; display: flex; flex-wrap: wrap; gap: 4px; height: 18px; min-width: calc(5ch + 14px); overflow: hidden;
+          font-size: 11px; }
+  /* Several groups: room for the first one at its minimum, the gap and a "+N" of up to two digits. */
+  .tags.multi { min-width: calc(5ch + 14px + 4px + 3ch + 14px); }
+  .tag { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: calc(5ch + 14px);
+         max-width: 100%; height: 18px; padding: 0 7px; border-radius: 999px; overflow: hidden; font-size: 11px;
+         color: var(--t2); background: rgba(255,255,255,.1); white-space: nowrap; }
+  .tag[hidden] { display: none; }
+  .tag .tn { min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+  /* Remove from the group: on hover the ✕ slides in over the end of the name, which fades out
+     under it; the pill keeps its width. */
+  .tag .tx { position: absolute; top: 0; right: 0; bottom: 0; width: 18px; display: grid; place-items: center;
+             color: var(--t1); opacity: 0; transform: translateX(100%); transition: transform .15s var(--ease), opacity .15s, color .15s; }
+  .tag .tx svg { display: block; width: 10px; height: 10px; }
+  .tag:not(.more):hover .tx { opacity: 1; transform: none; }
+  .tag:not(.more):hover .tn { -webkit-mask-image: linear-gradient(to left, transparent 16px, #000 28px); }
+  /* The groups that did not fit, counted; a click opens the domain's group list. Its "+N" is never cut,
+     so the group-name minimum does not apply. */
+  .tag.more { min-width: 0; color: var(--acc-text); background: transparent; box-shadow: inset 0 0 0 1px rgba(92,176,255,.5);
+              flex-shrink: 0; }
+  .row .del { visibility: hidden; }
+  .row:hover .del { visibility: visible; }
+  .tag .tx:hover, .del:hover { color: var(--red); }
+  .end { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-shrink: 0; padding-left: 2px; }
+  .del { display: inline-flex; color: var(--t3); transition: color .15s; }
+  .del svg { display: block; width: 16px; height: 16px; }
+  /* The state's icon sits in the free half of the track (globe on the right in Prod, monitor on
+     the left in Local), larger than it could be on the knob. Every offset is a whole pixel: the
+     app rounds half pixels, and a centred icon would sit off centre. */
+  .sw { position: relative; flex-shrink: 0; width: 44px; height: 24px; padding: 0; border: 0; border-radius: 999px;
+        background: rgba(255,255,255,.18); transition: background-color .2s; }
+  .sw .k { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center;
+           background: #e5e5ea; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: left .2s var(--ease), background-color .2s; }
+  .sw .k svg { display: block; width: 12px; height: 12px; color: #1c1c1e; }
+  .sw .ic { position: absolute; top: 5px; transition: opacity .2s; }
+  .sw .ic svg { display: block; width: 14px; height: 14px; }
+  .sw .ic-l { left: 5px; color: #1c1c1e; opacity: 0; }
+  .sw .ic-p { left: 25px; color: var(--t1); }
+  .sw.on { background: var(--y); }
+  .sw.on .k { left: 22px; background: #fff; }
+  .sw.on .ic-l { opacity: 1; }
+  .sw.on .ic-p, .sw.unknown .ic { opacity: 0; }
+  .sw:disabled { opacity: .4; }
+  .sw.unknown .k { left: 12px; background: #8e8e93; }
+
+  /* A domain's groups open under its row as part of it (an accordion, not a floating menu):
+     same background, joined corners, content lined up with the name. */
+  .row.open { background: var(--hover); border-radius: 8px 8px 0 0; }
+  .gmenu { margin-bottom: 6px; overflow: hidden; border-radius: 0 0 8px 8px; background: var(--hover); }
+  .gin { padding: 2px 8px 8px; }
+  .gfind { width: 100%; height: 26px; padding: 0 9px; border-radius: 6px; font: inherit; font-size: 12px; color: inherit;
+           background: var(--fill); border: 1px solid var(--line); outline: none; transition: border-color .15s;
+           -webkit-user-select: text; user-select: text; }
+  .gfind:focus { border-color: var(--acc); }
+  .glist { margin-top: 4px; max-height: 140px; overflow-y: auto; }
+  /* macOS hides scroll bars until a scroll: fade the edge that more groups wait behind. */
+  .glist.fade { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent); }
+  .glist.fade-up { -webkit-mask-image: linear-gradient(to top, #000 calc(100% - 20px), transparent); }
+  .glist.fade.fade-up { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 20px, #000 calc(100% - 20px), transparent); }
+  .gi { display: flex; align-items: center; gap: 10px; height: 28px; padding: 0 8px; border-radius: 6px;
+        font-size: 12px; color: var(--t2); cursor: pointer; transition: background-color .15s, color .2s; }
+  .gi:hover { background: var(--hover); }
+  .gi.on { color: var(--t1); }
+  .gi .gn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cb { flex-shrink: 0; width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center;
+        box-shadow: inset 0 0 0 1.5px rgba(255,255,255,.45); transition: background-color .2s, box-shadow .2s; }
+  .cb svg { display: block; width: 10px; height: 10px; color: #fff; opacity: 0; transform: scale(.6);
+            transition: opacity .15s, transform .2s var(--ease); }
+  .gi.on .cb { background: var(--acc); box-shadow: inset 0 0 0 1.5px var(--acc); }
+  .gi.on .cb svg { opacity: 1; transform: none; }
+  .gi.create { margin-top: 2px; color: var(--acc-text); }
+  .gi.create .cb { box-shadow: none; }
+  .gi.create .cb svg { width: 12px; height: 12px; color: var(--acc-text); opacity: 1; transform: none; }
+  .gnone { padding: 8px; color: var(--t3); font-size: 12px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+  .warn { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 8px 10px; border-radius: 8px;
+          font-size: 12px; color: var(--y); background: rgba(255,214,10,.12); }
+  .warn svg { width: 15px; height: 15px; flex-shrink: 0; }
+  .warn .link { margin-left: auto; color: var(--acc-text); white-space: nowrap; }
+  .note { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 12px; color: var(--t2); background: var(--fill); }
+  .note.err { color: #ff8a80; background: rgba(255,69,58,.16); }
+  .lines { margin-top: 4px; color: var(--t1); font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; }
+  .empty { padding: 14px 2px; color: var(--t3); font-size: 12px; }
+  .hint { margin-top: 10px; color: var(--t3); font-size: 12px; }
+</style>
+<div id="card"><div class="count">Reading /etc/hosts…</div></div>
+<script>
+  const card = document.getElementById("card");
+  const post = (message) => window.webkit?.messageHandlers?.hosts?.postMessage(message);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const svg = (body, width = 1.4) =>
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="${width}" aria-hidden="true">${body}</svg>`;
+  // Local = this computer, Prod = the internet.
+  const MONITOR = svg(`<rect x="2" y="3" width="12" height="8" rx="1.2"/><path d="M6 13.5h4M8 11v2.5"/>`);
+  const GLOBE = svg(`<circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c1.7 1.7 2.5 3.8 2.5 6S9.7 12.3 8 14M8 2C6.3 3.7 5.5 5.8 5.5 8S6.3 12.3 8 14"/>`, 1.3);
+  const SEARCH = svg(`<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/>`, 1.5);
+  const PLUS = svg(`<path d="M8 3v10M3 8h10"/>`, 1.6);
+  // Chrome with an open padlock: Chrome started without certificate checks.
+  const INSECURE_CHROME = svg(`<defs><mask id="chromeCut"><rect width="16" height="16" fill="#fff"/><circle cx="12.3" cy="12.4" r="4.6" fill="#000"/></mask></defs>
+    <g mask="url(#chromeCut)"><circle cx="8" cy="8" r="6.2"/><circle cx="8" cy="8" r="2.2"/><path d="M8 5.8h5.7M9.9 9.1l-2.85 4.95M6.1 9.1L3.25 4.15"/></g>
+    <rect x="9.7" y="11.6" width="5.2" height="3.7" rx="0.9" fill="currentColor" stroke="none"/><path d="M10.9 11.6V10.2a1.45 1.45 0 0 1 2.9 0" stroke-width="1.1"/>`, 1.3);
+  const DASH = svg(`<path d="M4.5 8h7"/>`, 1.8);
+  const CHECK = svg(`<path d="M3.5 8.5l3 3 6-7"/>`, 2.2);
+  const PENCIL = svg(`<path d="M10.5 2.5l3 3L6 13H3v-3z"/>`, 1.4);
+  const TRASH = svg(`<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/>`);
+  const XMARK = svg(`<path d="M4 4l8 8M12 4l-8 8"/>`, 2);
+  const WARN = svg(`<path d="M8 2l6.5 11.5h-13z"/><path d="M8 6.5v3M8 11.5v.2"/>`, 1.5);
+
+  // The checks Swift makes on an entry (hostsName, hostsPartnerName and hostsGroupName in
+  // SprintBoard.swift), so a refusal shows at once under the field. Swift still checks every
+  // entry itself. The partner domain suffixes come with every state, from the config.
+  const partnerSuffixes = () => (last && last.partnerSuffixes) || [];
+  // ".panel, .api and .ops" for the suffixes panel.…, api.… and ops.…
+  const partnerLabels = () => {
+    const labels = partnerSuffixes().map((suffix) => "." + suffix.split(".")[0]);
+    return labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : labels.join("");
+  };
+  function hostName(raw) {
+    let s = raw.trim().toLowerCase();
+    const scheme = s.indexOf("://");
+    if (scheme >= 0) s = s.slice(scheme + 3);
+    const rest = s.search(/[?#\/]/);
+    if (rest >= 0) s = s.slice(0, rest);
+    const port = s.lastIndexOf(":");
+    if (port >= 0 && /^[0-9]*$/.test(s.slice(port + 1))) s = s.slice(0, port);
+    if (s.endsWith(".")) s = s.slice(0, -1);
+    const labels = s.split(".");
+    const ok = s.length <= 253 && labels.length >= 2
+      && labels.every((l) => l.length >= 1 && l.length <= 63 && !l.startsWith("-") && !l.endsWith("-") && /^[a-z0-9-]+$/.test(l))
+      && !/^[0-9]+$/.test(labels[labels.length - 1]);
+    return ok ? s : null;
+  }
+  function partnerName(raw) {
+    const first = (hostName(raw) ?? raw.trim().toLowerCase()).split(".")[0];
+    return first.length >= 1 && first.length <= 60 && !first.startsWith("-") && !first.endsWith("-") && /^[a-z0-9-]+$/.test(first) ? first : null;
+  }
+  function groupName(raw) {
+    const name = raw.trim();
+    const length = [...name].length;
+    return length >= 1 && length <= 40 && !/[\n\r\t]/.test(name) ? name : null;
+  }
+
+  // Most used groups first. How often each group was picked lives in the page's storage; the
+  // order is fixed from it only when the panel opens (a reply the page did not ask for), so no
+  // chip moves while the panel is in use, selected or not.
+  const USE_KEY = "sprint-board.hosts.group-use";
+  const readUse = () => { try { return JSON.parse(localStorage.getItem(USE_KEY)) || {}; } catch { return {}; } };
+  let groupUse = readUse();
+  const saveUse = () => { try { localStorage.setItem(USE_KEY, JSON.stringify(groupUse)); } catch { /* kept for this session */ } };
+  let groupOrder = [];
+  function orderGroups(groups) {
+    groupUse = { ...groupUse, ...readUse() };
+    groupOrder = groups.map((g, i) => [g, i])
+      .sort((a, b) => (groupUse[b[0]] || 0) - (groupUse[a[0]] || 0) || a[1] - b[1])
+      .map(([g]) => g);
+  }
+
+  // Page-only state; everything else comes from Swift in every reply.
+  let last = null;
+  let selected = [];          // the groups picked, in the order they were; none means All
+  // The group new entries also join: the picked one when exactly one is picked.
+  const one = () => (selected.length === 1 ? selected[0] : null);
+  let query = "";             // the search text
+  let action = null;          // what sits under the header: "search", "pick" (the + choices), or the
+                              // "domain", "partner" or "group" field picked there
+  let chipsAll = false;       // every group shown, instead of one line and "+N"
+  let conflictsOpen = false;
+  let chromeNote = null;      // why Chrome could not be refreshed after the last switch (Swift)
+  let menuFor = null;         // the domain whose group list is open
+  let groupQuery = "";        // the find-or-create text in a domain's group list
+  let groupScrollReset = false;
+  let revealOpenRow = false;  // a domain's group list just opened: scroll it into view once
+  let creatingGroup = false;  // a group is being created from a domain's list: clear the text once it exists
+  let fieldError = null;      // why the entry in the add field was refused, shown under it
+  let fieldAsked = false;     // the reply on its way answers the add field
+  let bulk = null;            // a comma-separated add under way: {queue, current, added, refused, stopped, group}
+  let fieldText = null;       // what the add field shows after the next draw (the entries not added)
+  let renaming = null;        // the group whose chip is its name field
+  let renameFrom = 0;         // that chip's width, where the field grows from
+  let renameAt = 0;           // when the field opened
+  let selectAfter = null;     // a group to pick (alone) once Swift confirms it exists
+  let renamed = null;         // {from, to} of a rename on its way, to carry the group's use over
+  let removedAt = 0;          // when a domain was last deleted
+  let resetScroll = false;    // the list changed: show it from its top
+  let busy = false, adding = false;
+  let pointerDown = false;    // a mouse button is held: a blur now comes from a press in progress
+  let listed = [];            // the domains in the list now, for All prod / All local
+  let drawn = false;          // the first draw shows the page as it is, without animating it in
+  const motion = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const EDITORS = "#field, #groupFind, #renameGroup";
+
+  // Every action waits for Swift's answer (the new state) before the next one — Enter in a
+  // field included, which pointer-events alone would not stop.
+  const act = (message) => {
+    if (busy) return;
+    busy = true;
+    adding = "add" in message || "addPartner" in message;
+    // Any action ends a rename; a domain's group list stays open so several groups can be
+    // ticked in a row, and an add field stays open for the next entry.
+    renaming = null;
+    card.classList.add("busy");
+    card.querySelectorAll("input").forEach((i) => { i.readOnly = true; });
+    post(message);
+  };
+  const closeAll = () => {
+    menuFor = renaming = null;
+    groupQuery = "";
+    groupScrollReset = true;
+  };
+  const openAction = (kind) => {
+    closeAll();
+    fieldError = null;
+    if (action === "search" && kind !== "search") {
+      if (query) resetScroll = true;
+      query = "";
+    }
+    action = kind;
+  };
+  const closeAction = () => {
+    fieldError = null;
+    if (action === "search" && query) resetScroll = true;
+    action = null;
+    query = "";
+  };
+
+  // "shop.api" bright, ".example.com" dim: most domains share the ending.
+  function domainName(name) {
+    const parts = name.split(".");
+    const head = parts.slice(0, -2).join("."), base = parts.slice(-2).join(".");
+    return head ? `<b>${esc(head)}</b><i>.${esc(base)}</i>` : `<b>${esc(base)}</b>`;
+  }
+
+  // The page is patched in place rather than rebuilt, so what stays keeps its CSS transitions,
+  // focus, caret and scroll. Children are matched by data-key, else by tag and first class in
+  // order. New elements are collected for their entrance; data-fx ones that go are collapsed
+  // first and removed after.
+  const sig = (n) => n.nodeType !== 1 ? `#${n.nodeType}`
+    : n.dataset.key != null ? `k:${n.dataset.key}` : `${n.tagName}.${n.classList[0] || ""}#${n.id}`;
+  function patch(from, to, fx) {
+    if (from.nodeType !== 1) { if (from.nodeValue !== to.nodeValue) from.nodeValue = to.nodeValue; return; }
+    if (from.leaving) {   // back before it was gone
+      from.leaving = false;
+      from.getAnimations().forEach((a) => a.cancel());
+      from.style.overflow = "";
+      fx.revived.push(from);
+    }
+    // Inline styles are left alone: only the animations and the fit functions set them, and an
+    // update must not cut one short (a growing element would spill out of its box).
+    for (const a of [...from.attributes]) if (a.name !== "style" && !to.hasAttribute(a.name)) from.removeAttribute(a.name);
+    for (const a of [...to.attributes]) if (a.name !== "style" && from.getAttribute(a.name) !== a.value) from.setAttribute(a.name, a.value);
+    if (from.tagName !== "INPUT") patchChildren(from, to, fx);   // an input's text is the user's
+  }
+  function patchChildren(from, to, fx) {
+    const pool = new Map();
+    for (const n of from.childNodes) {
+      const k = sig(n);
+      pool.has(k) ? pool.get(k).push(n) : pool.set(k, [n]);
+    }
+    const kept = [...to.childNodes].map((n) => {
+      const old = pool.get(sig(n))?.shift();
+      if (!old) { if (n.nodeType === 1) fx.entered.push(n); return n; }
+      patch(old, n, fx);
+      return old;
+    });
+    const keep = new Set(kept);
+    for (const n of [...from.childNodes]) if (!keep.has(n) && !n.leaving) leave(n, fx);
+    // In order; a leaving element stays where it was until it is removed.
+    let ref = from.firstChild;
+    for (const n of kept) {
+      while (ref && ref.leaving) ref = ref.nextSibling;
+      if (n === ref) ref = ref.nextSibling;
+      else from.insertBefore(n, ref);
+    }
+  }
+
+  // Entrances and exits. Height, padding and margin go to and from zero together, so the content
+  // around slides instead of jumping.
+  const BOX = ["height", "paddingTop", "paddingBottom", "marginTop", "marginBottom"];
+  const FLAT = Object.fromEntries(BOX.map((p) => [p, "0px"]));
+  const boxOf = (el) => {
+    const cs = getComputedStyle(el);
+    return Object.fromEntries(BOX.map((p) => [p, p === "height" ? `${el.offsetHeight}px` : cs[p]]));
+  };
+  const timing = (duration, extra) => ({ duration, easing: "cubic-bezier(.2,.7,.3,1)", ...extra });
+  function grow(el) {
+    el.style.overflow = "hidden";
+    const a = el.animate([{ ...FLAT, opacity: 0 }, { ...boxOf(el), opacity: 1 }], timing(200));
+    const settled = () => { el.style.overflow = ""; };
+    a.finished.then(settled, settled);
+    return a;
+  }
+  function leave(n, fx) {
+    if (n.nodeType !== 1 || !n.hasAttribute("data-fx") || !drawn || !motion) { n.remove(); return; }
+    n.leaving = true;
+    n.classList.add("leaving");
+    if (n.contains(document.activeElement)) document.activeElement.blur();
+    n.style.overflow = "hidden";
+    const a = n.animate([{ ...boxOf(n), opacity: 1 }, { ...FLAT, opacity: 0 }], timing(160, { fill: "forwards" }));
+    const done = () => { if (n.leaving) n.remove(); };
+    a.finished.then(done, done);
+    fx.anims.push(a);
+  }
+  const pop = (el) => el.animate([{ opacity: 0, transform: "scale(.85)" }, { opacity: 1, transform: "none" }], timing(160));
+  const fade = (list) => {
+    list.classList.toggle("fade", list.scrollTop + list.clientHeight < list.scrollHeight - 1);
+    list.classList.toggle("fade-up", list.scrollTop > 1);
+  };
+  const domainList = () => [...card.querySelectorAll(".rows")].find((el) => !el.classList.contains("leaving")) || null;
+  // Same contract as the board: the panel sizes itself to the height this page reports.
+  const reportHeight = () => post({ height: card.offsetHeight });
+
+  function draw(s) {
+    // A comma-separated add goes one domain per reply; Swift refusing one stops it there.
+    let bulkNext = false;
+    if (bulk && busy) {
+      if (s.error) { bulk.refused.push([bulk.current, s.error]); bulk.stopped = true; s = { ...s, error: null }; }
+      else bulk.added++;
+      bulkNext = !bulk.stopped && bulk.queue.length > 0;
+      if (!bulkNext) endBulk();
+    }
+    // A refusal of the field's entry shows under the field rather than at the top; a group made
+    // from the field closes it only once Swift has made it.
+    if (fieldAsked) {
+      if (s.error) { fieldError = s.error; s = { ...s, error: null }; }
+      else if (action === "group") action = null;
+    }
+    fieldAsked = false;
+    last = s;
+    if (selectAfter) {
+      // Only when the create or rename went through: a refused name may match another group.
+      const match = !s.error && s.groups.find((g) => same(g, selectAfter));
+      if (match) { selected = [match]; resetScroll = true; }
+      selectAfter = null;
+    }
+    if (renamed) {
+      if (!s.error && s.groups.includes(renamed.to)) {
+        const { from, to } = renamed;
+        if (groupUse[from]) { groupUse[to] = groupUse[from]; delete groupUse[from]; saveUse(); }
+        groupOrder = groupOrder.map((g) => (g === from ? to : g));
+        selected = selected.map((g) => (g === from ? to : g));
+      }
+      renamed = null;
+    }
+    const created = creatingGroup && !s.error;
+    if (created) { groupQuery = ""; groupScrollReset = true; }
+    const kept = selected.filter((g) => s.groups.includes(g));   // a group deleted, or renamed away
+    if (kept.length !== selected.length) { selected = kept; resetScroll = true; }
+    if (renaming && !s.groups.includes(renaming)) renaming = null;
+
+    const blocked = s.mode !== "ok";
+    const canChange = s.writable && !blocked;
+    const inGroup = s.domains.filter((d) => !selected.length || d.groups.some((g) => selected.includes(g)));
+    const q = query.trim().toLowerCase();
+    const visible = q ? inGroup.filter((d) => d.name.includes(q)) : inGroup;
+    const localCount = s.domains.filter((d) => d.local).length;
+    const visibleLocal = visible.filter((d) => d.local).length;
+    const groups = s.groups.map((g) => ({
+      name: g,
+      count: s.domains.filter((d) => d.groups.includes(g)).length,
+      local: s.domains.some((d) => d.local && d.groups.includes(g)),
+    }));
+    // In the order fixed at the last panel open; a group made since then comes last.
+    const rank = (g) => { const i = groupOrder.indexOf(g.name); return i < 0 ? groupOrder.length + s.groups.indexOf(g.name) : i; };
+    const ordered = [...groups].sort((a, b) => rank(a) - rank(b));
+    const status = s.mode === "unreadable" ? "Sprint Board cannot read /etc/hosts, so it cannot tell or change anything."
+      : s.mode === "damaged" ? "Sprint Board's block in /etc/hosts is damaged; nothing can be switched until it is fixed by hand."
+      : "";
+    const unknownTitle = s.mode === "damaged" ? "Unknown while Sprint Board's block in /etc/hosts is damaged"
+      : "Unknown while /etc/hosts cannot be read";
+    const conflictNames = new Set((s.conflicts || []).flatMap((c) => c.names));
+    const lines = (s.conflicts || []).map((c) => `line ${c.line}  ${c.address}  ${c.names.join(" ")}`).join("\n");
+    const also = one() ? `, also in ${one()}` : "";
+    const FIELDS = {
+      search: { placeholder: "Search domains", hint: null },
+      domain: { placeholder: one() ? `Domains to add to ${one()}` : "Domains to add",
+                hint: `Adds in prod${also}. Several: a.com,b.com. URLs work too.` },
+      partner: { placeholder: "Partner name, as in the panel",
+                 hint: `Adds its ${partnerLabels()} domains to the Partners group${also}.` },
+      group: { placeholder: "New group name", hint: "Creates an empty group; click a domain to put it in." },
+    };
+    const field = FIELDS[action];
+
+    const chip = (g) => renaming === g.name
+      ? `<span class="redit" data-key="rename:${esc(g.name)}" style="width: ${Math.max(170, Math.round(renameFrom) + 30)}px">
+          <input id="renameGroup" value="${esc(g.name)}" maxlength="40" autocomplete="off" spellcheck="false" aria-label="Group name">
+          <button class="rdel" data-delgroup="${esc(g.name)}" title="Delete the group (its domains stay)" aria-label="Delete group">${TRASH}</button>
+        </span>`
+      : `<button class="chip${selected.includes(g.name) ? " sel" : ""}${g.local ? " local" : ""}" data-key="chip:${esc(g.name)}" data-pop
+          data-filter="${esc(g.name)}"${g.local ? ` title="Has local domains"` : ""}>${esc(g.name)}<span class="n"><span
+          class="ed" data-rename="${esc(g.name)}" title="Rename or delete">${PENCIL}</span><span class="cnt">${g.count}</span></span></button>`;
+    const chips = [`<button class="chip${selected.length ? "" : " sel"}" data-key="all" data-filter="">All<span class="n"><span class="cnt">${s.domains.length}</span></span></button>`]
+      .concat(ordered.map(chip),
+        `<button class="chip new" id="groupChip" data-key="newchip" title="New group">+ Group</button>`,
+        `<button class="chip more" id="moreChips" data-key="more">${chipsAll ? "Less" : "+0"}</button>`);
+
+    const rows = visible.map((d) => {
+      const open = menuFor === d.name;
+      // Every group the domain is in, the picked ones included.
+      const tags = d.groups.map((g) =>
+        `<span class="tag" data-key="t:${esc(g)}" data-name="${esc(g)}" data-pop><span class="tn">${esc(g)}</span><span class="tx" data-untag="${esc(d.name)}" data-group="${esc(g)}" title="Remove from ${esc(g)}">${XMARK}</span></span>`).join("");
+      const gq = groupQuery.trim();
+      const shown = gq ? s.groups.filter((g) => g.toLowerCase().includes(gq.toLowerCase())) : s.groups;
+      const canCreate = gq && !s.groups.some((g) => same(g, gq));
+      const menu = !open ? "" : `<div class="gmenu" data-key="m:${esc(d.name)}" data-fx><div class="gin">
+        <input class="gfind" id="groupFind" placeholder="${s.groups.length ? "Find or create a group" : "Name a group to create it"}"
+          maxlength="40" autocomplete="off" spellcheck="false">
+        ${shown.length ? `<div class="glist">${shown.map((g) => {
+          const member = d.groups.includes(g);
+          return `<div class="gi${member ? " on" : ""}" data-key="g:${esc(g)}" data-member="${esc(d.name)}" data-group="${esc(g)}" data-on="${member ? "" : "1"}">
+            <span class="cb">${CHECK}</span><span class="gn">${esc(g)}</span></div>`;
+        }).join("")}</div>` : ""}
+        ${canCreate ? `<div class="gi create" id="groupCreate" data-key="create"><span class="cb">${PLUS}</span><span class="gn">Create “${esc(gq)}”</span></div>`
+          : shown.length ? "" : `<div class="gnone" data-key="gnone">No groups yet. Type a name to create one.</div>`}</div></div>`;
+      const canDelete = canChange || (!blocked && !d.local);
+      const state = blocked ? "unknown" : d.local ? "local" : "prod";
+      return `<div class="row ${state}${open ? " open" : ""}" data-key="r:${esc(d.name)}" data-fx data-row="${esc(d.name)}" title="Click to change its groups">
+          <span class="name">${domainName(d.name)}</span>${tags ? `<span class="tags${d.groups.length > 1 ? " multi" : ""}">${tags}<span class="tag more" data-key="tagmore" hidden></span></span>` : ""}
+          <span class="end">
+          ${canDelete ? `<span class="del" data-remove="${esc(d.name)}" title="Delete">${TRASH}</span>` : ""}
+          <button class="sw${state === "local" ? " on" : state === "unknown" ? " unknown" : ""}" role="switch" aria-checked="${state === "local"}"
+            aria-label="${esc(d.name)} ${state === "unknown" ? "local or prod unknown" : "local"}"
+            data-toggle="${esc(d.name)}" data-mode="${d.local ? "prod" : "local"}"
+            title="${state === "unknown" ? unknownTitle : d.local ? "Local — click for Prod" : "Prod — click for Local"}"
+            ${canChange ? "" : "disabled"}><span class="k">${state === "unknown" ? DASH : ""}</span><span class="ic ic-l">${MONITOR}</span><span class="ic ic-p">${GLOBE}</span></button>
+          </span>
+        </div>${menu}`;
+    }).join("");
+
+    const canAddPartner = partnerSuffixes().length > 0;
+    const empty = !s.domains.length ? `No domains yet. Use + to add a domain${canAddPartner ? " or a partner" : ""}.`
+      : q ? `No domains match “${esc(query.trim())}”.`
+      : `No domains in ${esc(selected.join(" or "))} yet. Click a domain under All to add it here.`;
+
+    const html = `
+      <div class="top">
+        <span class="title">Hosts</span>
+        <span class="count">${localCount ? `<span class="pill"><span class="dot"></span>${localCount} local</span>of ${s.domains.length}`
+          : plural(s.domains.length, "domain")}</span>
+        <span class="tools">
+          <button class="icon" id="chromeBtn" title="Open Insecure Chrome" aria-label="Open Insecure Chrome">${INSECURE_CHROME}</button>
+          <button class="icon${action === "search" ? " on" : ""}" id="searchBtn" title="Search" aria-label="Search">${SEARCH}</button>
+          <button class="icon${action && action !== "search" ? " on" : ""}" id="plusBtn" title="Add" aria-label="Add">${PLUS}</button>
+          <button class="icon" id="gearBtn" title="Settings" aria-label="Settings"><i class="sym s-gearshape"></i></button>
+        </span>
+      </div>
+      ${action === "pick" ? `<div class="addsbox" data-key="adds" data-fx>
+          <div class="adds">
+            <button data-open="domain">+ Add domain</button>
+            ${canAddPartner ? `<button data-open="partner">+ Add partner</button>` : ""}
+            <button data-open="group">+ New group</button>
+          </div>
+          <div class="sub" id="pickHint"></div>
+        </div>`
+      : field ? `<div class="fieldbox" data-key="fieldbox" data-fx>
+          <div class="action">
+            <input id="field" data-key="field:${action}"${fieldError ? ` class="bad" aria-invalid="true"` : ""} placeholder="${esc(field.placeholder)}" autocomplete="off" spellcheck="false" maxlength="${action === "group" ? 40 : action === "domain" ? 4000 : 300}">
+            ${action === "search" ? "" : `<button id="fieldGo">${action === "group" ? "Create" : "Add"}</button>`}
+            <button class="ghost" id="fieldClose" title="Close" aria-label="Close">✕</button>
+          </div>
+          ${fieldError ? `<div class="sub err" role="alert" title="${esc(fieldError)}">${esc(fieldError)}</div>`
+            : field.hint ? `<div class="sub" title="${esc(field.hint)}">${esc(field.hint)}</div>` : ""}
+        </div>` : ""}
+      ${status ? `<div class="note err" data-key="n:status" data-fx>${esc(status)}</div>` : ""}
+      ${s.error ? `<div class="note err" data-key="n:error" data-fx>${esc(s.error)}</div>` : ""}
+      ${s.writable ? "" : `<div class="note err" data-key="n:writable" data-fx>/etc/hosts is not writable by your user, so this tab cannot change it.</div>`}
+      <div class="chips${chipsAll ? "" : " one"}">${chips.join("")}</div>
+      <div class="head">
+        <span class="label">${esc(selected.length ? selected.join(" + ") : "All")}${q ? ` · “${esc(query.trim())}”` : ""} · ${plural(visible.length, "domain")}</span>
+        <span class="acts">
+          <button class="act" data-bulk="prod" ${canChange && visibleLocal > 0 ? "" : "disabled"}>${GLOBE}All prod</button>
+          <button class="act" data-bulk="local" ${canChange && visibleLocal < visible.length ? "" : "disabled"}>${MONITOR}All local</button>
+        </span>
+      </div>
+      ${visible.length ? `<div class="rows" data-key="rows" data-fx>${rows}</div>` : `<div class="empty" data-key="empty" data-fx>${empty}</div>`}
+      ${conflictNames.size ? `<div class="warn" data-key="w:conf" data-fx>${WARN}<span>${plural(conflictNames.size, "domain")} also active elsewhere in /etc/hosts</span>
+          <span class="link" id="toggleConflicts">${conflictsOpen ? "Hide" : "Show"}</span></div>
+        ${conflictsOpen ? `<div class="note" data-key="w:confnote" data-fx>They keep the address shown even in Prod. Comment those lines out by hand:
+          <div class="lines">${esc(lines)}</div></div>` : ""}` : ""}
+      ${s.importable && s.importable.length ? `<div class="warn" data-key="w:imp" data-fx title="${esc(s.importable.join(" "))}">${WARN}
+          <span>Found ${s.importable.length} local entr${s.importable.length === 1 ? "y" : "ies"} in /etc/hosts not in this list</span>
+          <span class="link" id="importBtn">${one() ? `Add to ${esc(one())}` : "Add them"}</span></div>` : ""}
+      ${chromeNote ? `<div class="warn" data-key="w:chrome" data-fx>${WARN}<span>${esc(chromeNote)}</span>
+          <span class="link" id="hideChromeNote">Hide</span></div>` : ""}
+      <div class="hint">Click a domain to change its groups · hover a group and click ✎ to rename or delete it. A browser may keep the old address until the page is reloaded.</div>`;
+
+    const animate = drawn && motion;
+    const chipsBefore = animate ? card.querySelector(".chips")?.offsetHeight : 0;
+    const fx = { entered: [], revived: [], anims: [] };
+    const next = document.createElement("div");
+    next.innerHTML = html;
+    patchChildren(card, next, fx);
+    listed = visible;
+    fitChips();
+    fitTags();
+
+    const live = (sel) => [...card.querySelectorAll(sel)].find((el) => !el.closest(".leaving")) || null;
+    const rowsEl = live(".rows");
+    if (rowsEl && resetScroll) rowsEl.scrollTop = 0;
+    if (rowsEl) fade(rowsEl);
+    const glist = live(".glist");
+    if (glist) {
+      if (groupScrollReset) glist.scrollTop = 0;
+      fade(glist);
+    }
+    const fieldEl = live("#field");
+    // An accepted entry is cleared (the add field stays open for the next one); a refused one stays.
+    // A comma-separated add keeps its text until it ends, then leaves only what was not added.
+    if (fieldEl && fieldText != null) { fieldEl.value = fieldText; fieldText = null; }
+    else if (fieldEl && adding && !s.error && !bulk) fieldEl.value = "";
+    const findEl = live("#groupFind");
+    if (findEl && created) findEl.value = "";
+    if (fieldEl && action === "search" && fieldEl.value !== query) fieldEl.value = query;
+    if (findEl && findEl.value !== groupQuery) findEl.value = groupQuery;
+    if (fieldEl && action !== "search" && fx.revived.some((n) => n.contains(fieldEl))) fieldEl.value = "";
+    // An open group list scrolls into view, but never past its own domain: a long list must not
+    // hide which domain it belongs to. Measured before the list starts growing.
+    const openRow = revealOpenRow && rowsEl?.querySelector(".row.open");
+    if (openRow) {
+      const menu = openRow.nextElementSibling;
+      let top = rowsEl.scrollTop;
+      const bottom = menu.offsetTop + menu.offsetHeight;
+      if (bottom > top + rowsEl.clientHeight) top = bottom - rowsEl.clientHeight;
+      if (openRow.offsetTop < top) top = openRow.offsetTop;
+      if (top !== rowsEl.scrollTop) rowsEl.scrollTo({ top, behavior: animate ? "smooth" : "auto" });
+    }
+    // A field that just appeared, or came back while closing, takes the focus (a rename starts
+    // with the name selected); after an accepted add, the add field keeps it.
+    let focusEl = null;
+    for (const n of fx.entered.concat(fx.revived)) {
+      focusEl = n.matches(EDITORS) ? n : n.querySelector(EDITORS);
+      if (focusEl) break;
+    }
+    if (!focusEl && adding) focusEl = fieldEl;
+    if (focusEl) {
+      focusEl.focus({ preventScroll: true });
+      if (focusEl.id === "renameGroup") focusEl.select();
+    }
+
+    reportHeight();
+    if (animate) {
+      for (const n of fx.entered) {
+        if (n.hasAttribute("data-fx")) fx.anims.push(grow(n));
+        else if (n.hasAttribute("data-pop")) fx.anims.push(pop(n));
+        else if (n.classList.contains("redit") && renameFrom) {
+          fx.anims.push(n.animate([{ width: `${renameFrom}px`, opacity: .6 }, { width: `${n.offsetWidth}px`, opacity: 1 }], timing(180)));
+        }
+      }
+      const chipsEl = card.querySelector(".chips");
+      if (chipsBefore && chipsEl.offsetHeight !== chipsBefore) {
+        chipsEl.style.overflow = "hidden";
+        const a = chipsEl.animate([{ height: `${chipsBefore}px` }, { height: `${chipsEl.offsetHeight}px` }], timing(200));
+        a.finished.then(() => { chipsEl.style.overflow = ""; }, () => {});
+        fx.anims.push(a);
+      }
+      // Once everything has settled (leaving parts gone), the panel takes its final height.
+      if (fx.anims.length) Promise.allSettled(fx.anims.map((a) => a.finished)).then(() => {
+        reportHeight();
+        const list = domainList();
+        if (list) fade(list);
+      });
+    }
+    adding = revealOpenRow = creatingGroup = resetScroll = groupScrollReset = false;
+    drawn = true;
+    busy = false;
+    card.classList.remove("busy");
+    if (bulkNext) sendBulk();
+  }
+
+  // One line of groups. "+ Group" ends the line while everything fits; otherwise New group moves
+  // into the + choices and chips are hidden from the end until "+N" fits. All and the group being
+  // renamed are never hidden. When the selected group is hidden, "+N" carries its name and look.
+  function fitChips() {
+    const line = card.querySelector(".chips");
+    if (!line) return;
+    const more = document.getElementById("moreChips"), add = document.getElementById("groupChip");
+    const chips = [...line.children].filter((el) => el !== more && el !== add);
+    const top = chips[0].offsetTop;
+    const oneLine = (els) => els.every((el) => el.hidden || el.offsetTop === top);
+    more.hidden = true;
+    const chipFits = oneLine(chips.concat(add));
+    add.hidden = !chipFits;
+    if (chipFits || oneLine(chips)) chipsAll = false;
+    else {
+      more.hidden = false;
+      const label = (n) => {
+        const picked = chips.filter((c) => c.hidden && selected.includes(c.dataset.filter)).map((c) => c.dataset.filter);
+        const text = picked.length === 1 ? picked[0] : `${picked.length} selected`;
+        more.classList.toggle("sel", picked.length > 0);
+        more.innerHTML = picked.length ? `<span class="mn">${esc(text)}</span><span class="mc">+${n}</span>` : `+${n}`;
+        more.title = picked.length ? `Selected and hidden: ${picked.join(", ")} · ${plural(n, "group")} hidden` : `${plural(n, "more group")}`;
+      };
+      if (chipsAll) more.textContent = "Less";
+      else label(0);
+      let n = 0;
+      for (let i = chips.length - 1; !chipsAll && i >= 1 && !oneLine(chips.concat(more)); i--) {
+        if (chips[i].classList.contains("redit")) continue;
+        chips[i].hidden = true;
+        label(++n);
+      }
+    }
+    const hint = card.querySelector(".addsbox:not(.leaving) #pickHint");
+    if (hint) {
+      hint.previousElementSibling.querySelector('[data-open="group"]').hidden = chipFits;
+      const kinds = ["One domain"];
+      if (partnerSuffixes().length) kinds.push(chipFits ? `a partner's ${partnerLabels()} domains` : "a partner's domains");
+      if (!chipFits) kinds.push("an empty group");
+      const lastKind = kinds.pop();
+      hint.textContent = hint.title = kinds.length ? `${kinds.join(", ")}, or ${lastKind}.` : `${lastKind}.`;
+    }
+  }
+
+  // A domain's other groups on one line: pills that do not fit hide from the end behind "+N"
+  // (its title names them; a click opens the domain's group list). The first pill stays, with an
+  // ellipsis if it must.
+  function fitTags() {
+    for (const box of card.querySelectorAll(".row:not(.leaving) .tags")) {
+      const more = box.querySelector(".tag.more");
+      const tags = [...box.children].filter((t) => t !== more);
+      tags[0].style.maxWidth = "";
+      const top = tags[0].offsetTop;
+      const oneLine = (els) => els.every((el) => el.hidden || el.offsetTop === top);
+      if (oneLine(tags)) continue;
+      more.hidden = false;
+      let n = 0;
+      for (let i = tags.length - 1; i >= 1 && !oneLine(tags.concat(more)); i--) {
+        tags[i].hidden = true;
+        more.textContent = `+${++n}`;
+      }
+      if (!oneLine(tags.concat(more))) {
+        const room = box.getBoundingClientRect().width - more.getBoundingClientRect().width - 4;
+        tags[0].style.maxWidth = `${Math.max(0, Math.floor(room) - 1)}px`;
+      }
+      if (!oneLine(tags.concat(more))) {
+        tags[0].hidden = true;
+        more.textContent = `+${++n}`;
+      }
+      more.title = `Also in ${tags.filter((t) => t.hidden).map((t) => t.dataset.name).join(", ")}`;
+    }
+  }
+
+  const redraw = () => { if (last) draw(last); };
+  function submitField(box) {
+    const value = box.querySelector("#field").value.trim();
+    if (!value) return;
+    // Several domains, comma separated ("a.com,b.com"); spaces around the commas are dropped.
+    const entries = action === "domain" ? value.split(",").map((x) => x.trim()).filter(Boolean) : [value];
+    if (entries.length > 1) { addDomains(entries); return; }
+    const entry = entries[0] ?? value;
+    fieldError = fieldProblem(entry);
+    if (fieldError) { redraw(); return; }
+    fieldAsked = true;
+    if (action === "domain") act({ add: entry, group: one() });
+    if (action === "partner") act({ addPartner: value, group: one() });
+    if (action === "group") { selectAfter = value; act({ groupAdd: value }); }
+  }
+  // An existing domain may still be added to the selected group when it is not in it yet (Swift
+  // adds it there); only a true repeat is refused.
+  const inFilter = (name) => last.domains.some((d) => d.name === name && (!one() || d.groups.includes(one())));
+  // Why an entry would be refused, or null.
+  function fieldProblem(raw) {
+    if (action === "domain") {
+      const name = hostName(raw);
+      if (!name) return `“${raw}” is not a domain name.`;
+      if (inFilter(name)) return one() ? `The domain is already in ${one()}.` : "The domain already exists.";
+    }
+    if (action === "partner") {
+      const partner = partnerName(raw);
+      if (!partner) return "Not a partner name: up to 60 letters, digits and hyphens, as in the panel.";
+      if (partnerSuffixes().every((x) => inFilter(`${partner}.${x}`))) {
+        return one() ? `The partner is already in ${one()}.` : "The partner already exists.";
+      }
+    }
+    if (action === "group") {
+      const name = groupName(raw);
+      if (!name) return "A group name is 1 to 40 characters on one line.";
+      if (last.groups.some((g) => same(g, name))) return "The group already exists.";
+    }
+    return null;
+  }
+  // Every entry is checked like a single one (repeats in the list count once). The good ones go
+  // one per reply with the usual add, so Swift checks and saves each as it does today.
+  function addDomains(entries) {
+    const queue = [], refused = [];
+    for (const raw of entries) {
+      const name = hostName(raw);
+      if (!name) refused.push([raw, "not a domain name"]);
+      else if (queue.includes(name)) continue;
+      else if (inFilter(name)) refused.push([raw, one() ? `already in ${one()}` : "already exists"]);
+      else queue.push(name);
+    }
+    if (!queue.length) { fieldError = bulkMessage(0, refused, 0); redraw(); return; }
+    fieldError = null;
+    bulk = { queue, current: null, added: 0, refused, stopped: false, group: one() };
+    sendBulk();
+  }
+  function sendBulk() {
+    bulk.current = bulk.queue.shift();
+    act({ add: bulk.current, group: bulk.group });
+  }
+  // The field keeps the entries that were not added, and says why under it.
+  function endBulk() {
+    const { added, refused, queue, stopped } = bulk;
+    const left = refused.map(([raw]) => raw).concat(stopped ? queue : []);
+    fieldText = left.join(",");
+    fieldError = left.length ? bulkMessage(added, refused, stopped ? queue.length : 0) : null;
+    bulk = null;
+  }
+  const bulkMessage = (added, refused, untried) => [
+    added ? `${plural(added, "domain")} added.` : "Nothing added.",
+    refused.length ? `Not added: ${refused.map(([raw, why]) => `${raw} (${why})`).join(", ")}.` : "",
+    untried ? `${untried} not tried.` : "",
+  ].filter(Boolean).join(" ");
+
+  // One click deletes (a domain that was local goes back to prod). A click within half a second
+  // of the last delete is ignored: the next row slides up under the pointer, and a double-click
+  // would delete it too.
+  function removeDomain(d) {
+    if (performance.now() - removedAt < 500) return;
+    removedAt = performance.now();
+    act({ remove: d });
+  }
+
+  // One listener per kind of event for the whole card: elements stay across updates, so
+  // listeners on them would pile up.
+  card.addEventListener("click", (e) => {
+    const t = e.target;
+    if (t.closest("button:disabled")) return;
+    const at = (sel) => t.closest(sel);
+    let el;
+    if (at("#chromeBtn")) post({ openChrome: true });   // answered with sbHostsNote, not a state
+    else if (at("#searchBtn")) { if (action === "search") closeAction(); else openAction("search"); redraw(); }
+    else if (at("#plusBtn")) { if (action && action !== "search") closeAction(); else openAction("pick"); redraw(); }
+    else if (at("#gearBtn")) post({ settings: true });
+    else if ((el = at("[data-open]"))) { openAction(el.dataset.open); redraw(); }
+    else if (at("#fieldClose")) { closeAction(); redraw(); }
+    else if ((el = at("#fieldGo"))) submitField(el.closest(".fieldbox"));
+    else if ((el = at("[data-rename]"))) {
+      const from = el.closest(".chip").offsetWidth;
+      closeAll();
+      renaming = el.dataset.rename;
+      renameFrom = from;
+      renameAt = performance.now();
+      redraw();
+    }
+    else if ((el = at("[data-delgroup]"))) { if (performance.now() - renameAt > 400) act({ groupDelete: el.dataset.delgroup }); }
+    else if ((el = at("[data-filter]"))) {
+      const g = el.dataset.filter;
+      if (!g) selected = [];
+      else if (selected.includes(g)) selected = selected.filter((x) => x !== g);
+      else {
+        selected = [...selected, g];
+        groupUse[g] = (groupUse[g] || 0) + 1;
+        saveUse();
+      }
+      resetScroll = true;
+      closeAll();
+      redraw();
+    }
+    else if (at("#moreChips")) { chipsAll = !chipsAll; redraw(); }
+    else if (at("#groupChip")) { openAction("group"); redraw(); }
+    else if ((el = at("[data-untag]"))) act({ member: { domain: el.dataset.untag, group: el.dataset.group, on: false } });
+    else if ((el = at("[data-toggle]"))) act({ setMode: el.dataset.mode, names: [el.dataset.toggle] });
+    else if ((el = at("[data-remove]"))) removeDomain(el.dataset.remove);
+    else if ((el = at("[data-member]"))) act({ member: { domain: el.dataset.member, group: el.dataset.group, on: !!el.dataset.on } });
+    else if (at("#groupCreate")) { creatingGroup = true; act({ groupAdd: groupQuery.trim(), domain: menuFor }); }
+    else if ((el = at("[data-row]"))) {
+      const d = el.dataset.row, reopen = menuFor !== d;
+      closeAll();
+      menuFor = reopen ? d : null;
+      revealOpenRow = reopen;
+      redraw();
+    }
+    else if ((el = at("[data-bulk]"))) act({ setMode: el.dataset.bulk, names: listed.map((d) => d.name) });
+    else if (at("#toggleConflicts")) { conflictsOpen = !conflictsOpen; redraw(); }
+    else if (at("#hideChromeNote")) { chromeNote = null; if (!busy) redraw(); }
+    else if (at("#importBtn")) act({ importAll: true, group: one() });
+  });
+  // A press anywhere in the name field (its padding, the gap, the trash) must not take the focus
+  // from the text: that would end the rename. On the padding it puts the caret in the text.
+  card.addEventListener("mousedown", (e) => {
+    const pill = e.target.closest(".redit");
+    if (!pill || e.target.id === "renameGroup") return;
+    e.preventDefault();
+    if (!e.target.closest(".rdel")) pill.querySelector("#renameGroup").focus();
+  });
+  card.addEventListener("keydown", (e) => {
+    const t = e.target;
+    if (t.id === "field") {
+      if (e.key === "Enter" && action !== "search") submitField(t.closest(".fieldbox"));
+      if (e.key === "Escape") { closeAction(); redraw(); }
+    } else if (t.id === "groupFind") {
+      // Enter ticks the one group left (never unticks it) and creates the typed group only when
+      // nothing matches; Escape closes the list.
+      if (e.key === "Enter") {
+        const box = t.closest(".gmenu");
+        const items = [...box.querySelectorAll(".glist .gi")];
+        if (!items.length) box.querySelector("#groupCreate")?.click();
+        else if (items.length === 1 && items[0].dataset.on) items[0].click();
+      }
+      if (e.key === "Escape") { closeAll(); redraw(); }
+    } else if (t.id === "renameGroup") {
+      if (e.key === "Enter" && t.value.trim()) {
+        const from = renaming, to = t.value.trim();
+        renamed = { from, to };
+        act({ groupRename: { from, to } });
+      }
+      if (e.key === "Escape") { renaming = null; redraw(); }
+    } else return;
+    e.stopPropagation();
+  });
+  card.addEventListener("input", (e) => {
+    const t = e.target;
+    if (t.id === "field" && action === "search") { query = t.value; resetScroll = true; redraw(); }
+    else if (t.id === "field" && fieldError) { fieldError = null; redraw(); }
+    if (t.id === "groupFind") { groupQuery = t.value; groupScrollReset = true; redraw(); }
+  });
+  // Leaving the name field cancels the rename. When a press moved the focus, wait until it is
+  // released and its click handled, so the click is not lost to the update.
+  card.addEventListener("focusout", (e) => {
+    const pill = e.target.closest?.(".redit");
+    if (!pill || (e.relatedTarget && pill.contains(e.relatedTarget))) return;
+    const cancel = () => {
+      if (!busy && renaming && pill.isConnected && !pill.contains(document.activeElement)) { renaming = null; redraw(); }
+    };
+    if (pointerDown) document.addEventListener("mouseup", () => setTimeout(cancel), { once: true });
+    else cancel();
+  });
+  card.addEventListener("scroll", (e) => {
+    if (e.target.classList?.contains("glist") || e.target.classList?.contains("rows")) fade(e.target);
+  }, true);
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (menuFor || renaming) { closeAll(); redraw(); }
+    else if (action) { closeAction(); redraw(); }
+  });
+  document.addEventListener("mousedown", () => { pointerDown = true; }, true);
+  document.addEventListener("mouseup", () => { pointerDown = false; }, true);
+  // A click outside an open group list closes it. Capture phase, state only; the update follows
+  // the click's own handler.
+  document.addEventListener("click", (e) => {
+    if (!menuFor || e.target.closest(".gmenu, [data-row]")) return;
+    menuFor = null;
+    groupQuery = "";
+    setTimeout(() => { if (!busy) redraw(); });
+  }, true);
+
+  window.sbHosts = (s) => {
+    if (!busy) orderGroups(s.groups);
+    draw(s);
+  };
+  // Apart from sbHosts: an unasked state reply there means "the panel opened" (orderGroups).
+  window.sbHostsNote = (text) => {
+    const note = text || null;
+    if (note === chromeNote) return;
+    chromeNote = note;
+    // While a reply is on its way it draws the note; drawing now would read as that reply.
+    if (!busy) redraw();
+  };
+  post({ status: true });
+</script>

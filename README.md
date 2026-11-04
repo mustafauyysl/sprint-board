@@ -4,6 +4,10 @@ A native macOS sprint tracking widget that sits on your desktop. Your own
 Jira tasks in the open sprint, the **business days each one has spent in its status**,
 the one furthest past its threshold shown as **Most overdue**, and PR/CI state.
 
+The same board also opens from the menu bar, in a popover with two tabs: **Sprint** (the
+board, laid out for the popover) and **Hosts** (switches domains between this Mac and
+production through `/etc/hosts`).
+
 A personal tool — not owned by any company, not designed to be distributed.
 
 ## Why it exists
@@ -16,9 +20,13 @@ it can only be derived from the changelog.
 
 | File | Role |
 |---|---|
-| `SprintBoard.swift` | NSWindow + WKWebView, menu bar, dragging, JS bridge |
-| `view.html` | The visual layer (plain JS, no framework) |
-| `setup.html` | First-launch setup screen |
+| `SprintBoard.swift` | NSWindow + WKWebView, menu bar popover, dragging, JS bridge, `/etc/hosts` |
+| `view.html` | The widget's board (plain JS, no framework) |
+| `setup.html` | The widget's setup and settings screen |
+| `popover/sprints.html` | The popover's Sprint tab |
+| `popover/settings.html` | Settings inside the popover, behind a back arrow |
+| `popover/hosts.html` | The popover's Hosts tab |
+| `app.entitlements` | Lets the signed app send Apple Events to Chrome (after a Hosts switch) |
 | `fetch.mjs` | I/O: Jira REST + GitHub GraphQL + keychain + sound |
 | `lib.mjs` | Pure logic — no I/O, no `Date.now()` (`now` is passed in) |
 | `test.mjs` | `node --test`, zero dependencies |
@@ -28,7 +36,10 @@ Deliberately kept **outside** the code folder:
 
 - `~/.config/sprint-widget/config.json` — settings (see `config.example.json`)
 - `~/.local/state/sprint-widget/` — `state.json` (the last seen most overdue task / broken CI /
-  review record, which is what stops a sound repeating) + `notes.json`
+  review record, which is what stops a sound repeating) + `notes.json`, and the Hosts tab's
+  backups of `/etc/hosts`: `hosts.bak` before every write, `hosts.before-sprint-board` once
+- `~/.config/sprint-widget/hosts.json` — the Hosts tab's domains and groups (whether a domain
+  is local is read from `/etc/hosts` itself)
 - Jira token — **keychain**, service `sprint-board-jira` (overridable in config)
 - GitHub token — **keychain**, service `sprint-board-github`. Without one it falls
   back to `gh auth token`, so if `gh` is installed there is nothing extra to do.
@@ -37,8 +48,9 @@ No token is ever stored in plain text in a file.
 
 **First launch:** with no config, or no Jira token in the keychain, the app opens
 `setup.html` instead of `view.html`; you sign in with Atlassian there, the config is
-written and the tokens go into the keychain. It can be reopened later from
-**Ring icon → Settings…** in the menu bar.
+written and the tokens go into the keychain. It can be reopened later from the gear
+button, or by right-clicking the ring icon in the menu bar → **Settings…**, which opens it in
+the popover.
 
 When "Sign in with Atlassian" is not available (for example while the Atlassian app is
 still in development mode, which only lets its owner sign in), **Use an API token
@@ -70,9 +82,9 @@ app's own setup screen fills it in after you sign in with Atlassian.
 ./build-app.sh --release
 ```
 
-Copies the data layer (`fetch.mjs`, `lib.mjs`, `view.html`) **inside** the bundle —
-so whoever downloads it never has to clone the repo — signs with Developer ID,
-notarises, staples, and produces `dist/SprintBoard.zip`.
+Copies the data layer (`fetch.mjs`, `lib.mjs`, the pages and `popover/`) **inside** the
+bundle — so whoever downloads it never has to clone the repo — signs with Developer ID
+(with `app.entitlements`), notarises, staples, and produces `dist/SprintBoard.zip`.
 
 The resulting `.app` is **self-contained**: both the data layer and Node (v24.21.0,
 downloaded from the official distribution with its checksum verified) live inside it.
@@ -108,7 +120,9 @@ costs.
 
 ## Usage
 
-- The **ring icon** (a circle with a check) in the menu bar → refresh / bring to front / settings / show in Dock / quit
+- Click the **ring icon** (a circle with a check) in the menu bar to open the popover;
+  right-click (or Control-click) it for refresh / bring widget to front / settings / show in
+  Dock / quit
 - The app is not in the Dock or Cmd+Tab (macOS ties the two together). **Ring icon → Show in
   Dock** adds both; click it again to remove them. The choice is remembered across launches
 - Drag by the card's **top strip**. The three dots on the strip close the widget (the app keeps running; ring icon → Bring widget to front
@@ -122,9 +136,14 @@ costs.
   bands off with a message; it never widens the search to all PRs
 - **Team sprint goal** (off by default; turn on **Sprint goal tracking** in Settings) sits
   under Sprint progress, above the Most overdue box. It lists the flagged tasks of your active sprint, whoever owns
-  them, with done/total. A task counts as done when its status category is done. From
-  day 8 of the sprint an open goal task is yellow; in the last 3 business days before
-  the sprint end it is red. The header takes the worst colour. Your own tasks that are
+  them, with done/total. A task counts as done when its status category is done. An open
+  goal task's colour depends on its stage (the board column its status sits in) and the
+  sprint's business days left: each stage turns yellow (at risk) and red (critical) in its own
+  last N days, e.g. UAT is yellow in the last 3 days and red on the last day, In Progress
+  yellow in the last 5 and red in the last 3. The sprint's last day is the day before Jira's
+  end date (a sprint that starts on a Thursday ends on the Wednesday). A status no stage lists
+  counts as In Progress. `goalRiskStages` in the config replaces the stage list (defaults in
+  `lib.mjs`). The header takes the worst colour. Your own tasks that are
   also goal tasks carry a "GOAL" mark. The warning is on the board only; there is no
   notification. With the setting off the app makes no extra Jira call
 - Refresh runs every 30 minutes and takes ~13 s
@@ -139,8 +158,43 @@ costs.
   always reports its result for the same PRs: "No conflicts, no CI errors" or which
   PRs have a conflict or a failing required check
 
-`view.html` / `fetch.mjs` / `lib.mjs` are read at runtime → after editing them **no
-build is needed**, restarting the app is enough. If Swift changes, `./build-app.sh`.
+### The popover
+
+- **Sprint** shows the widget's data in the popover's own layout: refresh and settings sit at
+  the top right (hover the refresh button to see how old the data is), three cards replace the
+  bars (the sprint, the team goal, the days left; click the team goal card to open its tasks),
+  and every status folds (finished and cancelled ones start folded). GitHub has three
+  sections in the widget's order: Waiting For Review, Awaiting Your Review, Merge Blocked.
+  A merged PR's number carries a merge mark and a deployed one a globe; a task's age is in
+  its day count's tooltip
+- **The gear** (on the Sprint and Hosts tabs) opens Settings inside the popover, with a back
+  arrow to the tab it came from: sign-in, API token, Disconnect, GitHub organization, drafts,
+  goal tracking and partner domains. It does all the widget's Settings do, so the widget is
+  never needed
+- **Hosts** lists your domains, each with a switch between **Local** (a line in Sprint
+  Board's block in `/etc/hosts` points it at this Mac) and **Prod**. Group chips filter the
+  list; **All local** and **All prod** switch every domain shown. **+** adds domains (several at once:
+  `a.com,b.com`; URLs work too), a partner, or a group. Domains already in `/etc/hosts`
+  outside the block can be imported; a `# Group - XYZ` line above them names their group.
+  The app writes only inside its block, between `# >>> extension manages >>>` and
+  `# <<< extension manages <<<`, and never asks for an admin password: your user must be able
+  to write `/etc/hosts`, otherwise the tab says so and changes nothing
+- **Add partner** appears once Settings → **Partner domains** lists the domain endings a
+  partner's environment answers on, separated by commas, e.g. `panel.example.com,
+  api.example.com` (saved as `partnerDomainSuffixes` in the config). A partner name then adds
+  `<partner>.panel.example.com` and `<partner>.api.example.com` to a Partners group. The
+  list is empty by default
+- **After a switch** the app asks every open Chrome window to drop its DNS cache and open
+  connections, so pages follow the new address at once. That needs Chrome started with
+  `--enable-net-benchmarking` and, in each profile, View › Developer › Allow JavaScript from
+  Apple Events; the first time, macOS asks whether Sprint Board may control Chrome. When
+  something is missing the Hosts tab says what. The **Open Insecure Chrome** button (left of
+  search) starts a closed Chrome with `--ignore-certificate-errors --allow-insecure-localhost
+  --enable-net-benchmarking`; a Chrome already running without them is left alone, with a
+  note to quit it (⌘Q) and press the button again
+
+`view.html` / `setup.html` / `popover/` / `fetch.mjs` / `lib.mjs` are read at runtime → after
+editing them **no build is needed**, restarting the app is enough. If Swift changes, `./build-app.sh`.
 
 ## Notes learned the hard way
 
@@ -210,6 +264,22 @@ build is needed**, restarting the app is enough. If Swift changes, `./build-app.
 - **A missed notification prompt counts as "Don't Allow".** The first-launch request
   then fails with "Notifications are not allowed for this application" on every run;
   the switch is in System Settings → Notifications → Sprint Board.
+- **`/etc/hosts` is written in place.** A user who owns the file still cannot create files
+  in `/etc`, so temp-file-and-rename is impossible; writing in place also keeps its owner and
+  mode as they were.
+- **Chrome does not follow an `/etc/hosts` change.** It keeps its own host cache and reuses
+  pooled connections (HTTP/2, QUIC, keep-alive) until the network changes.
+  `chrome.benchmarking.clearHostResolverCache()` and `closeConnections()` drop them and keep
+  cookies; they exist only when Chrome was started with `--enable-net-benchmarking`. Killing
+  Chrome's network service works too, but loses session cookies: do not.
+- **Cloudflare WARP reads `/etc/hosts` once, when it connects.** A name removed from the
+  file keeps resolving to 127.0.0.1 until `warp-cli disconnect && warp-cli connect`.
+- **The hardened runtime refuses Apple Events without the entitlement** (error -1743) and
+  never shows the permission prompt; hence `app.entitlements`. The ad-hoc signed development
+  build is not affected, so only a signed build shows it.
+- **A hidden WKWebView keeps the last mouse position it saw.** Shown again, it draws that
+  element as hovered until the mouse moves: after a page swap the button under the pointer
+  lit up. Panel pages start with a `nohover` class that the first real mouse move removes.
 
 ## Licence
 

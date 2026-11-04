@@ -1,7 +1,8 @@
 # Sprint Board — agent notes
 
-A desktop sprint widget (macOS, Swift/AppKit + WKWebView + a Node data layer).
-A personal tool, distributed to colleagues as a signed `.app`.
+A desktop sprint widget and a menu bar popover with Sprint and Hosts tabs (macOS,
+Swift/AppKit + WKWebView + a Node data layer). A personal tool, distributed to colleagues
+as a signed `.app`.
 
 **Read this file, then read the "Notes learned the hard way" section of `README.md`.**
 Every item there is a trap found by live measurement; do not try to fix them by guessing.
@@ -27,8 +28,8 @@ off for this repo; without it the publishing step hits gates you cannot pass.
 | `./build-app.sh` | **Development** build → `/Applications`, reads the data layer FROM THE REPO |
 | `./build-app.sh --release` | **Distribution** build → `dist/`. Read below. |
 
-In a development build `view.html` / `fetch.mjs` / `lib.mjs` are read at runtime:
-after editing them **no build is needed**, restarting the app is enough.
+In a development build `view.html` / `setup.html` / `popover/` / `fetch.mjs` / `lib.mjs`
+are read at runtime: after editing them **no build is needed**, restarting the app is enough.
 If Swift changes, `./build-app.sh`.
 
 ## Red lines
@@ -95,9 +96,17 @@ path still works for older installs.
 
 | File | Role |
 |---|---|
-| `SprintBoard.swift` | NSWindow + WKWebView, menu bar, keychain, JS bridge |
-| `view.html` | The board screen (plain JS, no framework, NOT an ES module) |
-| `setup.html` | First-launch setup screen |
+| `SprintBoard.swift` | NSWindow + WKWebView, menu bar popover, keychain, JS bridge, `/etc/hosts` |
+| `view.html` | The widget's board (plain JS, no framework, NOT an ES module) |
+| `setup.html` | The widget's setup and settings screen |
+| `popover/sprints.html` | The popover's Sprint tab |
+| `popover/settings.html` | Settings inside the popover |
+| `popover/hosts.html` | The popover's Hosts tab |
+| `app.entitlements` | Apple Events for the signed build (Chrome refresh after a Hosts switch) |
+
+The widget and the popover have separate pages: a popover change goes in `popover/`, a widget
+change in `view.html` / `setup.html`. The Hosts tests never touch the real `/etc/hosts`; they
+compile the Swift functions into a driver that writes to a temp dir.
 | `fetch.mjs` | I/O: Jira REST + GitHub GraphQL + keychain + sound |
 | `lib.mjs` | Pure logic, zero I/O |
 | `test.mjs` | `node --test`, zero dependencies |
@@ -122,7 +131,8 @@ Config lives at `~/.config/sprint-widget/config.json`, state at
   Found" dialog appears. Tests that touch the keychain must run with the real HOME
   (back up the config first).
 
-- `view.html`/`setup.html` cannot import ES modules (`file://` origin). Write plain JS.
+- The pages (`view.html`, `setup.html`, `popover/*.html`) cannot import ES modules
+  (`file://` origin). Write plain JS.
 - `set -o pipefail` is on: `$(git ... | sed ...)` returns 128 when there is no tag and
   silently kills the script. Use `|| true` in places like that.
 - Data refresh must not run while the setup screen is open (the `onSetupScreen` flag).

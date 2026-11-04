@@ -480,10 +480,10 @@ async function fetchSprintGoal(cfg, auth, issues, sprintField, now) {
   if (!sprintGoalTracking(cfg)) return null;
   const sprints = activeSprints(issues, sprintField);
   const jql = goalJql(sprints.map((s) => s.id));
-  if (!jql) return goalBand([], sprints, now, cfg.host, sprintField);
+  if (!jql) return goalBand([], sprints, now, cfg.host, sprintField, cfg);
   try {
     const goalIssues = await searchIssues(cfg, auth, jql, `summary,status,assignee,${sprintField}`);
-    return goalBand(goalIssues, sprints, now, cfg.host, sprintField);
+    return goalBand(goalIssues, sprints, now, cfg.host, sprintField, cfg);
   } catch (err) {
     return { done: 0, total: 0, worst: "ok", rows: [],
       error: String(err && err.message ? err.message : err).slice(0, 200) };
@@ -572,8 +572,9 @@ function demoPayload(cfg) {
 
   const overdue = pickMostOverdue(tasks);
 
-  // Two sprints so every colour shows: one ends tomorrow (red), one is in its second week
-  // (yellow). Dates are relative to now, so the colours never age out of the demo.
+  // Two sprints so every colour shows: one ends tomorrow (red for work in progress, yellow for
+  // a task in security check), one is in its second week (on track). Dates are relative to
+  // now, so the colours never age out of the demo.
   const daysFromNow = (n) => new Date(now.getTime() + n * 86400000).toISOString();
   const endingSprint = { id: 9001, name: "Demo Team - Sprint#3", state: "active", startDate: daysFromNow(-12), endDate: daysFromNow(1) };
   const runningSprint = { id: 9002, name: "Demo Team - Sprint#4", state: "active", startDate: daysFromNow(-9), endDate: daysFromNow(20) };
@@ -585,7 +586,8 @@ function demoPayload(cfg) {
         goalIssue("DEMO-111", "Checkout flow audit", "Done", "done", "Ada Yilmaz", runningSprint),
         goalIssue("DEMO-102", "Clean up duplicate registration ids", "In Code Review", "indeterminate", "Demo User", runningSprint),
         goalIssue("DEMO-110", "Payment retry window", "In Progress", "indeterminate", "Deniz Kaya", endingSprint),
-      ], activeSprints([{ fields: { sprint: [endingSprint, runningSprint] } }], "sprint"), now, cfg.host, "sprint")
+        goalIssue("DEMO-117", "Receipt e-mail template", "In Security Check", "indeterminate", "Deniz Kaya", endingSprint),
+      ], activeSprints([{ fields: { sprint: [endingSprint, runningSprint] } }], "sprint"), now, cfg.host, "sprint", cfg)
     : null;
 
   const visible = withGoalMarks([...tasks].sort((a, b) =>

@@ -772,38 +772,83 @@ export function isGoalDone(statusCategory) {
   return statusCategory?.key === "done";
 }
 
-const GOAL_RED_BUSINESS_DAYS = 3;
-const GOAL_YELLOW_FROM_DAY = 8;
+/**
+ * When a goal task turns at risk (yellow) or critical (red): per stage, the sprint's last N
+ * business days. "Last 3 days" = the days for which businessDaysBetween(now, end) <= 3; Jira's
+ * end is the morning after the last day, so on the last day the count is 1. null = never.
+ * A "never" stage is not coloured. The stages follow the board's columns; the config's
+ * goalRiskStages replaces the list.
+ */
+export const DEFAULT_GOAL_RISK_STAGES = [
+  { name: "To Do", atRisk: 6, critical: 4, statuses: ["Dev Check", "Priority Change", "To Do", "Waiting for KickOff",
+    "Backlog", "Block", "Epic To Do", "Unsolved", "Pool", "Blocked", "NEEDS GROOMING"] },
+  { name: "In Progress", atRisk: 5, critical: 3, statuses: ["In Progress", "UX Writing In Progress", "Epic In Development", "UX Writing"] },
+  { name: "In Review", atRisk: 5, critical: 3, statuses: ["In Code Review", "In Review", "UX Writing In Review"] },
+  { name: "Ready to Test", atRisk: 4, critical: 2, statuses: ["Ready To Test"] },
+  { name: "QA", atRisk: 4, critical: 2, statuses: ["IN TESTING", "User Testing", "QA Check", "TEST BLOCKED"] },
+  { name: "Automation Test", atRisk: 4, critical: 2, statuses: ["IN AUTO TESTING"] },
+  { name: "Design UAT", atRisk: 3, critical: 1, statuses: ["Design Testing In Progress", "Design Testing Done", "Design Review", "Design UAT"] },
+  { name: "UAT", atRisk: 3, critical: 1, statuses: ["UAT", "Dev/PM Alignment"] },
+  { name: "Security", atRisk: 2, critical: null, statuses: ["In Security Check"] },
+  { name: "Released", never: true, statuses: ["Ready For Release", "Awaiting Release", "Pending for Release",
+    "Waiting for Release", "Waiting for SDK Release", "Released on Prod", "Done", "Resolved", "Closed", "Epic is Done",
+    "Question", "Rejected", "Unresolved"] },
+];
+
+/** A status no stage lists is treated like work under way. */
+const GOAL_UNLISTED_STAGE = { name: "Unlisted", atRisk: 5, critical: 3, statuses: [] };
+
+/** Falls back to the default when the configured list is malformed (not an array). */
+export function goalRiskStages(config) {
+  const c = config && config.goalRiskStages;
+  return Array.isArray(c) ? c : DEFAULT_GOAL_RISK_STAGES;
+}
+
+/** The stage a status sits in, matched like the release lists: trimmed, any case. */
+export function goalStageOf(statusName, stages) {
+  const norm = typeof statusName === "string" ? statusName.trim().toLowerCase() : "";
+  const listed = (stages || []).find((st) => (st.statuses || []).some((s) => String(s).trim().toLowerCase() === norm));
+  return listed || GOAL_UNLISTED_STAGE;
+}
 
 /**
- * The colour of one goal task: "done" once released; for an open one "red" in the last
- * three business days before the sprint end (and after it), "yellow" from day 8 of the
- * sprint, otherwise "ok". Day 1 is the start day.
+ * The colour of one goal task: "done" once its status category is done; otherwise "red" in
+ * its stage's critical days, "yellow" in its at-risk days, else "ok".
  */
-export function goalRisk(now, start, end, statusCategory) {
+export function goalRisk(now, start, end, statusCategory, statusName = "", stages = DEFAULT_GOAL_RISK_STAGES) {
   if (isGoalDone(statusCategory)) return "done";
   if (!start || !end) return "ok";
-  if (businessDaysBetween(now, end) <= GOAL_RED_BUSINESS_DAYS) return "red";
-  if (dayIndex(now) - dayIndex(start) + 1 >= GOAL_YELLOW_FROM_DAY) return "yellow";
+  const stage = goalStageOf(statusName, stages);
+  if (stage.never) return "ok";
+  const daysLeft = businessDaysBetween(now, end);
+  const critical = Number.isInteger(stage.critical) && daysLeft <= stage.critical;
+  const atRisk = Number.isInteger(stage.atRisk) && daysLeft <= stage.atRisk;
+  if (critical) return "red";
+  if (atRisk) return "yellow";
   return "ok";
 }
 
 const RISK_ORDER = { red: 0, yellow: 1, ok: 2, done: 3 };
 
 /** The TEAM SPRINT GOAL band: done/total, the worst colour, and one row per goal task. */
-export function goalBand(issues, sprints, now, host, sprintField) {
+export function goalBand(issues, sprints, now, host, sprintField, config) {
+  const stages = goalRiskStages(config);
   const known = new Map((sprints || []).map((s) => [s.id, s]));
   const rows = (issues || []).map((issue, i) => {
     const f = issue.fields || {};
     const own = (Array.isArray(f[sprintField]) ? f[sprintField] : []).find((s) => s && known.has(s.id));
     const sprint = own ? known.get(own.id) : (sprints || [])[0] || {};
+    const stage = goalStageOf(f.status?.name, stages);
     return {
       row: {
         key: issue.key,
         summary: f.summary ?? "",
         owner: f.assignee?.displayName ?? null,
+        ownerShort: firstName(f.assignee?.displayName ?? "", config?.nameOverrides),
         status: f.status?.name ?? "",
-        risk: goalRisk(now, sprint.startDate, sprint.endDate, f.status?.statusCategory),
+        // The board column the status sits in; "" for a status no stage lists.
+        stage: stage === GOAL_UNLISTED_STAGE ? "" : stage.name,
+        risk: goalRisk(now, sprint.startDate, sprint.endDate, f.status?.statusCategory, f.status?.name, stages),
         url: `https://${host}/browse/${issue.key}`,
       },
       i,
