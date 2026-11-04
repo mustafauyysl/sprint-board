@@ -28,11 +28,11 @@ func findExecutable(_ name: String) -> String? {
     return nil
 }
 
-/// Where the data layer (fetch.mjs / lib.mjs / view.html) lives.
+/// Where the data layer (fetch.mjs / lib.mjs / the pages) lives.
 ///
 /// Three modes, in this order:
 ///  1. An `appdir` file — a DEVELOPMENT build. build-app.sh writes the repo path,
-///     so editing view.html only requires restarting the app.
+///     so editing a page only requires restarting the app.
 ///  2. The bundle's own Resources — a DISTRIBUTION build (--release). The files
 ///     are INSIDE the .app, so whoever downloads it never clones the repo.
 ///  3. The old fixed path — backwards compatibility.
@@ -923,7 +923,7 @@ let REFRESH_SECONDS: TimeInterval = 30 * 60
 let NOTES_PATH = ("~/.local/state/sprint-widget/notes.json" as NSString).expandingTildeInPath
 let MAX_NOTES = 6
 let NOTE_LIMIT = 500
-/// The corner radius of the board card in view.html and setup.html; the window material follows it.
+/// The corner radius of the card in setup.html; the window material follows it.
 let CARD_RADIUS: CGFloat = 10
 
 /// `frame` moved, and shortened if needed, to lie inside the visible area of its own screen: the
@@ -943,7 +943,7 @@ func onScreen(_ frame: NSRect, near current: NSRect? = nil) -> NSRect {
     return f
 }
 
-/// A stretchable mask that rounds the popover material's corners to `radius`.
+/// A stretchable mask that rounds the window material's corners to `radius`.
 func roundedMask(_ radius: CGFloat) -> NSImage {
     let side = radius * 2 + 1
     let mask = NSImage(size: NSSize(width: side, height: side), flipped: false) { r in
@@ -998,13 +998,12 @@ func symbolScript() -> WKUserScript? {
 
 /// The board's width.
 let BOARD_WIDTH: CGFloat = 430
-/// The panel's tabs, in order: segment title, page, and the message handler that page posts
-/// to. Each page reaches only its own handler, so the Hosts page cannot drive the board.
-let PANEL_TABS: [(title: String, page: String, handler: String)] = [
-    ("Sprint", "popover/sprints.html", "sb"),
-    ("Hosts", "popover/hosts.html", "hosts"),
+/// The widget's tabs, in order: segment title and page.
+let PANEL_TABS: [(title: String, page: String)] = [
+    ("Sprint", "popover/sprints.html"),
+    ("Hosts", "popover/hosts.html"),
 ]
-/// The page the widget shows as its board; the panel's Sprint tab shows the same page.
+/// The page the widget shows as its board.
 let WIDGET_BOARD_PAGE = "popover/sprints.html"
 let WIDGET_TAB_KEY = "widgetTab"
 /// The motion of a fold in popover/sprints.html (FOLD_MOTION), so the window edge moves with it.
@@ -1021,7 +1020,7 @@ addEventListener('DOMContentLoaded', () => {
   window.sbFit = () => requestAnimationFrame(() => (handlers?.sb ?? handlers?.hosts)?.postMessage({ height: card.offsetHeight }));
 });
 """#
-/// Runs first in every panel page; see makePanelWebView.
+/// Runs first in every page of the widget.
 let PANEL_PAGE_SCRIPT = """
 document.documentElement.classList.add('nohover');
 addEventListener('mousemove', (e) => {
@@ -1198,9 +1197,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// Counts the times the board's data was dropped (Disconnect, a session that ended): a fetch
     /// started before belongs to the account that left. Main thread only.
     var boardGeneration = 0
-    /// Board pages that have finished loading. A render sent
-    /// to a page that is still loading is lost, so only these receive data.
-    var loadedBoards = Set<WKWebView>()
+    /// The board page has finished loading. A render sent to a page that is still loading is
+    /// lost, so it receives data only after this.
+    var boardLoaded = false
     /// The last fetch result and the last successful one, replayed to a board page that
     /// finishes loading after they arrived.
     var lastJSON: String?
@@ -1242,7 +1241,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.isMovableByWindowBackground = true
 
         // The system material behind the transparent page. Always active: following the
-        // window's key state would turn the panel flat whenever another app has focus.
+        // window's key state would turn the widget flat whenever another app has focus.
         let material = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
         material.material = .popover
         material.blendingMode = .behindWindow
@@ -1319,8 +1318,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// requires editing config by hand.
     @objc func menuSetup() {
         manualRefreshPending = false
-        setupFromSettings = !needsSetup()
-        browsingSettings = setupFromSettings
+        setupFromSettings = false
         onSetupScreen = true
         lendWidgetToSetup()
         loadPage("setup.html")
@@ -1390,7 +1388,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         jiraAccessExpiry = nil
         forgetCachedTokens()
         setupFromSettings = false
-        browsingSettings = false
         manualRefreshPending = false
         widgetSettingsShown = false
         onSetupScreen = true
@@ -1410,7 +1407,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             settingsResult(["errors": ["Not a valid GitHub organization name: letters, digits and single hyphens, at most 39 characters."]], to: page)
             return
         }
-        // Only the popover's Settings sends them; a save from the widget leaves them as they are.
+        // Only popover/settings.html sends them; a save from setup.html leaves them as they are.
         if let typed = s["partnerDomainSuffixes"] as? String {
             guard let partners = partnerSuffixList(typed) else {
                 settingsResult(["errors": ["Partner domains are domain names separated by commas, as in panel.example.com, api.example.com."]], to: page)
@@ -1773,7 +1770,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     func showBoard() {
         onSetupScreen = false
         setupFromSettings = false
-        browsingSettings = false
         setupResultTarget = nil
         widgetSettingsShown = false
         loadPage(WIDGET_BOARD_PAGE)
@@ -2094,14 +2090,13 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// The user opened Settings while signed in: nothing is wrong, so refreshes go on behind it
     /// and reach the board. A setup screen that opened itself (sign-in needed, or macOS refused
     /// the token read) stops them, or each one would ask again.
-    var browsingSettings = false
-    var setupBlocksFetch: Bool { onSetupScreen && !browsingSettings }
+    var setupBlocksFetch: Bool { onSetupScreen }
 
     /// Loads an HTML page from the bundle/repo, into the widget unless told otherwise.
     func loadPage(_ name: String, in view: WKWebView? = nil) {
         let target: WKWebView = view ?? web
-        // Not a board until this load finishes (didFinish adds the board pages back).
-        loadedBoards.remove(target)
+        // Not a board until this load finishes (didFinish sets it again).
+        if target === web { boardLoaded = false }
         let url = URL(fileURLWithPath: "\(APP_DIR)/\(name)")
         target.loadFileURL(url, allowingReadAccessTo: URL(fileURLWithPath: APP_DIR))
     }
@@ -2414,7 +2409,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             guard !self.onSetupScreen else { return }
             self.onSetupScreen = true
             self.setupFromSettings = canGoBack
-            self.browsingSettings = false
             self.manualRefreshPending = false
             self.pendingSetupError = reason
             self.widgetSettingsShown = false
@@ -2540,7 +2534,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             if ok { self.lastOkJSON = json }
             self.menuIcon = menuIconState(obj, ok: ok, previous: self.menuIcon)
             self.statusItem.button?.image = ringIcon(18, self.menuIcon)
-            for w in self.loadedBoards { self.render(json, in: w) }
+            if self.boardLoaded { self.render(json, in: self.web) }
         }
     }
 
@@ -2577,8 +2571,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
                 w.evaluateJavaScript("window.sbSetupResult && window.sbSetupResult(\(json))")
             }
         }
-        guard ["view.html", "sprints.html"].contains(w.url?.lastPathComponent ?? "") else { return }
-        loadedBoards.insert(w)
+        guard w === web, w.url?.lastPathComponent == "sprints.html" else { return }
+        boardLoaded = true
         // A page that loads after the data arrived gets it now. The last good result goes
         // first, so a failed latest refresh still shows as a strip over the old data.
         if let good = lastOkJSON, good != lastJSON { render(good, in: w) }
@@ -2615,10 +2609,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         guard let d = try? JSONSerialization.data(withJSONObject: notes),
               let j = String(data: d, encoding: .utf8) else { return }
         DispatchQueue.main.async { [weak self] in
-            for w in self?.loadedBoards ?? [] {
-                w.evaluateJavaScript("window.sbNotes && window.sbNotes(\(j))") { _, err in
-                    if let err { dbg("sbNotes: \(err.localizedDescription)") }
-                }
+            guard let self, self.boardLoaded else { return }
+            self.web.evaluateJavaScript("window.sbNotes && window.sbNotes(\(j))") { _, err in
+                if let err { dbg("sbNotes: \(err.localizedDescription)") }
             }
         }
     }

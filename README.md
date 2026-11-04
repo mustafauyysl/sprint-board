@@ -4,9 +4,8 @@ A native macOS sprint tracking widget that sits on your desktop. Your own
 Jira tasks in the open sprint, the **business days each one has spent in its status**,
 the one furthest past its threshold shown as **Most overdue**, and PR/CI state.
 
-The same board also opens from the menu bar, in a popover with two tabs: **Sprint** (the
-board, laid out for the popover) and **Hosts** (switches domains between this Mac and
-production through `/etc/hosts`).
+The widget has two tabs: **Sprint** (the board) and **Hosts** (switches domains between
+this Mac and production through `/etc/hosts`).
 
 A personal tool — not owned by any company, not designed to be distributed.
 
@@ -20,12 +19,11 @@ it can only be derived from the changelog.
 
 | File | Role |
 |---|---|
-| `SprintBoard.swift` | NSWindow + WKWebView, menu bar popover, dragging, JS bridge, `/etc/hosts` |
-| `view.html` | The widget's board (plain JS, no framework) |
-| `setup.html` | The widget's setup and settings screen |
-| `popover/sprints.html` | The popover's Sprint tab |
-| `popover/settings.html` | Settings inside the popover, behind a back arrow |
-| `popover/hosts.html` | The popover's Hosts tab |
+| `SprintBoard.swift` | NSWindow + WKWebView, widget tabs, menu bar menu, dragging, JS bridge, `/etc/hosts` |
+| `setup.html` | The sign-in screen; also shown when macOS refuses the token read |
+| `popover/sprints.html` | The widget's Sprint tab (plain JS, no framework) |
+| `popover/settings.html` | Settings over the widget's tabs, behind a back arrow |
+| `popover/hosts.html` | The widget's Hosts tab |
 | `app.entitlements` | Lets the signed app send Apple Events to Chrome (after a Hosts switch) |
 | `fetch.mjs` | I/O: Jira REST + GitHub GraphQL + keychain + sound |
 | `lib.mjs` | Pure logic — no I/O, no `Date.now()` (`now` is passed in) |
@@ -47,10 +45,9 @@ Deliberately kept **outside** the code folder:
 No token is ever stored in plain text in a file.
 
 **First launch:** with no config, or no Jira token in the keychain, the app opens
-`setup.html` instead of `view.html`; you sign in with Atlassian there, the config is
-written and the tokens go into the keychain. It can be reopened later from the gear
-button, or by right-clicking the ring icon in the menu bar → **Settings…**, which opens it in
-the popover.
+`setup.html` instead of the board; you sign in with Atlassian there, the config is
+written and the tokens go into the keychain. Settings open later from the gear button, or
+from the ring icon in the menu bar → **Settings…**, over the widget's tabs.
 
 When "Sign in with Atlassian" is not available (for example while the Atlassian app is
 still in development mode, which only lets its owner sign in), **Use an API token
@@ -120,22 +117,21 @@ costs.
 
 ## Usage
 
-- Click the **ring icon** (a circle with a check) in the menu bar to open the popover;
-  right-click (or Control-click) it for refresh / bring widget to front / settings / show in
-  Dock / quit
+- Click the **ring icon** (a circle with a check) in the menu bar for refresh / bring widget
+  to front / settings / show in Dock / quit. A left click and a right click do the same
 - The app is not in the Dock or Cmd+Tab (macOS ties the two together). **Ring icon → Show in
   Dock** adds both; click it again to remove them. The choice is remembered across launches
-- Drag by the card's **top strip**. The three dots on the strip close the widget (the app keeps running; ring icon → Bring widget to front
+- Drag by the **tab header**. The three dots on it close the widget (the app keeps running; ring icon → Bring widget to front
   brings it back, as do the Dock icon and Cmd+Tab when it is in the Dock), minimise it,
   or make it fill the screen with larger text
-- Under **Sprint progress**, on the right, the **refresh** button refreshes and the
-  **settings** (gear) button opens the settings screen. **GitHub organization** limits the PR
+- At the top right of the Sprint tab, the **refresh** button refreshes and the
+  **settings** (gear) button opens Settings. **GitHub organization** limits the PR
   searches (your PRs and the reviews you are asked for) to one organization; empty
   means all PRs. Only a valid GitHub organization name is saved, and the board uses it
   at the next refresh. An invalid name typed into the config by hand turns the PR
   bands off with a message; it never widens the search to all PRs
-- **Team sprint goal** (off by default; turn on **Sprint goal tracking** in Settings) sits
-  under Sprint progress, above the Most overdue box. It lists the flagged tasks of your active sprint, whoever owns
+- **Team sprint goal** (off by default; turn on **Sprint goal tracking** in Settings) is the
+  second card. It lists the flagged tasks of your active sprint, whoever owns
   them, with done/total. A task counts as done when its status category is done. An open
   goal task's colour depends on its stage (the board column its status sits in) and the
   sprint's business days left: each stage turns yellow (at risk) and red (critical) in its own
@@ -158,19 +154,21 @@ costs.
   always reports its result for the same PRs: "No conflicts, no CI errors" or which
   PRs have a conflict or a failing required check
 
-### The popover
+### The tabs
 
-- **Sprint** shows the widget's data in the popover's own layout: refresh and settings sit at
-  the top right (hover the refresh button to see how old the data is), three cards replace the
-  bars (the sprint, the team goal, the days left; click the team goal card to open its tasks),
-  and every status folds (finished and cancelled ones start folded). GitHub has three
-  sections in the widget's order: Waiting For Review, Awaiting Your Review, Merge Blocked.
+The widget keeps the selected tab across launches, and the window follows the height of the
+page on screen. A fold moves the window edge with the same time and curve as the content.
+
+- **Sprint**: refresh and settings sit at the top right (hover the refresh button to see how
+  old the data is), three cards show the sprint, the team goal and the days left (click the
+  team goal card to open its tasks), and every status folds (finished and cancelled ones
+  start folded). GitHub has three sections: Waiting For Review, Awaiting Your Review, Merge Blocked.
   A merged PR's number carries a merge mark and a deployed one a globe; a task's age is in
   its day count's tooltip
-- **The gear** (on the Sprint and Hosts tabs) opens Settings inside the popover, with a back
-  arrow to the tab it came from: sign-in, API token, Disconnect, GitHub organization, drafts,
-  goal tracking and partner domains. It does all the widget's Settings do, so the widget is
-  never needed
+- **The gear** (on the Sprint and Hosts tabs) opens Settings over the tabs, with a back
+  arrow to the tab it came from: Disconnect, GitHub organization, drafts, goal tracking and
+  partner domains. **Settings…** in the menu opens the same page. With no sign-in, both open
+  the sign-in screen
 - **Hosts** lists your domains, each with a switch between **Local** (a line in Sprint
   Board's block in `/etc/hosts` points it at this Mac) and **Prod**. Group chips filter the
   list; **All local** and **All prod** switch every domain shown. **+** adds domains (several at once:
@@ -193,7 +191,7 @@ costs.
   --enable-net-benchmarking`; a Chrome already running without them is left alone, with a
   note to quit it (⌘Q) and press the button again
 
-`view.html` / `setup.html` / `popover/` / `fetch.mjs` / `lib.mjs` are read at runtime → after
+`setup.html` / `popover/` / `fetch.mjs` / `lib.mjs` are read at runtime → after
 editing them **no build is needed**, restarting the app is enough. If Swift changes, `./build-app.sh`.
 
 ## Notes learned the hard way
@@ -279,7 +277,7 @@ editing them **no build is needed**, restarting the app is enough. If Swift chan
   build is not affected, so only a signed build shows it.
 - **A hidden WKWebView keeps the last mouse position it saw.** Shown again, it draws that
   element as hovered until the mouse moves: after a page swap the button under the pointer
-  lit up. Panel pages start with a `nohover` class that the first real mouse move removes.
+  lit up. Tab pages start with a `nohover` class that the first real mouse move removes.
 
 ## Licence
 

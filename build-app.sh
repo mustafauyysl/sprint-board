@@ -3,7 +3,7 @@
 #
 #   ./build-app.sh            DEVELOPMENT: installs the bundle into /Applications
 #                             and points the data layer at the REPO (an appdir
-#                             file). Editing view.html / fetch.mjs / lib.mjs needs
+#                             file). Editing a page / fetch.mjs / lib.mjs needs
 #                             NO rebuild — just restart the app.
 #
 #   ./build-app.sh --release  DISTRIBUTION: copies the data layer INSIDE the
@@ -149,7 +149,7 @@ fetch_node() {
 
 if [ "$RELEASE" = "1" ]; then
   # Data layer INSIDE the bundle, so whoever downloads it never clones the repo.
-  cp fetch.mjs lib.mjs view.html setup.html config.example.json "$APP/Contents/Resources/"
+  cp fetch.mjs lib.mjs setup.html config.example.json "$APP/Contents/Resources/"
   cp -R popover "$APP/Contents/Resources/"
   say "✓ data layer embedded in the bundle"
 
@@ -170,7 +170,7 @@ if [ "$RELEASE" = "1" ]; then
   chmod +x "$APP/Contents/Resources/node"
   say "✓ node embedded ($(lipo -archs "$APP/Contents/Resources/node"))"
 else
-  # In development read from the repo, so editing view.html needs no rebuild.
+  # In development read from the repo, so editing a page needs no rebuild.
   printf '%s' "$(pwd -P)" > "$APP/Contents/Resources/appdir"
 fi
 

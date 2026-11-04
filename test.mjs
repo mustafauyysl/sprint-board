@@ -663,16 +663,16 @@ test("addNote: a 300-character note is kept whole", () => {
 
 test("NOTE_LIMIT: the Swift save limit and the note field's maxlength match lib.mjs", () => {
   const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
-  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
+  const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
   assert.equal(Number(swift.match(/^let NOTE_LIMIT = (\d+)$/m)?.[1]), NOTE_LIMIT);
-  assert.equal(Number(view.match(/class="ninput"[^>]*maxlength="(\d+)"/)?.[1]), NOTE_LIMIT,
+  assert.equal(Number(sprints.match(/class="ninput"[^>]*maxlength="(\d+)"/)?.[1]), NOTE_LIMIT,
     "typing must stop where saving would cut");
 });
 
 test("setup screen: a transparent page around a card panel, sized to the card, as on the board", () => {
   const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
   for (const [name, page, height] of [
-    ["view.html", read("./view.html"), /postMessage\(\{ height: card\.offsetHeight \}\)/],
+    ["popover/sprints.html", read("./popover/sprints.html"), /post\(\{ height: card\.offsetHeight \}\)/],
     ["setup.html", read("./setup.html"), /post\(\{ height: \$\("card"\)\.offsetHeight \}\)/],
   ]) {
     // A background on <body> paints the whole square window; the rounded panel needs its own element.
@@ -683,33 +683,28 @@ test("setup screen: a transparent page around a card panel, sized to the card, a
   }
 });
 
-test("both screens: one card radius, and no shadow outside the card", () => {
+test("setup screen: its card radius, and no shadow outside the card", () => {
   const card = (f) => readFileSync(new URL(f, import.meta.url), "utf8").match(/#card \{([^}]*)\}/)?.[1] ?? "";
-  const [view, setup] = [card("./view.html"), card("./setup.html")];
+  const setup = card("./setup.html");
   const radius = (css) => css.match(/border-radius: ?([^;]+);/)?.[1];
-  assert.equal(radius(view), "10px");
-  assert.equal(radius(setup), radius(view));
+  assert.equal(radius(setup), "10px");
   // The window is cut exactly to the card, so an outer shadow can only show in the corners
   // outside the curve, as a dark tip with a square edge. Only an inset shadow is allowed.
-  for (const [name, css] of [["view.html", view], ["setup.html", setup]]) {
-    const shadow = css.match(/box-shadow: ?([^;]+);/)?.[1] ?? "";
-    for (const layer of shadow.split(/,(?![^(]*\))/).filter((l) => l.trim())) {
-      assert.match(layer, /\binset\b/, `${name}: outer shadow "${layer.trim()}"`);
-    }
+  const shadow = setup.match(/box-shadow: ?([^;]+);/)?.[1] ?? "";
+  for (const layer of shadow.split(/,(?![^(]*\))/).filter((l) => l.trim())) {
+    assert.match(layer, /\binset\b/, `setup.html: outer shadow "${layer.trim()}"`);
   }
 });
 
-test("both screens: the window material is rounded with the card's radius", () => {
+test("setup screen: the window material is rounded with the card's radius", () => {
   const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
   const swift = Number(read("./SprintBoard.swift").match(/^let CARD_RADIUS: CGFloat = (\d+)$/m)?.[1]);
   assert.ok(swift > 0, "CARD_RADIUS not found");
-  for (const f of ["./view.html", "./setup.html"]) {
-    const css = read(f).match(/#card \{([^}]*)\}/)?.[1] ?? "";
-    assert.equal(css.match(/border-radius: ?([^;]+);/)?.[1], `${swift}px`, f);
-  }
+  const css = read("./setup.html").match(/#card \{([^}]*)\}/)?.[1] ?? "";
+  assert.equal(css.match(/border-radius: ?([^;]+);/)?.[1], `${swift}px`);
 });
 
-test("both screens: the same panel colours and window buttons", () => {
+test("setup screen: its panel colours and window buttons", () => {
   const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
   // Tokens per scheme ("light" before the dark media query, "dark" inside it) and selector.
   const tokens = (page) => {
@@ -727,56 +722,49 @@ test("both screens: the same panel colours and window buttons", () => {
   };
   const buttons = (page) => Object.fromEntries([...page.matchAll(/(?:\.hdr )?(\.tl[\w.:-]*) \{([^}]*)\}/g)]
     .map(([, sel, body]) => [sel, body.replace(/\s+/g, " ").replace(/\s*([:;])\s*/g, "$1").trim()]));
-  const [view, setup] = [read("./view.html"), read("./setup.html")];
-  const [tv, ts] = [tokens(view), tokens(setup)];
+  const setup = read("./setup.html");
+  const ts = tokens(setup);
   for (const key of ["light :root --panel", "light :root --fill",
     "dark :root --panel", "dark :root --fill"]) {
-    assert.ok(key in tv && key in ts, `${key} missing`);
+    assert.ok(key in ts, `${key} missing`);
   }
-  for (const key of Object.keys(ts).filter((k) => k in tv)) assert.equal(ts[key], tv[key], key);
-  const [bv, bs] = [buttons(view), buttons(setup)];
-  assert.deepEqual(Object.keys(bv).sort(), [".tl", ".tl.close", ".tl.fill", ".tl.min", ".tl:hover"]);
-  assert.deepEqual(bs, bv);
+  assert.deepEqual(Object.keys(buttons(setup)).sort(), [".tl", ".tl.close", ".tl.fill", ".tl.min", ".tl:hover"]);
 });
 
 test("both screens: the page function Swift calls after fill mode exists", () => {
   const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
   // Swift guards the call with `&&`, so a renamed function would fail silently.
   assert.match(read("./SprintBoard.swift"), /evaluateJavaScript\("window\.sbFit && window\.sbFit\(\)"\)/);
-  for (const f of ["./view.html", "./setup.html"]) assert.match(read(f), /^\s*window\.sbFit = /m, f);
+  assert.match(read("./setup.html"), /^\s*window\.sbFit = /m);
+  // The tab pages get theirs from the widget's page script.
+  assert.match(read("./SprintBoard.swift"), /^let WIDGET_PAGE_SCRIPT = [\s\S]*?^\s*window\.sbFit = /m);
 });
 
 test("both screens: a trackpad swipe does not pull the card off the window", () => {
   const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
-  for (const f of ["./view.html", "./setup.html"]) {
+  for (const f of ["./popover/sprints.html", "./popover/settings.html", "./setup.html"]) {
     assert.match(read(f), /^\s*html \{[^}]*\boverscroll-behavior: none;/m, f);
   }
 });
 
-test("board page: panel-only rules hide the widget's window buttons and let a tall board scroll", () => {
+test("board page: the page has no window buttons of its own, and a tall board scrolls", () => {
   const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
-  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
-  // The popover's page has no window buttons; it shows the popover material behind the board.
+  // The tab header holds the window buttons; the page shows the window material behind the board.
   assert.doesNotMatch(sprints, /class="lights"|data-win/);
   assert.match(sprints, /#card \{ padding: 14px 16px 16px; \}/);
   assert.match(sprints, /html, body \{[^}]*overflow-y: auto;/);
-  // The widget's own rule stays: its window is cut to the card and must never scroll.
-  assert.match(view, /html, body \{[^}]*overflow: hidden;/);
 });
 
-test("board page: the panel takes the Hosts tab's greys, the widget keeps the system greys", () => {
+test("board page: the page takes the Hosts tab's greys", () => {
   const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
-  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
   const css = sprints.slice(0, sprints.indexOf("</style>"));
   assert.match(css, /--t1: rgba\(255,255,255,\.96\); --t2: rgba\(255,255,255,\.8\); --t3: rgba\(255,255,255,\.62\);/);
-  // A system grey written directly would fade on the popover.
+  // A system grey written directly would fade on the window material.
   assert.doesNotMatch(css, /-apple-system-(secondary|tertiary)-label/);
-  assert.match(view.slice(0, view.indexOf("</style>")), /color:-apple-system-secondary-label/);
 });
 
-test("board page: in the panel every status folds, Done and Released on Prod start folded, the widget draws them all", () => {
+test("board page: every status folds, and Done and Released on Prod start folded", () => {
   const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
-  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
   // The team goal's tasks open from its card, below the cards; they start folded.
   assert.match(sprints, /const open = isOpen\("goals", false\);/);
   assert.match(sprints, /\$\{g && isOpen\("goals", false\) \? foldBody\("goals", goalPanel\(g\)\) : ""\}/);
@@ -794,9 +782,6 @@ test("board page: in the panel every status folds, Done and Released on Prod sta
   assert.equal(isOpen.isOpen("status:In Review", true), true);
   isOpen.FOLD.set("status:In Review", false);
   assert.equal(isOpen.isOpen("status:In Review", true), false);
-  // The widget draws every status.
-  assert.match(view, /\n\s*\$\{g\.tasks\.map\(taskRow\)\.join\(""\)\}`\)\.join\(""\)\}/);
-  assert.doesNotMatch(view, /data-fold/);
 });
 
 test("board page: in the panel a list folds and opens with motion, and the popover gets its final height once", async () => {
@@ -884,9 +869,8 @@ test("board page: in the panel a list folds and opens with motion, and the popov
   assert.deepEqual(refolded.log.filter(([kind]) => kind === "draw" || kind === "fit"), [["draw"], ["draw"], ["fit"]]);
 });
 
-test("board page: in the panel the goal counts leave out the empty ones and each row fades from its risk colour", () => {
+test("board page: the goal counts leave out the empty ones and each row fades from its risk colour", () => {
   const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
-  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
   const start = sprints.indexOf("  const RISK_WORD = {");
   const end = sprints.indexOf("\n  const goalPanel = ", start);
   assert.ok(start > 0 && end > start);
@@ -921,9 +905,6 @@ test("board page: in the panel the goal counts leave out the empty ones and each
   for (const [risk, colour] of [["red", "red"], ["yellow", "yellow"], ["ok", "gray"], ["done", "green"]]) {
     assert.match(sprints, new RegExp(`\\.grow\\.${risk} \\{ --risk: -apple-system-${colour}; \\}`), risk);
   }
-  // The widget's goal band keeps every count and its dots.
-  assert.match(view, /\$\{ok \? `<span class="val">/);
-  assert.match(view, /<div class="summary">\$\{\["red", "yellow", "ok", "done"\]\.map\(\(k\) =>\n\s*`<span><span class="dot \$\{k\}"><\/span>\$\{count\[k\]\} \$\{RISK_WORD\[k\]\}<\/span>`\)/);
 });
 
 test("board page: in the panel a row's gradient ends in its icon's colour", () => {
@@ -936,9 +917,8 @@ test("board page: in the panel a row's gradient ends in its icon's colour", () =
   }
 });
 
-test("board page: in the panel the icon of work under way follows its status", () => {
+test("board page: the icon of work under way follows its status", () => {
   const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
-  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
   const of = (page, prefix) => {
     const start = page.indexOf("  const workIcon = (t) => {");
     const end = page.indexOf("\n  };", start);
@@ -952,16 +932,12 @@ test("board page: in the panel the icon of work under way follows its status", (
   assert.equal(icon({ status: "Ready To Test" }), "checklist");
   assert.equal(icon({ status: "Design UAT" }), "checklist");
   assert.equal(icon({ status: "In Progress" }), "circle.lefthalf.filled");
-  // The widget keeps one icon for all work under way.
-  assert.match(view, /: t\.statusCategory === "new" \? sym\("circle", "c-gray"\) : sym\("circle\.lefthalf\.filled", "c-blue"\);/);
 });
 
-test("board page: in the panel the header holds the buttons, cards replace the bars, and every PR stays reachable", () => {
+test("board page: the header holds the buttons, cards replace the bars, and every PR stays reachable", () => {
   const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
-  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
-  // The buttons sit in the header in the popover, under the progress bar in the widget.
+  // The buttons sit in the header.
   assert.match(sprints, /<div class="hdr">\s*<span class="name">[^\n]*<\/span>\s*<span class="tools"><span class="rf expand" id="rf"/);
-  assert.match(view, /<div class="under"><span>\$\{d\.done\} of \$\{d\.total\} done<\/span>\s*<span class="tools"><span class="rf" id="rf"/);
   assert.match(sprints, /\$\{topHtml\(d\)\}/);
   // The refresh button shows the data's age when hovered, kept current while the popover is open.
   assert.match(sprints, /<span class="when" id="ago">Updated \$\{ago\(d\.generatedAt\)\}<\/span>/);
@@ -1020,9 +996,8 @@ test("board page: the panel shows how old the data is, not a time that reads as 
   assert.equal(ago(before(90)), "1 h ago");
 });
 
-test("board page: in the panel GitHub splits into what needs you and what waits on others", () => {
+test("board page: GitHub splits into what needs you and what waits on others", () => {
   const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
-  const view = readFileSync(new URL("./view.html", import.meta.url), "utf8");
   const start = sprints.indexOf("  const githubSplit = (d) => {");
   const end = sprints.indexOf("\n  };", start);
   assert.ok(start > 0 && end > start);
@@ -1048,12 +1023,10 @@ test("board page: in the panel GitHub splits into what needs you and what waits 
     pullRequests: [{ number: 3, repo: "c", kind: "conflict", reasons: ["conflict"] }, { number: 4, repo: "d", kind: "checking" }],
   });
   const heads = [...html.matchAll(/<div class="(h|ghd[^"]*)"[^>]*>([^<]*)<span class="n">(\d+)<\/span>/g)].map((m) => `${m[2].trim()} ${m[3]}`);
-  // The widget's order: Waiting, Awaiting your review, Merge blocked.
+  // The order: Waiting, Awaiting your review, Merge blocked.
   assert.deepEqual(heads, ["GitHub 4", "Waiting For Review 1", "Awaiting Your Review 1", "Merge Blocked 2"]);
-  // A PR GitHub has not settled sits under Merge Blocked, after the blocked ones, as in the widget.
+  // A PR GitHub has not settled sits under Merge Blocked, after the blocked ones.
   assert.ok(html.indexOf("Merge Blocked") < html.indexOf("c#3") && html.indexOf("c#3") < html.indexOf("d#4"));
-  const widget = view.slice(view.indexOf('<div class="zone">GITHUB</div>'), view.indexOf("${d.update"));
-  assert.ok(widget.indexOf('band("waiting"') < widget.indexOf('band("review"') && widget.indexOf('band("review"') < widget.indexOf("prBand("));
   // A folded section keeps its header and drops its rows.
   assert.match(html, /data-fold="github:waiting" data-open="0">Waiting For Review/);
   assert.doesNotMatch(html, /b#2/);
@@ -1072,20 +1045,17 @@ test("board page: every SF Symbol the page names is in the list Swift injects", 
     const named = [...page.matchAll(/sym\((?:[\w.]+ \? )?"([^"]+)"(?: : "([^"]+)")?/g)].flatMap((m) => m.slice(1).filter(Boolean));
     return { mapped, used: named.concat(mapped) };
   };
-  const view = names(read("./view.html"));
   const sprints = names(read("./popover/sprints.html"));
-  assert.ok(view.mapped.includes("checkmark"));
   assert.ok(sprints.mapped.includes("arrow.triangle.merge") && sprints.mapped.includes("checkmark"));
   assert.ok(sprints.used.includes("chevron.down") && sprints.used.includes("chevron.up"));
-  for (const [page, { used }] of [["view.html", view], ["popover/sprints.html", sprints]]) {
-    assert.deepEqual(used.filter((name) => !known.has(name)), [], page);
-  }
+  assert.deepEqual(sprints.used.filter((name) => !known.has(name)), []);
 });
 
 test("panel tabs: each tab's page exists and reports its height to its own handler", () => {
   const read = (f) => readFileSync(new URL(f, import.meta.url), "utf8");
   const block = read("./SprintBoard.swift").match(/^let PANEL_TABS[^\n]*\n([\s\S]*?)^\]/m)?.[1] ?? "";
-  const tabs = [...block.matchAll(/\("([^"]+)", "([^"]+)", "([^"]+)"\)/g)].map(([, title, page, handler]) => ({ title, page, handler }));
+  const handlers = { Sprint: "sb", Hosts: "hosts" };
+  const tabs = [...block.matchAll(/\("([^"]+)", "([^"]+)"\)/g)].map(([, title, page]) => ({ title, page, handler: handlers[title] }));
   assert.deepEqual(tabs.map((t) => t.title), ["Sprint", "Hosts"]);
   for (const { page, handler } of tabs) {
     // A page posting to another tab's handler would be ignored, and the panel would stay
@@ -1098,12 +1068,12 @@ test("panel tabs: each tab's page exists and reports its height to its own handl
   }
 });
 
-test("panel tabs: panel pages get the SF Symbol style sheet, as the widget does", () => {
+test("widget tabs: the Hosts and Settings pages get the SF Symbol style sheet, as the board does", () => {
   const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
-  // Without it every icon on the panel's board is blank, while the widget looks right.
-  const panel = swift.match(/func makePanelWebView[\s\S]*?\n    \}\n/)?.[0] ?? "";
-  assert.ok(panel, "makePanelWebView not found");
-  assert.match(panel, /addUserScript\(script\)/);
+  // Without it every icon on the Hosts and Settings pages is blank, while the board looks right.
+  const page = swift.match(/func makeTabWebView[\s\S]*?\n    \}\n/)?.[0] ?? "";
+  assert.ok(page, "makeTabWebView not found");
+  assert.match(page, /addUserScript\(script\)/);
   assert.match(swift, /if let script = symbolScript\(\) \{ cfg\.userContentController\.addUserScript\(script\) \}\n\n\s*let frame = savedFrame\(\)/);
 });
 
@@ -1120,10 +1090,10 @@ test("release build: every page is copied into the bundle", () => {
   // A development build reads pages from the repo, so a page missing from this list only
   // breaks the distributed app.
   const script = readFileSync(new URL("./build-app.sh", import.meta.url), "utf8");
-  const line = script.match(/^\s*cp ([^\n]*\bview\.html\b[^\n]*)"\$APP\/Contents\/Resources\/"$/m)?.[1] ?? "";
+  const line = script.match(/^\s*cp (fetch\.mjs [^\n]*)"\$APP\/Contents\/Resources\/"$/m)?.[1] ?? "";
   const copied = line.trim().split(/\s+/);
   const pages = readdirSync(new URL(".", import.meta.url)).filter((f) => f.endsWith(".html"));
-  assert.ok(pages.length >= 2);
+  assert.deepEqual(pages, ["setup.html"]);
   for (const page of pages) assert.ok(copied.includes(page), `${page} is not in build-app.sh's release copy list`);
   // The popover's pages travel as one folder.
   assert.match(script, /^\s*cp -R popover "\$APP\/Contents\/Resources\/"$/m);
@@ -3427,16 +3397,16 @@ test("refresh: a fetch that ran while the account left is dropped, and the accou
   assert.ok(push.indexOf("generation != self.boardGeneration") < push.indexOf("self.lastJSON = json"));
 });
 
-test("settings: while the user browses Settings the panel keeps refreshing; a setup screen that opened itself stops it", () => {
+test("settings: while the user browses Settings the widget keeps refreshing; a setup screen stops it", () => {
   const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
-  assert.match(src, /var setupBlocksFetch: Bool \{ onSetupScreen && !browsingSettings \}/);
-  // Only Settings opened by the user while signed in lets refreshes through.
-  assert.match(src, /func menuSetup\(\) \{\n\s*manualRefreshPending = false\n\s*setupFromSettings = !needsSetup\(\)\n\s*browsingSettings = setupFromSettings/);
-  assert.match(src, /self\.setupFromSettings = canGoBack\n\s*self\.browsingSettings = false/);
-  // The refresh, its result and the panel's ⟳ all ask the same question.
+  assert.match(src, /var setupBlocksFetch: Bool \{ onSetupScreen \}/);
+  // Settings is a page over the tabs, not a setup screen, so refreshes go on.
+  assert.doesNotMatch(methodSource(src, "showWidgetSettings"), /onSetupScreen = true/);
+  assert.match(src, /func menuSetup\(\) \{\n\s*manualRefreshPending = false\n\s*setupFromSettings = false\n\s*onSetupScreen = true/);
+  assert.match(src, /self\.setupFromSettings = canGoBack\n/);
+  // The refresh and its result ask the same question.
   assert.match(src, /if setupBlocksFetch \{ manualRefreshPending = false; return \}/);
   assert.match(src, /if self\.setupBlocksFetch \{ return \}/);
-  assert.match(src, /if setupBlocksFetch, let w = msg\.webView, loadedBoards\.contains\(w\) \{/);
   assert.doesNotMatch(src, /if self\.onSetupScreen \{ return \}/);
 });
 
@@ -3448,48 +3418,47 @@ function methodSource(src, name) {
   return src.slice(at + 1, end + 7);
 }
 
-test("settings in the panel: the gear and Settings… open the setup page inside the panel, never the widget", () => {
+test("settings in the widget: the gears and Settings… open the Settings page over the tabs", () => {
   const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
-  // The panel's own setup page, on the board's handler, over the whole panel.
-  assert.match(src, /panelSetupWeb = makePanelWebView\(handler: "sb"\)\n\s*panelSetupWeb\.frame = NSRect\(origin: \.zero, size: size\)/);
-  assert.match(src, /if body\["settings"\] != nil, !fromWidget \{ showPanelSettings\(\) \}/);
+  // The Settings page, on the board's handler, over the tabs.
+  assert.match(src, /widgetSettingsWeb = makeTabWebView\(handler: "sb"\)/);
+  assert.match(src, /if body\["settings"\] != nil \{ menuSettings\(\) \}/);
   assert.match(src, /NSMenuItem\(title: "Settings…", action: #selector\(menuSettings\)/);
-  assert.match(methodSource(src, "menuSettings"), /if !panel\.isShown \{ togglePanel\(\) \}\n\s*showPanelSettings\(\)/);
-  // Shown over the tabs and their header; the back arrow returns to the tab that was open.
-  const show = methodSource(src, "showPanelSettings");
+  assert.match(methodSource(src, "menuSettings"), /\} else if needsSetup\(\) \{\n\s*menuSetup\(\)\n\s*\} else \{\n\s*showWidgetSettings\(\)/);
+  // Shown over the tabs; the back arrow returns to the tab that was open.
+  const show = methodSource(src, "showWidgetSettings");
   // Loaded once, with the tabs; each opening fills it first and shows it after, at its new height.
-  assert.equal((src.match(/loadPage\("popover\/settings\.html", in: panelSetupWeb\)/g) || []).length, 1);
-  assert.match(methodSource(src, "setUpPanel"), /loadPage\("popover\/settings\.html", in: panelSetupWeb\)/);
-  assert.match(show, /fillPanelSettings \{ \[weak self\] height in[\s\S]*?self\.panelPageHeights\[self\.panelSetupWeb\] = height[\s\S]*?self\.showPanelPage\(self\.panelSetupWeb\)/);
-  assert.match(methodSource(src, "fillPanelSettings"), /window\.sbSettingsShow \? window\.sbSettingsShow\(\.\.\.\\\(args\)\) : null/);
-  assert.match(methodSource(src, "showPanelPage"), /self\.tabControl\.isHidden = page === self\.panelSetupWeb/);
-  assert.match(methodSource(src, "hidePanelSettings"), /selectPanelTab\(tabControl\.selectedSegment\)/);
-  assert.match(methodSource(src, "fitPanel"), /let header = shown === panelSetupWeb \? 0 : PANEL_HEADER_HEIGHT/);
-  assert.match(src, /panelTabs\.contains\(w\) \|\| w === panelSetupWeb, let h = body\["height"\]/);
-  // The board's message no longer sends anyone to the widget.
+  assert.equal((src.match(/loadPage\("popover\/settings\.html", in: widgetSettingsWeb\)/g) || []).length, 1);
+  assert.match(methodSource(src, "setUpWidgetTabs"), /loadPage\("popover\/settings\.html", in: widgetSettingsWeb\)/);
+  assert.match(show, /fillWidgetSettings \{ \[weak self\] height in[\s\S]*?self\.widgetPageHeights\[self\.widgetSettingsWeb\] = height[\s\S]*?self\.swapWidgetPage\(\)/);
+  assert.match(methodSource(src, "fillWidgetSettings"), /window\.sbSettingsShow \? window\.sbSettingsShow\(\.\.\.\\\(args\)\) : null/);
+  assert.match(methodSource(src, "layoutWidget"), /widgetTabControl\.isHidden = target === widgetSettingsWeb/);
+  assert.match(methodSource(src, "hideWidgetSettings"), /widgetSettingsShown = false\n\s*swapWidgetPage/);
+  assert.match(src, /widgetPages\.contains\(w\), let posted = body\["height"\]/);
+  // The board's message never sends anyone elsewhere.
   assert.doesNotMatch(src, /Action needed in the Sprint Board window/);
-  assert.match(src, /Open Settings with the gear button\./);
 });
 
-test("settings in the panel: it signs in, saves and disconnects like the widget; the board page cannot", () => {
+test("settings in the widget: it signs in, saves and disconnects like the setup screen; the board page cannot", () => {
   const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
-  assert.match(src, /let fromSetupPage = fromWidget \|\| fromPanelSetup/);
+  assert.match(src, /let fromSetupPage = fromWidget \|\| fromSettingsPage/);
   assert.match(src, /if body\["atlassianLogin"\] != nil, fromSetupPage \{\n\s*setupResultTarget = msg\.webView/);
   assert.match(src, /if fromSetupPage, let t = body\["tokenLogin"\][\s\S]{0,200}?setupResultTarget = msg\.webView/);
-  assert.match(src, /let setupOpen = \(fromWidget && onSetupScreen\) \|\| fromPanelSetup/);
+  assert.match(src, /let setupOpen = \(fromWidget && onSetupScreen\) \|\| fromSettingsPage/);
   assert.match(src, /if let s = body\["saveSettings"\] as\? \[String: Any\], setupOpen, let page = msg\.webView \{ saveSettings\(s, reply: page\) \}/);
   assert.match(src, /if body\["disconnect"\] != nil, setupOpen \{ disconnect\(\) \}/);
   // Results go back to the page that asked.
   assert.match(methodSource(src, "setupFailed"), /\(self\.setupResultTarget \?\? self\.web\)\.evaluateJavaScript/);
   assert.match(methodSource(src, "settingsResult"), /page\.evaluateJavaScript/);
-  // Back: closes the page, or retries when the page stopped the refreshes (keychain refused).
-  assert.match(src, /if setupBlocksFetch, setupFromSettings \{ showBoard\(\) \} else \{ hidePanelSettings\(\) \}/);
-  // A finished sign-in or Back to board closes the panel's page too; Disconnect shows its sign-in block.
-  assert.match(methodSource(src, "showBoard"), /hidePanelSettings\(\)/);
-  assert.match(methodSource(src, "disconnect"), /if panelSettingsShown \{ fillPanelSettings\(\) \}/);
+  // Back: the setup screen goes to the board and retries; the Settings page returns to its tab.
+  assert.match(src, /if body\["backToBoard"\] != nil, fromWidget, onSetupScreen \{ showBoard\(\) \}/);
+  assert.match(src, /if body\["backToBoard"\] != nil, fromSettingsPage \{ hideWidgetSettings\(\) \}/);
+  // A finished sign-in or Back to board closes the Settings page too; Disconnect shows the sign-in screen.
+  assert.match(methodSource(src, "showBoard"), /widgetSettingsShown = false/);
+  assert.match(methodSource(src, "disconnect"), /widgetSettingsShown = false[\s\S]*?loadPage\("setup\.html"\)/);
 });
 
-test("settings in the panel: the page stays loaded, so each opening first clears what the last one left", () => {
+test("settings in the widget: the page stays loaded, so each opening first clears what the last one left", () => {
   const page = readFileSync(new URL("./popover/settings.html", import.meta.url), "utf8");
   const start = page.indexOf("  window.sbSettingsShow = (ctx, errors) => {");
   const end = page.indexOf("\n  };", start);
@@ -3505,19 +3474,16 @@ test("settings in the panel: the page stays loaded, so each opening first clears
   assert.match(show, /if \(errors\.length\) window\.sbSetupResult\(\{ errors \}\);\n\s*return \$\("card"\)\.offsetHeight;$/);
 });
 
-test("settings in the panel: a needed sign-in opens in the panel and a closed widget stays closed", () => {
+test("settings in the widget: a needed sign-in leaves Settings for the setup screen, and a closed widget stays closed", () => {
   const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   const login = methodSource(src, "requireLogin");
-  assert.match(login, /let widgetClosed = !self\.window\.isVisible && !self\.window\.isMiniaturized\n\s*if self\.panel\.isShown \|\| widgetClosed \{/);
-  assert.ok(login.indexOf("widgetClosed {") < login.indexOf("self.lendWidgetToSetup()"), "the panel path comes before the widget is lent");
-  assert.match(methodSource(src, "togglePanel"), /if setupBlocksFetch, !panelSettingsShown \{ showPanelSettings\(\) \}/);
-  // The panel's page shows the account only when no sign-in is needed, and the reason when it is.
-  const fill = methodSource(src, "fillPanelSettings");
-  assert.match(fill, /let signInNeeded = onSetupScreen && !setupFromSettings/);
-  assert.match(fill, /if !signInNeeded, let raw = [\s\S]*?let signedIn = setupContext\(cfg\)/);
-  assert.match(fill, /let errors = setupBlocksFetch \? \[setupReason\]\.compactMap \{ \$0 \} : \[\]/);
+  assert.match(login, /self\.widgetSettingsShown = false/);
+  assert.match(login, /let widgetClosed = !self\.window\.isVisible && !self\.window\.isMiniaturized\n\s*if widgetClosed \{/);
+  assert.ok(login.indexOf("widgetClosed {") < login.indexOf("self.lendWidgetToSetup()"), "the closed path comes before the widget is lent");
+  // The page shows the account when the config holds one.
+  assert.match(methodSource(src, "fillWidgetSettings"), /let raw = [\s\S]*?let signedIn = setupContext\(cfg\)/);
   // Opened before its first load finished: filled when it finishes.
-  assert.match(src, /if w === panelSetupWeb, panelSettingsShown \{ fillPanelSettings\(\) \}/);
+  assert.match(src, /if w === widgetSettingsWeb, widgetSettingsShown \{ fillWidgetSettings\(\) \}/);
 });
 
 test("panel pages: the gear and the back arrow never come back hovered after their page swaps", () => {
@@ -3531,15 +3497,14 @@ test("panel pages: the gear and the back arrow never come back hovered after the
   assert.match(src, /source: PANEL_PAGE_SCRIPT, injectionTime: \.atDocumentStart/);
   // One way to change the page: the page being left turns hover off and paints that, then the
   // two pages trade places in one step (no overlap); a stuck frame cannot block the swap.
-  const swap = methodSource(src, "showPanelPage");
+  const swap = methodSource(src, "swapWidgetPage");
   assert.match(swap, /leaving\.callAsyncJavaScript\("\\\(hoverOff\); await new Promise\(\(done\) => requestAnimationFrame\(\(\) => requestAnimationFrame\(done\)\)\)"/);
-  assert.match(swap, /for w in self\.panelTabs \+ \[self\.panelSetupWeb!\] \{ w\.isHidden = w !== page \}/);
+  assert.match(methodSource(src, "layoutWidget"), /for page in widgetPages \{ page\.isHidden = page !== target \}/);
   assert.match(swap, /asyncAfter\(deadline: \.now\(\) \+ 0\.2\) \{ swap\(\) \}/);
-  // Only a closed panel (nothing on screen to paint) or the first page swaps at once.
-  assert.match(swap, /guard let leaving, leaving !== page, panel\.isShown else \{\n\s*leaving\?\.evaluateJavaScript\(hoverOff\)\n\s*swap\(\)/);
-  assert.match(swap, /guard self\.shownPanelPage === page else \{ return \}/);
-  assert.match(methodSource(src, "selectPanelTab"), /showPanelPage\(panelTabs\[index\]\)/);
-  assert.match(methodSource(src, "popoverWillClose"), /shownPanelPage\?\.evaluateJavaScript\("document\.documentElement\.classList\.add\('nohover'\)"\)/);
+  // Only a hidden widget (nothing on screen to paint) or the same page swaps at once.
+  assert.match(swap, /guard leaving !== page, window\.isVisible else \{\n\s*leaving\.evaluateJavaScript\(hoverOff\)\n\s*swap\(\)/);
+  assert.match(swap, /guard self\.widgetTargetPage === page else \{ return \}/);
+  assert.match(methodSource(src, "widgetTabChanged"), /swapWidgetPage \{/);
   // Only the two buttons that swap pages wait for the move; no other hover is touched.
   assert.match(view, /\n  :where\(html:not\(\.nohover\)\) \.rf:hover \{ background: var\(--hover\); color: -apple-system-label; \}/);
   assert.match(setup, /:where\(html:not\(\.nohover\)\) \.back:hover \{/);
@@ -3600,7 +3565,7 @@ test("Hosts tab: opening the tab only reads /etc/hosts; only a change writes it 
   assert.equal((message.match(/scheduleChromeRefresh\(\)/g) || []).length, 1);
   assert.ok(message.indexOf(`if body["status"] == nil,`) < message.indexOf("scheduleChromeRefresh()"));
   // Showing the tab asks for a status and nothing else.
-  assert.match(methodSource(swift, "selectPanelTab"), /self\.hostsMessage\(\["status": true\]\)/);
+  assert.match(methodSource(swift, "widgetTabChanged"), /self\.hostsMessage\(\["status": true\]\)/);
 });
 
 test("Hosts tab: nothing is redrawn and no key acts while a reply is on its way, so a comma-separated add counts only Swift's replies", () => {
@@ -3639,8 +3604,8 @@ test("Hosts tab: while an action waits, a state Swift sent on its own is not tak
 
 test("Hosts tab: a gear opens Settings, and the back arrow returns to Hosts", () => {
   const swift = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
-  assert.match(methodSource(swift, "hostsMessage"), /if body\["settings"\] != nil \{\n\s*showPanelSettings\(\)\n\s*return\n\s*\}/);
-  assert.match(methodSource(swift, "hidePanelSettings"), /selectPanelTab\(tabControl\.selectedSegment\)/);
+  assert.match(methodSource(swift, "userContentController"), /if msg\.name == "hosts" \{[^\n]*\n[^\n]*\n\s*if body\["settings"\] != nil \{ menuSettings\(\) \} else \{ hostsMessage\(body\) \}/);
+  assert.match(methodSource(swift, "hideWidgetSettings"), /self\.widgetShownPage === self\.hostsWeb \{ self\.hostsMessage\(\["status": true\]\) \}/);
   assert.match(swift.match(/^let PAGE_SYMBOLS = \[([\s\S]*?)^\]/m)[1], /"gearshape"/);
   const page = readFileSync(new URL("./popover/hosts.html", import.meta.url), "utf8");
   // The last header button, as the gear is on the Sprint tab.
@@ -3649,6 +3614,141 @@ test("Hosts tab: a gear opens Settings, and the back arrow returns to Hosts", ()
   // It swaps the page, so its hover waits for a real mouse move; the other buttons keep theirs.
   assert.match(page, /:where\(html:not\(\.nohover\)\) #gearBtn:hover \{/);
   assert.match(page, /\.icon:not\(#gearBtn\):hover, \.icon\.on \{/);
+});
+
+let widgetDriver;
+function widgetRun(ops) {
+  if (!widgetDriver) {
+    const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+    const constant = (name) => {
+      const m = src.match(new RegExp(`^let ${name}[^\\n]*(?:= \\[\\n[\\s\\S]*?^\\]|=[^\\n]*)$`, "m"));
+      assert.ok(m, `${name} not found`);
+      return m[0];
+    };
+    const driver = `import Foundation
+${constant("PANEL_TABS")}
+${constant("PANEL_HEADER_HEIGHT")}
+${swiftSource(src, "widgetTabIndex")}
+${swiftSource(src, "widgetPageName")}
+${swiftSource(src, "widgetWindowHeight")}
+let ops = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [[String: Any]]
+let out: [Any] = ops.map { op in
+    switch op["op"] as! String {
+    case "tab": return widgetTabIndex(op["saved"] as! Int)
+    case "page": return widgetPageName(onSetupScreen: op["setup"] as! Bool, settingsShown: op["settings"] as! Bool, tab: op["tab"] as! Int)
+    default: return Double(widgetWindowHeight(pageHeight: CGFloat(op["height"] as! Double), onSetupScreen: op["setup"] as! Bool))
+    }
+}
+FileHandle.standardOutput.write(try! JSONSerialization.data(withJSONObject: out))
+`;
+    const dir = mkdtempSync(join(tmpdir(), "sprint-board-widget-"));
+    process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, "main.swift"), driver);
+    execFileSync("swiftc", [join(dir, "main.swift"), "-o", join(dir, "widget")], { stdio: "pipe" });
+    widgetDriver = join(dir, "widget");
+  }
+  return JSON.parse(execFileSync(widgetDriver, { input: JSON.stringify(ops) }));
+}
+
+test("widget tabs: the page follows the tab; Settings goes over the tabs and the setup screen over all", { skip: !swiftAvailable }, () => {
+  const page = (setup, settings, tab) => ({ op: "page", setup, settings, tab });
+  assert.deepEqual(widgetRun([page(false, false, 0), page(false, false, 1), page(false, true, 0), page(false, true, 1), page(true, false, 1), page(true, true, 0)]),
+    ["popover/sprints.html", "popover/hosts.html", "popover/settings.html", "popover/settings.html", "setup.html", "setup.html"]);
+  // The tab bar drives the same answer, and the page the state names is the one on screen.
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(src, /action: #selector\(widgetTabChanged\)/);
+  assert.match(src, /widgetPageName\(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown,\n\s*tab: widgetTabControl\.selectedSegment\)/);
+});
+
+test("widget tabs: the selected tab is kept across launches, and a tab that does not exist gives Sprint", { skip: !swiftAvailable }, () => {
+  assert.deepEqual(widgetRun([0, 1, 2, -1].map((saved) => ({ op: "tab", saved }))), [0, 1, 0, 0]);
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(methodSource(src, "widgetTabChanged"), /UserDefaults\.standard\.set\(widgetTabControl\.selectedSegment, forKey: WIDGET_TAB_KEY\)/);
+  assert.match(methodSource(src, "setUpWidgetTabs"), /integer\(forKey: WIDGET_TAB_KEY\)[\s\S]*?widgetTabControl\.selectedSegment = widgetTabIndex\(saved\)/);
+});
+
+test("widget height: the window follows the page on screen, and only the setup screen has no header", { skip: !swiftAvailable }, () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const header = Number(src.match(/^let PANEL_HEADER_HEIGHT: CGFloat = (\d+)$/m)[1]);
+  assert.deepEqual(widgetRun([{ op: "height", height: 500, setup: false }, { op: "height", height: 500, setup: true }]), [500 + header, 500]);
+  // Each page keeps its own height; a page behind another moves nothing, and a tab change fits again.
+  const message = methodSource(src, "userContentController");
+  assert.match(message, /widgetPageHeights\[w\] = CGFloat\(posted\)\n\s*if w === widgetShownPage \{ fitWidget\(/);
+  assert.match(message, /let posted = body\["height"\] as\? Double, posted > 60 \{/);
+  const fit = methodSource(src, "fitWidget");
+  assert.match(fit, /let height = widgetPageHeights\[widgetShownPage\] else \{ return \}/);
+  assert.match(fit, /f\.origin\.y = top - f\.height/);
+  assert.match(methodSource(src, "layoutWidget"), /fitWidget\(\)\n\s*\}/);
+});
+
+test("widget height: pages without their own sbFit report through the page script, to their own handler", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const script = src.match(/^let WIDGET_PAGE_SCRIPT = #"""\n([\s\S]*?)\n"""#/m)?.[1] ?? "";
+  assert.ok(script);
+  const run = (handlers, own) => {
+    const posted = [], ready = [];
+    const window = { webkit: { messageHandlers: Object.fromEntries(handlers.map((h) => [h, { postMessage: (m) => posted.push([h, m]) }])) } };
+    if (own) window.sbFit = own;
+    const document = { getElementById: () => ({ offsetHeight: 321 }) };
+    new Function("window", "document", "addEventListener", "requestAnimationFrame", script)(
+      window, document, (_, f) => ready.push(f), (f) => f());
+    ready.forEach((f) => f());
+    window.sbFit();
+    return posted;
+  };
+  assert.deepEqual(run(["sb"]), [["sb", { height: 321 }]]);
+  assert.deepEqual(run(["hosts"]), [["hosts", { height: 321 }]]);
+  assert.deepEqual(run(["sb"], () => {}), [], "a page with its own sbFit keeps it");
+});
+
+test("widget Settings: Back returns to the tab, hides a widget that was closed, and an open setup screen only comes forward", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const settings = methodSource(src, "menuSettings");
+  assert.match(settings, /if onSetupScreen \{\n[^\n]*\n\s*NSApp\.activate\(ignoringOtherApps: true\)\n\s*window\.makeKeyAndOrderFront\(nil\)/);
+  assert.ok(settings.indexOf("if onSetupScreen {") < settings.indexOf("needsSetup()"));
+  assert.match(methodSource(src, "showWidgetSettings"), /lendWidgetToSetup\(\)/);
+  const hide = methodSource(src, "hideWidgetSettings");
+  assert.match(hide, /if self\.widgetHiddenBeforeSetup == true \{ self\.window\.orderOut\(nil\) \}\n\s*self\.widgetHiddenBeforeSetup = nil/);
+  // Partner domains saved in Settings reach the Hosts tab at once.
+  assert.match(hide, /self\.hostsMessage\(\["status": true\]\)/);
+  const page = readFileSync(new URL("./popover/settings.html", import.meta.url), "utf8");
+  assert.match(page, /id="partners"/);
+  assert.match(page, /backToBoard: true/);
+});
+
+test("menu bar icon: every click opens the menu; nothing else listens on the button", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(src, /statusItem\.menu = menu\n/);
+  assert.doesNotMatch(src, /statusItem\.button\?\.(action|target|sendAction)/);
+  assert.doesNotMatch(src, /NSPopover/);
+});
+
+test("widget fold: the window edge moves with the page's own time and curve, pinned to the top", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const page = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  const [, duration, a, b, c, d] = page.match(/const FOLD_MOTION = \{ duration: (\d+), easing: "cubic-bezier\(([\d.]+),([\d.]+),([\d.]+),([\d.]+)\)" \};/);
+  assert.equal(Number(src.match(/^let WIDGET_FIT_SECONDS: TimeInterval = ([\d.]+)$/m)?.[1]) * 1000, Number(duration));
+  assert.deepEqual(src.match(/^let WIDGET_FIT_CURVE = CAMediaTimingFunction\(controlPoints: ([\d.]+), ([\d.]+), ([\d.]+), ([\d.]+)\)$/m)?.slice(1).map(Number), [a, b, c, d].map(Number));
+  // Only a later height of the board animates: not a first report, a hidden window, or reduced motion.
+  assert.match(methodSource(src, "userContentController"), /fitWidget\(animated: known && w === web && !onSetupScreen\)/);
+  const fit = methodSource(src, "fitWidget");
+  assert.match(fit, /let move = animated && window\.isVisible && !NSWorkspace\.shared\.accessibilityDisplayShouldReduceMotion/);
+  // A fold reports its height more than once; the second report does not start the move again.
+  assert.match(fit, /if let target = widgetFitTarget \{[^\n]*\n[^\n]*\n\s*if abs\(f\.height - target\) < 0\.5 \{ return \}/);
+  // The pages stay pinned to the top during the move, and only the newest move finishes.
+  assert.match(fit, /if move \{ pinWidgetPages\(windowHeight: f\.height\) \}/);
+  assert.match(fit, /guard let self, run == self\.widgetFitRun else \{ return \}/);
+  assert.match(fit, /for page in self\.widgetPages \{ page\.autoresizingMask = \[\.width, \.height\] \}/);
+  assert.match(methodSource(src, "pinWidgetPages"), /page\.autoresizingMask = \[\.width, \.minYMargin\]/);
+});
+
+test("board page: a 100% ring value stays inside the ring", () => {
+  const page = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
+  assert.match(page, /\.ring \{ width: 48px; height: 48px; flex: none; \}/);
+  const size = Number(page.match(/\.ring text \{ font: 700 ([\d.]+)px /)?.[1]);
+  assert.ok(size <= 7.5, `ring text ${size}`);
+  assert.match(page, /\.ring text \{[^}]*letter-spacing: -\.2px;/);
+  assert.match(page, /r="14" fill="none" stroke="rgba\(255,255,255,\.14\)" stroke-width="4"/);
 });
 
 test("setup screen: in the panel the back arrow, buttons and inputs follow the board's", () => {
@@ -3790,7 +3890,6 @@ final class App {
     var notes: [Any] = []
     var chromeRefreshes = 0
     func replyHosts(_ state: [String: Any], to body: [String: Any]) { replies.append(state) }
-    func showPanelSettings() {}
     func showChromeNote(_ note: String?) { notes.append(note.map { $0 as Any } ?? NSNull()) }
     func refreshChrome() { chromeRefreshes += 1 }
     func currentJiraAccessToken(email: String) -> TokenResult { .needsLogin }
