@@ -228,3 +228,11 @@ test("setup screen: the header and tint hide there, and only there the page take
   assert.match(layout, /header\.isHidden = !tabs\n/);
   assert.match(layout, /widgetTint\?\.isHidden = !tabs\n/);
 });
+
+test("widget page scripts: the board page starts with hover off and can fit the window", () => {
+  const launch = methodSource(readFileSync(SWIFT_URL, "utf8"), "applicationDidFinishLaunching");
+  const config = launch.slice(launch.indexOf("let cfg = WKWebViewConfiguration()"), launch.indexOf("let frame = savedFrame()"));
+  assert.match(config, /for source in \[PANEL_PAGE_SCRIPT, WIDGET_PAGE_SCRIPT\] \{/);
+  assert.match(config, /cfg\.userContentController\.addUserScript\(WKUserScript\(\n\s*source: source, injectionTime: \.atDocumentStart, forMainFrameOnly: true\)\)/);
+  assert.match(launch, /web = DragWebView\(frame: [^\n]*configuration: cfg\)/);
+});

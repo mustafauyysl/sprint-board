@@ -3348,15 +3348,6 @@ test("refresh: saved settings reach the board without waiting for the timer", ()
   assert.match(reload, /self\.fetchInFlight = false\n\s*if generation != self\.boardGeneration \|\| self\.settingsChanged \{ self\.reload\(\) \}/);
 });
 
-test("widget page scripts: the board page starts with hover off and can fit the window", () => {
-  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
-  const launch = methodSource(src, "applicationDidFinishLaunching");
-  const config = launch.slice(launch.indexOf("let cfg = WKWebViewConfiguration()"), launch.indexOf("let frame = savedFrame()"));
-  assert.match(config, /for source in \[PANEL_PAGE_SCRIPT, WIDGET_PAGE_SCRIPT\] \{/);
-  assert.match(config, /addUserScript\(WKUserScript\(\n\s*source: source, injectionTime: \.atDocumentStart, forMainFrameOnly: true\)\)/);
-  assert.match(launch, /web = DragWebView\(frame: [^\n]*configuration: cfg\)/);
-});
-
 test("refresh: a fetch that ran while the account left is dropped, and the account now signed in gets its own", () => {
   const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   assert.match(methodSource(src, "clearBoardData"), /boardGeneration \+= 1/);
