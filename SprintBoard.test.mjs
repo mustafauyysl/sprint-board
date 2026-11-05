@@ -295,3 +295,28 @@ test("popover: a failed sign-in opens the popover that holds the error", () => {
   const failed = methodSource(readFileSync(SWIFT_URL, "utf8"), "setupFailed");
   assert.match(failed, /DispatchQueue\.main\.async \{[\s\S]*sbSetupResult[\s\S]*\n\s*if self\.displayMode == \.popover \{ self\.showHost\(\) \}\n\s*\}\n/);
 });
+
+test("window lights: every button joins widgetLights, the list the switch to Popover mode hides", () => {
+  const tabs = methodSource(readFileSync(SWIFT_URL, "utf8"), "setUpWidgetTabs");
+  assert.match(tabs, /for \(i, light\) in lights\.enumerated\(\) \{[\s\S]*?header\.addSubview\(button\)\n\s*widgetLights\.append\(button\)\n\s*\}/);
+});
+
+test("popover: panelRoot is the view the popover shows", () => {
+  const setUp = methodSource(readFileSync(SWIFT_URL, "utf8"), "setUpPanel");
+  assert.match(setUp, /let content = NSViewController\(\)\n\s*content\.view = panelRoot\n\s*panel\.contentViewController = content\n/);
+});
+
+test("menu bar icon: the button's click goes to the app, set with its action", () => {
+  const launch = methodSource(readFileSync(SWIFT_URL, "utf8"), "applicationDidFinishLaunching");
+  assert.match(launch, /statusItem\.button\?\.target = self\n\s*statusItem\.button\?\.action = #selector\(statusItemClicked\)/);
+});
+
+test("popover: with no screen to measure, the fit assumes a height of 800", () => {
+  const fit = methodSource(readFileSync(SWIFT_URL, "utf8"), "fitPanel");
+  assert.match(fit, /panelContentHeight\([\s\S]*?screenHeight: screen\?\.visibleFrame\.height \?\? 800\)\)/);
+});
+
+test("popover: moveBoard leaves the views alone when the board is already on that host", () => {
+  const move = methodSource(readFileSync(SWIFT_URL, "utf8"), "moveBoard");
+  assert.match(move, /guard let header = widgetHeader, let tint = widgetTint, header\.superview !== host else \{ return \}\n\s*for view in/);
+});
