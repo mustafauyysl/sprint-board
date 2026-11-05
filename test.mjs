@@ -3467,8 +3467,8 @@ test("panel pages: the gear and the back arrow never come back hovered after the
   assert.match(swap, /leaving\.callAsyncJavaScript\("\\\(hoverOff\); await new Promise\(\(done\) => requestAnimationFrame\(\(\) => requestAnimationFrame\(done\)\)\)"/);
   assert.match(methodSource(src, "layoutWidget"), /for page in widgetPages \{ page\.isHidden = page !== target \}/);
   assert.match(swap, /asyncAfter\(deadline: \.now\(\) \+ 0\.2\) \{ swap\(\) \}/);
-  // Only a hidden widget (nothing on screen to paint) or the same page swaps at once.
-  assert.match(swap, /guard leaving !== page, window\.isVisible else \{\n\s*leaving\.evaluateJavaScript\(hoverOff\)\n\s*swap\(\)/);
+  // Only a closed host (nothing on screen to paint) or the same page swaps at once.
+  assert.match(swap, /guard leaving !== page, boardVisible else \{\n\s*leaving\.evaluateJavaScript\(hoverOff\)\n\s*swap\(\)/);
   assert.match(swap, /guard self\.widgetTargetPage === page else \{ return \}/);
   assert.match(methodSource(src, "widgetTabChanged"), /swapWidgetPage \{/);
   // Only the two buttons that swap pages wait for the move; no other hover is touched.
@@ -3597,11 +3597,19 @@ ${constant("PANEL_HEADER_HEIGHT")}
 ${swiftSource(src, "widgetTabIndex")}
 ${swiftSource(src, "widgetPageName")}
 ${swiftSource(src, "widgetWindowHeight")}
+${constant("PANEL_START_HEIGHT")}
+${src.match(/^enum DisplayMode: String \{[\s\S]*?^\}$/m)[0]}
+${swiftSource(src, "displayModeChoice")}
+${swiftSource(src, "boardHeaderShown")}
+${swiftSource(src, "panelContentHeight")}
 let ops = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [[String: Any]]
 let out: [Any] = ops.map { op in
     switch op["op"] as! String {
     case "tab": return widgetTabIndex(op["saved"] as! Int)
     case "page": return widgetPageName(onSetupScreen: op["setup"] as! Bool, settingsShown: op["settings"] as! Bool, tab: op["tab"] as! Int)
+    case "mode": return displayModeChoice(op["stored"]).rawValue
+    case "header": return boardHeaderShown(onSetupScreen: op["setup"] as! Bool, settingsShown: op["settings"] as! Bool, mode: DisplayMode(rawValue: op["mode"] as! String)!)
+    case "panel": return Double(panelContentHeight(pageHeight: (op["page"] as? Double).map { CGFloat($0) }, header: CGFloat(op["header"] as! Double), screenHeight: CGFloat(op["screen"] as! Double)))
     default: return Double(widgetWindowHeight(pageHeight: CGFloat(op["height"] as! Double), onSetupScreen: op["setup"] as! Bool))
     }
 }
@@ -3670,7 +3678,7 @@ test("widget height: pages without their own sbFit report through the page scrip
 test("widget Settings: Back returns to the tab, hides a widget that was closed, and an open setup screen only comes forward", () => {
   const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   const settings = methodSource(src, "menuSettings");
-  assert.match(settings, /if onSetupScreen \{\n[^\n]*\n\s*NSApp\.activate\(ignoringOtherApps: true\)\n\s*window\.makeKeyAndOrderFront\(nil\)/);
+  assert.match(settings, /if onSetupScreen \{\n[^\n]*\n\s*showHost\(\)/);
   assert.ok(settings.indexOf("if onSetupScreen {") < settings.indexOf("needsSetup()"));
   assert.match(methodSource(src, "showWidgetSettings"), /lendWidgetToSetup\(\)/);
   const hide = methodSource(src, "hideWidgetSettings");
@@ -3682,11 +3690,154 @@ test("widget Settings: Back returns to the tab, hides a widget that was closed, 
   assert.match(page, /backToBoard: true/);
 });
 
-test("menu bar icon: every click opens the menu; nothing else listens on the button", () => {
+test("menu bar icon: in Widget mode every click opens the menu; in Popover mode a left click toggles the popover", () => {
   const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
-  assert.match(src, /statusItem\.menu = menu\n/);
-  assert.doesNotMatch(src, /statusItem\.button\?\.(action|target|sendAction)/);
-  assert.doesNotMatch(src, /NSPopover/);
+  const apply = methodSource(src, "applyDisplayMode");
+  assert.match(apply, /statusItem\.menu = popover \? nil : statusMenu\n/);
+  // An attached menu takes every click, so the button's action fires only in Popover mode.
+  assert.match(src, /statusItem\.button\?\.action = #selector\(statusItemClicked\)/);
+  assert.match(src, /statusItem\.button\?\.sendAction\(on: \[\.leftMouseUp, \.rightMouseUp\]\)/);
+  const click = methodSource(src, "statusItemClicked");
+  assert.match(click, /event\.type == \.rightMouseUp \|\| event\.modifierFlags\.contains\(\.control\)/);
+  assert.match(click, /panel\.performClose\(nil\)\n\s*statusItem\.menu = statusMenu\n\s*statusItem\.button\?\.performClick\(nil\)\n\s*statusItem\.menu = nil\n\s*return/);
+  assert.ok(click.indexOf("performClick") < click.indexOf("togglePanel()"), "a right click never toggles the popover");
+  // The mouse-down that closes the popover must not reopen it on its mouse-up.
+  assert.match(click, /if let closedAt = panelClosedByIconAt, event\.timestamp - closedAt < 1 \{/);
+  assert.match(methodSource(src, "popoverWillClose"), /panelClosedByIconAt = event\.timestamp/);
+  // Quit stays in the menu, and the menu stays reachable in both modes.
+  assert.match(src, /NSMenuItem\(title: "Quit Sprint Board", action: #selector\(NSApplication\.terminate\(_:\)\)/);
+  assert.match(src, /statusMenu = menu\n/);
+});
+
+test("display mode: with no stored choice, or an unknown one, the app is a widget", { skip: !swiftAvailable }, () => {
+  const mode = (stored) => ({ op: "mode", stored });
+  assert.deepEqual(widgetRun([mode(null), mode("widget"), mode("popover"), mode("window"), mode(7), { op: "mode" }]),
+    ["widget", "widget", "popover", "widget", "widget", "widget"]);
+});
+
+test("display mode: the header shows with the tabs; the popover's Settings and every setup screen have none", { skip: !swiftAvailable }, () => {
+  const header = (setup, settings, mode) => ({ op: "header", setup, settings, mode });
+  assert.deepEqual(widgetRun([header(false, false, "widget"), header(false, true, "widget"), header(true, false, "widget"),
+    header(false, false, "popover"), header(false, true, "popover"), header(true, false, "popover")]),
+  [true, true, false, true, false, false]);
+});
+
+test("display mode: the popover fits the page, starts at the default height, and never leaves the screen", { skip: !swiftAvailable }, () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const start = Number(src.match(/^let PANEL_START_HEIGHT: CGFloat = (\d+)$/m)[1]);
+  const panel = (page, header, screen) => ({ op: "panel", page, header, screen });
+  assert.deepEqual(widgetRun([panel(500, 38, 900), panel(null, 38, 900), panel(5000, 38, 900), panel(5000, 0, 900), panel(10, 0, 900)]),
+    [538, start + 38, 860, 860, 40]);
+  const fit = methodSource(src, "fitWidget");
+  assert.match(fit, /^\s*func fitWidget\(animated: Bool = false\) \{\n\s*if displayMode == \.popover \{ fitPanel\(\); return \}\n/);
+  const panelFit = methodSource(src, "fitPanel");
+  assert.match(panelFit, /pageHeight: widgetPageHeights\[widgetShownPage\]/);
+  // The shown popover owns its view's frame; a closed one keeps a stale size for the next layout.
+  assert.match(panelFit, /if !panel\.isShown \{ panelRoot\.setFrameSize\(size\) \}\n\s*panel\.contentSize = size/);
+});
+
+test("display mode: one set of pages moves between the hosts, in paint order", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.equal((src.match(/DragWebView\(frame:/g) || []).length, 1);
+  assert.equal((src.match(/makeTabWebView\(handler:/g) || []).length, 3, "the two tab pages and the declaration");
+  assert.equal((src.match(/NSPopover\(\)/g) || []).length, 1);
+  const move = methodSource(src, "moveBoard");
+  assert.match(move, /for view in \[tint\] \+ \(widgetPages as \[NSView\]\) \+ \[header\] \{\n\s*view\.removeFromSuperview\(\)\n\s*host\.addSubview\(view\)/);
+  assert.match(move, /tint\.frame = host\.bounds/);
+  assert.match(move, /y: host\.bounds\.height - PANEL_HEADER_HEIGHT/);
+  assert.match(methodSource(src, "layoutWidget"), /let material = header\.superview else/);
+  const setUp = methodSource(src, "setUpPanel");
+  assert.match(setUp, /panel\.behavior = \.transient/);
+  assert.match(setUp, /panel\.delegate = self/);
+  assert.doesNotMatch(setUp, /loadPage|makeTabWebView/);
+});
+
+test("display mode: the switch owns the host, the menu, the window buttons and the widget's own memory, both ways", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const apply = methodSource(src, "applyDisplayMode");
+  assert.match(apply, /if popover \{ window\.orderOut\(nil\) \} else \{ panel\.close\(\) \}/);
+  assert.match(apply, /moveBoard\(to: popover \? panelRoot : window\.contentView!\)/);
+  assert.match(apply, /for light in widgetLights \{ light\.isHidden = popover \}/);
+  assert.match(apply, /frontItem\?\.isHidden = popover/);
+  assert.match(apply, /panelClosedByIconAt = nil/);
+  assert.match(apply, /layoutWidget\(\)/);
+  const set = methodSource(src, "setDisplayMode");
+  assert.match(set, /guard mode != displayMode else \{ return \}/);
+  for (const [first, second] of [["UserDefaults.standard.set(mode.rawValue, forKey: DISPLAY_MODE_KEY)", "displayMode = mode"],
+    ["if restoreFrame != nil { toggleFill() }", "displayMode = mode"], ["widgetHiddenBeforeSetup = nil", "applyDisplayMode()"],
+    ["displayMode = mode", "applyDisplayMode()"], ["applyDisplayMode()", "showHost()"]]) {
+    assert.ok(set.includes(first) && set.indexOf(first) < set.indexOf(second), `${first} before ${second}`);
+  }
+});
+
+test("display mode: the saved choice applies at launch and the window stays hidden in Popover mode", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(src, /var displayMode = displayModeChoice\(UserDefaults\.standard\.object\(forKey: DISPLAY_MODE_KEY\)\)/);
+  const launch = methodSource(src, "applicationDidFinishLaunching");
+  // In Popover mode the first layout fits the popover, before the status item exists: a nil
+  // here ends every launch, and the saved choice has no way back.
+  assert.ok(launch.indexOf("setUpPanel()") < launch.indexOf("setUpWidgetTabs(in: material)"));
+  assert.match(methodSource(src, "fitPanel"), /statusItem\?\.button\?\.window\?\.screen/);
+  assert.ok(launch.indexOf("statusItem = NSStatusBar") < launch.indexOf("applyDisplayMode()"));
+  assert.match(launch, /if displayMode == \.widget \{ window\.orderFront\(nil\) \}/);
+  const active = methodSource(src, "applicationDidBecomeActive");
+  assert.match(active, /if displayMode == \.popover \{\n\s*if panel\.isShown \{ panel\.contentViewController\?\.view\.window\?\.makeKey\(\) \}\n\s*return\n\s*\}/);
+  assert.ok(active.indexOf("return") < active.indexOf("window.orderFront"), "activation never shows the window in Popover mode");
+  assert.match(methodSource(src, "menuFront"), /^\s*@objc func menuFront\(\) \{\n\s*if displayMode == \.popover \{ showHost\(\); return \}/);
+});
+
+test("display mode: every way to bring the board forward goes through the host of the mode", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  for (const name of ["menuSetup", "menuSettings", "showWidgetSettings"]) {
+    const body = methodSource(src, name);
+    assert.match(body, /[Hh]ost\(\)|showWidgetSettings\(\)/, name);
+    assert.doesNotMatch(body, /makeKeyAndOrderFront/, name);
+  }
+  const host = methodSource(src, "showHost");
+  assert.match(host, /if displayMode == \.popover \{\n\s*if !panel\.isShown \{ openPanel\(\) \}\n\s*return\n\s*\}\n\s*NSApp\.activate\(ignoringOtherApps: true\)\n\s*window\.makeKeyAndOrderFront\(nil\)/);
+  // A closed popover must hold the page before it opens, so it opens at that page's height.
+  const show = methodSource(src, "showWidgetSettings");
+  assert.ok(show.indexOf("self.swapWidgetPage()") < show.indexOf("self.showHost()"));
+  assert.match(src, /var boardVisible: Bool \{ displayMode == \.popover \? panel\.isShown : window\.isVisible \}/);
+  // The accessory app's popover gets keystrokes only when the app is active.
+  const open = methodSource(src, "openPanel");
+  assert.ok(open.indexOf("panel.show(") < open.indexOf("NSApp.activate(ignoringOtherApps: true)"));
+  assert.match(methodSource(src, "popoverDidShow"), /makeKey\(\)/);
+  // The closed widget's memory has no meaning in the popover.
+  assert.match(methodSource(src, "lendWidgetToSetup"), /if displayMode == \.popover \{ return \}/);
+});
+
+test("display mode: a drag moves the widget window and leaves the popover at the icon", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  assert.match(src, /guard window is BoardWindow, p\.y < DragWebView\.handleHeight else \{\n\s*super\.mouseDown\(with: event\)/);
+});
+
+test("display mode: Settings offers both modes, shows the current one and applies a click at once", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const page = readFileSync(new URL("./popover/settings.html", import.meta.url), "utf8");
+  const block = page.slice(page.indexOf('<div id="settings" hidden>'), page.indexOf("</div>\n<div id=\"err\""));
+  assert.match(block, /data-mode="widget">Widget</);
+  assert.match(block, /data-mode="popover">Popover</);
+  assert.match(page, /showMode\(button\.dataset\.mode\);\n\s*post\(\{ displayMode: button\.dataset\.mode \}\);/);
+  assert.match(page, /showSettings\(ctx\);\n\s*showMode\(ctx\.displayMode\);/);
+  assert.doesNotMatch(page.match(/post\(\{ saveSettings: \{[\s\S]*?\} \}\);/)[0], /displayMode/, "the choice does not wait for Save settings");
+  assert.match(methodSource(src, "fillWidgetSettings"), /signedIn\.merging\(\["displayMode": displayMode\.rawValue\]\)/);
+  // Only the Settings page reaches the switch, and only with a mode this build knows.
+  assert.match(methodSource(src, "userContentController"), /if fromSettingsPage, let raw = body\["displayMode"\] as\? String, let mode = DisplayMode\(rawValue: raw\) \{\n\s*setDisplayMode\(mode\)/);
+});
+
+test("display mode: sign-in uses the setup page in both modes, without the window buttons in the popover", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const setup = readFileSync(new URL("./setup.html", import.meta.url), "utf8");
+  assert.match(setup, /\.in-popover \.lights \{ display: none \}/);
+  const finish = src.slice(src.indexOf("func webView(_ w: WKWebView, didFinish"), src.indexOf("func webView(_ w: WKWebView, didFail nav"));
+  assert.match(finish, /classList\.toggle\('in-popover', \\\(displayMode == \.popover\)\)/);
+  // A hidden window takes the closed path, and the popover opens at its end.
+  assert.match(methodSource(src, "requireLogin"), /let widgetClosed = !self\.window\.isVisible && !self\.window\.isMiniaturized\n\s*if widgetClosed \{\n\s*self\.loadPage\("setup\.html"\)/);
+  // The result of a sign-in depends on no page or host being on screen.
+  const start = methodSource(src, "startAtlassianLogin");
+  assert.doesNotMatch(start, /panel|window\.|isVisible/);
+  assert.doesNotMatch(methodSource(src, "finishAtlassianLogin"), /panel|window\.|isVisible/);
 });
 
 test("widget fold: the window edge moves with the page's own time and curve, pinned to the top", () => {

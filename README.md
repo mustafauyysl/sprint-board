@@ -4,8 +4,9 @@ A native macOS sprint tracking widget that sits on your desktop. Your own
 Jira tasks in the open sprint, the **business days each one has spent in its status**,
 the one furthest past its threshold shown as **Most overdue**, and PR/CI state.
 
-The widget has two tabs: **Sprint** (the board) and **Hosts** (switches domains between
-this Mac and production through `/etc/hosts`).
+The board has two tabs: **Sprint** (the board) and **Hosts** (switches domains between
+this Mac and production through `/etc/hosts`). It shows as a window on the desktop
+(**Widget**, the default) or as a popover under the ring icon in the menu bar (**Popover**).
 
 A personal tool — not owned by any company, not designed to be distributed.
 
@@ -19,11 +20,11 @@ it can only be derived from the changelog.
 
 | File | Role |
 |---|---|
-| `SprintBoard.swift` | NSWindow + WKWebView, widget tabs, menu bar menu, dragging, JS bridge, `/etc/hosts` |
+| `SprintBoard.swift` | NSWindow, NSPopover and WKWebView, tabs, menu bar menu, dragging, JS bridge, `/etc/hosts` |
 | `setup.html` | The sign-in screen; also shown when macOS refuses the token read |
-| `popover/sprints.html` | The widget's Sprint tab (plain JS, no framework) |
-| `popover/settings.html` | Settings over the widget's tabs, behind a back arrow |
-| `popover/hosts.html` | The widget's Hosts tab |
+| `popover/sprints.html` | The Sprint tab (plain JS, no framework), in both modes |
+| `popover/settings.html` | Settings over the tabs, behind a back arrow, in both modes |
+| `popover/hosts.html` | The Hosts tab, in both modes |
 | `app.entitlements` | Lets the signed app send Apple Events to Chrome (after a Hosts switch) |
 | `fetch.mjs` | I/O: Jira REST + GitHub GraphQL + keychain + sound |
 | `lib.mjs` | Pure logic — no I/O, no `Date.now()` (`now` is passed in) |
@@ -49,7 +50,7 @@ No token is ever stored in plain text in a file.
 **First launch:** with no config, or no Jira token in the keychain, the app opens
 `setup.html` instead of the board; you sign in with Atlassian there, the config is
 written and the tokens go into the keychain. Settings open later from the gear button, or
-from the ring icon in the menu bar → **Settings…**, over the widget's tabs.
+from the ring icon in the menu bar → **Settings…**, over the tabs.
 
 When "Sign in with Atlassian" is not available (for example while the Atlassian app is
 still in development mode, which only lets its owner sign in), **Use an API token
@@ -119,8 +120,15 @@ costs.
 
 ## Usage
 
-- Click the **ring icon** (a circle with a check) in the menu bar for refresh / bring widget
-  to front / settings / show in Dock / quit. A left click and a right click do the same
+- **Settings → Show as** picks **Widget** or **Popover**. The app moves at once, the choice is
+  remembered across launches, and only one of them shows the board at a time
+- In Widget mode, click the **ring icon** (a circle with a check) in the menu bar for refresh /
+  bring widget to front / settings / show in Dock / quit. A left click and a right click do the same
+- In Popover mode the window stays hidden. A left click on the ring icon opens or closes the
+  popover; a right click or Control-click opens the menu, which has quit too. A click outside
+  closes the popover. Sign-in works there too: the browser closes the popover, the sign-in
+  finishes without it, and the ring icon shows the new data. The popover opens by itself when
+  a session ends and when a sign-in fails
 - The app is not in the Dock or Cmd+Tab (macOS ties the two together). **Ring icon → Show in
   Dock** adds both; click it again to remove them. The choice is remembered across launches
 - Drag by the **tab header**. The three dots on it close the widget (the app keeps running; ring icon → Bring widget to front
@@ -158,8 +166,9 @@ costs.
 
 ### The tabs
 
-The widget keeps the selected tab across launches, and the window follows the height of the
-page on screen. A fold moves the window edge with the same time and curve as the content.
+The app keeps the selected tab across launches, and the window or popover follows the height
+of the page on screen. In the widget, a fold moves the window edge with the same time and
+curve as the content.
 
 - **Sprint**: refresh and settings sit at the top right (hover the refresh button to see how
   old the data is), three cards show the sprint, the team goal and the days left (click the

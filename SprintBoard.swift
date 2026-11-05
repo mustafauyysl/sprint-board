@@ -237,6 +237,7 @@ let OAUTH_SCOPES = "read:jira-work read:jira-user read:me offline_access"
 /// hour, so writing it to disk is pointless.
 let JIRA_OAUTH_KEYCHAIN = "sprint-board-jira-oauth"
 let SHOW_IN_DOCK_KEY = "showInDock"
+let DISPLAY_MODE_KEY = "displayMode"
 
 /// Whether the app shows in the Dock (and so in Cmd+Tab). A desktop widget stays out of
 /// both unless the user opts in from the menu bar; LSUIElement in Info.plist says the same.
@@ -1111,8 +1112,10 @@ func symbolScript() -> WKUserScript? {
     return WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
 }
 
-/// The board's width.
+/// The board's width, in the widget and in the popover.
 let BOARD_WIDTH: CGFloat = 430
+/// The popover's page height until its page reports one.
+let PANEL_START_HEIGHT: CGFloat = 420
 /// The widget's tabs, in order: segment title and page.
 let PANEL_TABS: [(title: String, page: String)] = [
     ("Sprint", "popover/sprints.html"),
@@ -1160,6 +1163,28 @@ func widgetPageName(onSetupScreen: Bool, settingsShown: Bool, tab: Int) -> Strin
 /// The window height for a page. The setup screen has no tab header.
 func widgetWindowHeight(pageHeight: CGFloat, onSetupScreen: Bool) -> CGFloat {
     pageHeight + (onSetupScreen ? 0 : PANEL_HEADER_HEIGHT)
+}
+
+/// Where the app lives. Exactly one host shows the board at a time.
+enum DisplayMode: String {
+    case widget
+    case popover
+}
+
+/// With no stored choice, or one this build does not know, the app is a widget.
+func displayModeChoice(_ stored: Any?) -> DisplayMode {
+    (stored as? String).flatMap(DisplayMode.init(rawValue:)) ?? .widget
+}
+
+/// The tab header holds the tabs and the window buttons. The setup screen has neither. Settings
+/// has no tabs, and the popover has no window buttons, so there it has no header either.
+func boardHeaderShown(onSetupScreen: Bool, settingsShown: Bool, mode: DisplayMode) -> Bool {
+    !onSetupScreen && !(settingsShown && mode == .popover)
+}
+
+/// The popover's height for a page: never taller than the screen; beyond that the page scrolls.
+func panelContentHeight(pageHeight: CGFloat?, header: CGFloat, screenHeight: CGFloat) -> CGFloat {
+    header + min(max(pageHeight ?? PANEL_START_HEIGHT, 40), screenHeight - 40 - header)
 }
 
 
@@ -1258,7 +1283,8 @@ final class DragWebView: WKWebView {
         let p = convert(event.locationInWindow, from: nil)
         // WKWebView isFlipped=TRUE: y is measured FROM THE TOP (measured: y=23 on the title).
         // The opposite assumption meant performDrag was never called.
-        guard p.y < DragWebView.handleHeight else {
+        // Only the widget window moves; the popover stays at the menu bar icon.
+        guard window is BoardWindow, p.y < DragWebView.handleHeight else {
             super.mouseDown(with: event)
             return
         }
@@ -1285,12 +1311,22 @@ final class BoardWindow: NSWindow {
 }
 
 final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate,
-    UNUserNotificationCenterDelegate {
+    UNUserNotificationCenterDelegate, NSPopoverDelegate {
     var window: BoardWindow!
     var web: DragWebView!
     var timer: Timer?
     var statusItem: NSStatusItem!
     var menuIcon = MenuIconState()
+    /// The menu of the ring icon. The status item holds it only in Widget mode.
+    var statusMenu: NSMenu!
+    var frontItem: NSMenuItem?
+    var displayMode = displayModeChoice(UserDefaults.standard.object(forKey: DISPLAY_MODE_KEY))
+    let panel = NSPopover()
+    /// The view of the popover that holds the board in Popover mode.
+    var panelRoot: NSView!
+    /// Event time of a click on the menu bar icon that closed the popover, so the same click
+    /// does not open it again.
+    var panelClosedByIconAt: TimeInterval?
     /// The widget's tab header, Hosts page and Settings page. Its Sprint page is `web`.
     var widgetTabControl: NSSegmentedControl!
     var hostsWeb: WKWebView!
@@ -1298,6 +1334,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var widgetSettingsShown = false
     var widgetHeader: NSView?
     var widgetTint: NSView?
+    var widgetLights: [NSButton] = []
     /// The height each widget page last reported, so the window follows the active tab.
     var widgetPageHeights: [WKWebView: CGFloat] = [:]
     /// The window height of the move under way, and a number that tells a newer move from an older one.
@@ -1376,6 +1413,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
         material.addSubview(web)
+        // Before the first layout: in Popover mode that layout fits the popover.
+        setUpPanel()
         setUpWidgetTabs(in: material)
 
         if needsSetup() {
@@ -1396,13 +1435,20 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         let menu = NSMenu()
         let mRefresh = NSMenuItem(title: "Refresh now", action: #selector(menuRefresh), keyEquivalent: "r")
         let mFront = NSMenuItem(title: "Bring widget to front", action: #selector(menuFront), keyEquivalent: "")
+        frontItem = mFront
         let mSetup = NSMenuItem(title: "Settings…", action: #selector(menuSettings), keyEquivalent: "")
         dockItem = NSMenuItem(title: "Show in Dock", action: #selector(toggleDock), keyEquivalent: "")
         dockItem?.state = dockChoice(UserDefaults.standard.object(forKey: SHOW_IN_DOCK_KEY)) ? .on : .off
         for m in [mRefresh, mFront, mSetup, dockItem!] { m.target = self; menu.addItem(m) }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Sprint Board", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        statusItem.menu = menu
+        statusMenu = menu
+        // An attached menu takes every click and the button's action never fires. So Widget mode
+        // keeps the menu on the item, and Popover mode takes it off.
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(statusItemClicked)
+        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        applyDisplayMode()
 
         buildMainMenu()
 
@@ -1412,7 +1458,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             dbg("notification permission granted=\(granted) \(err?.localizedDescription ?? "")")
         }
 
-        window.orderFront(nil)
+        if displayMode == .widget { window.orderFront(nil) }
         NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification,
                                                object: window, queue: .main) { [weak self] _ in
             guard self?.restoreFrame == nil else { return }
@@ -1438,16 +1484,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         onSetupScreen = true
         lendWidgetToSetup()
         loadPage("setup.html")
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        showHost()
     }
 
-    /// Settings… in the menu and every gear come here. Sign-in has its own screen in the widget.
+    /// Settings… in the menu and every gear come here. Sign-in has its own screen.
     @objc func menuSettings() {
         if onSetupScreen {
-            // Already open in the widget, possibly behind other windows.
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
+            // Already open, possibly behind other windows or in a closed popover.
+            showHost()
         } else if needsSetup() {
             menuSetup()
         } else {
@@ -1463,6 +1507,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// Brings the window back when it has ended up behind other windows, was minimised
     /// to the Dock, or was closed with the widget's own close button.
     @objc func menuFront() {
+        if displayMode == .popover { showHost(); return }
         // Asked for explicitly, so leaving Settings must not hide it again.
         widgetHiddenBeforeSetup = nil
         if window.isMiniaturized { window.deminiaturize(nil) }
@@ -1482,7 +1527,14 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     /// Cmd+Tab back to the app (only when it shows in the Dock) brings the widget back even
     /// after its close button hid it.
+    ///
+    /// In Popover mode the window stays hidden. Activation finishes after the popover is shown and
+    /// can take key status from it, so the popover takes it again here (its inputs need it).
     func applicationDidBecomeActive(_ note: Notification) {
+        if displayMode == .popover {
+            if panel.isShown { panel.contentViewController?.view.window?.makeKey() }
+            return
+        }
         if window != nil, !window.isVisible, !window.isMiniaturized { window.orderFront(nil) }
     }
 
@@ -1679,6 +1731,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             button.target = self
             button.action = #selector(widgetLightClicked)
             header.addSubview(button)
+            widgetLights.append(button)
         }
 
         loadPage("popover/hosts.html", in: hostsWeb)
@@ -1719,13 +1772,13 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     /// Places the header and the pages for the setup screen or the selected tab.
     func layoutWidget() {
-        guard let header = widgetHeader, let material = window.contentView else { return }
-        let tabs = !onSetupScreen
+        guard let header = widgetHeader, let material = header.superview else { return }
+        let tabs = boardHeaderShown(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown, mode: displayMode)
         let pageFrame = NSRect(x: 0, y: 0, width: material.bounds.width,
                                height: material.bounds.height - (tabs ? PANEL_HEADER_HEIGHT : 0))
         for page in widgetPages { page.frame = pageFrame }
         header.isHidden = !tabs
-        widgetTint?.isHidden = !tabs
+        widgetTint?.isHidden = !tabs || displayMode == .popover
         let target = widgetTargetPage
         for page in widgetPages { page.isHidden = page !== target }
         widgetTabControl.isHidden = target === widgetSettingsWeb
@@ -1739,6 +1792,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// the content arrives. A WKWebView redraws at each resize, so the pages stay pinned at the
     /// taller height for the move and take their exact height once, at its end.
     func fitWidget(animated: Bool = false) {
+        if displayMode == .popover { fitPanel(); return }
         guard restoreFrame == nil, let height = widgetPageHeights[widgetShownPage] else { return }
         var f = window.frame
         let top = f.maxY
@@ -1812,7 +1866,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             after()
         }
         let hoverOff = "document.documentElement.classList.add('nohover')"
-        guard leaving !== page, window.isVisible else {
+        guard leaving !== page, boardVisible else {
             leaving.evaluateJavaScript(hoverOff)
             swap()
             return
@@ -1831,9 +1885,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             guard let self else { return }
             if let height { self.widgetPageHeights[self.widgetSettingsWeb] = height }
             self.widgetSettingsShown = true
-            NSApp.activate(ignoringOtherApps: true)
-            self.window.makeKeyAndOrderFront(nil)
             self.swapWidgetPage()
+            self.showHost()
         }
     }
 
@@ -1843,7 +1896,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         if let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
            let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
            let signedIn = setupContext(cfg) {
-            context = signedIn
+            context = signedIn.merging(["displayMode": displayMode.rawValue]) { $1 }
         }
         let args = (try? JSONSerialization.data(withJSONObject: [context, [String]()]))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "[null, []]"
@@ -1877,10 +1930,139 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     }
 
     /// Settings opens in the widget. Whether the widget was hidden is remembered so the way
-    /// back can hide it again.
+    /// back can hide it again. The popover opens and closes on its own.
     func lendWidgetToSetup() {
+        if displayMode == .popover { return }
         // Minimised is not closed: a minimised widget reports isVisible == false too.
         if widgetHiddenBeforeSetup == nil { widgetHiddenBeforeSetup = !window.isVisible && !window.isMiniaturized }
+    }
+
+    // MARK: display mode
+
+    /// The popover has its own root view and no pages of its own: moveBoard brings them.
+    func setUpPanel() {
+        let size = NSSize(width: BOARD_WIDTH, height: PANEL_HEADER_HEIGHT + PANEL_START_HEIGHT)
+        panelRoot = NSView(frame: NSRect(origin: .zero, size: size))
+        let content = NSViewController()
+        content.view = panelRoot
+        panel.contentViewController = content
+        panel.contentSize = size
+        panel.behavior = .transient
+        panel.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        // The board is a dark card; a light popover frame around it looks broken.
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.delegate = self
+    }
+
+    /// Moves the one set of pages to the host of the mode. Each view keeps its state. Back to
+    /// front: the tint, the pages, the header.
+    func moveBoard(to host: NSView) {
+        guard let header = widgetHeader, let tint = widgetTint, header.superview !== host else { return }
+        for view in [tint] + (widgetPages as [NSView]) + [header] {
+            view.removeFromSuperview()
+            host.addSubview(view)
+        }
+        tint.frame = host.bounds
+        header.frame = NSRect(x: 0, y: host.bounds.height - PANEL_HEADER_HEIGHT,
+                              width: host.bounds.width, height: PANEL_HEADER_HEIGHT)
+    }
+
+    /// Everything that belongs to the mode, in both directions and at launch.
+    func applyDisplayMode() {
+        let popover = displayMode == .popover
+        if popover { window.orderOut(nil) } else { panel.close() }
+        moveBoard(to: popover ? panelRoot : window.contentView!)
+        statusItem.menu = popover ? nil : statusMenu
+        for light in widgetLights { light.isHidden = popover }
+        frontItem?.isHidden = popover
+        panelClosedByIconAt = nil
+        layoutWidget()
+    }
+
+    /// The choice in Settings. The new host opens at once, on the page the user is on.
+    func setDisplayMode(_ mode: DisplayMode) {
+        guard mode != displayMode else { return }
+        UserDefaults.standard.set(mode.rawValue, forKey: DISPLAY_MODE_KEY)
+        if restoreFrame != nil { toggleFill() }
+        widgetHiddenBeforeSetup = nil
+        displayMode = mode
+        applyDisplayMode()
+        showHost()
+    }
+
+    /// The host of the mode is on screen.
+    var boardVisible: Bool { displayMode == .popover ? panel.isShown : window.isVisible }
+
+    /// Brings the host of the mode forward.
+    func showHost() {
+        if displayMode == .popover {
+            if !panel.isShown { openPanel() }
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: popover
+
+    @objc func statusItemClicked() {
+        guard let event = NSApp.currentEvent else { return }
+        if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
+            panel.performClose(nil)
+            statusItem.menu = statusMenu
+            statusItem.button?.performClick(nil)
+            statusItem.menu = nil
+            return
+        }
+        // A transient popover closes on the mouse-down outside it, even when that mouse-down
+        // is on the icon; without this check the same click's mouse-up would reopen it.
+        if let closedAt = panelClosedByIconAt, event.timestamp - closedAt < 1 {
+            panelClosedByIconAt = nil
+            return
+        }
+        panelClosedByIconAt = nil
+        togglePanel()
+    }
+
+    func togglePanel() {
+        if panel.isShown { panel.performClose(nil); return }
+        openPanel()
+    }
+
+    func openPanel() {
+        guard let button = statusItem.button else { return }
+        fitPanel()   // the icon's screen may differ from the last time
+        if widgetShownPage === hostsWeb { hostsMessage(["status": true]) }
+        panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        // An accessory app's popover gets no keystrokes (the note field) until the app is active.
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func popoverDidShow(_ note: Notification) {
+        panel.contentViewController?.view.window?.makeKey()
+    }
+
+    func popoverWillClose(_ note: Notification) {
+        // The page must not open next time with whatever was last clicked hovered; it paints
+        // that while the popover fades out.
+        widgetShownPage.evaluateJavaScript("document.documentElement.classList.add('nohover')")
+        if let event = NSApp.currentEvent, event.type == .leftMouseDown,
+           event.window != nil, event.window === statusItem.button?.window {
+            panelClosedByIconAt = event.timestamp
+        }
+    }
+
+    /// Fits the popover to the page on screen.
+    func fitPanel() {
+        let tabs = boardHeaderShown(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown, mode: displayMode)
+        // The first layout comes before the status item exists.
+        let screen = statusItem?.button?.window?.screen ?? NSScreen.main
+        let size = NSSize(width: BOARD_WIDTH, height: panelContentHeight(
+            pageHeight: widgetPageHeights[widgetShownPage], header: tabs ? PANEL_HEADER_HEIGHT : 0,
+            screenHeight: screen?.visibleFrame.height ?? 800))
+        // A closed popover does not resize its view, and the next layout reads that size.
+        if !panel.isShown { panelRoot.setFrameSize(size) }
+        panel.contentSize = size
     }
 
     /// Back from the setup screen to the board, whichever way: Back to board or a finished
@@ -2246,6 +2428,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             (self.setupResultTarget ?? self.web).evaluateJavaScript("window.sbSetupResult(\(json))") { _, err in
                 if let err { NSLog("sbSetupResult: \(err)") }
             }
+            // The browser closed the popover, and the error is on a page in it.
+            if self.displayMode == .popover { self.showHost() }
         }
     }
 
@@ -2559,6 +2743,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             if widgetClosed {
                 self.loadPage("setup.html")
                 if !canGoBack { self.clearBoardData() }
+                // A closed popover is the usual state of the mode, not a closed widget. Refreshes
+                // stop on the setup screen, so the user must see it.
+                if self.displayMode == .popover { self.showHost() }
                 return
             }
             self.lendWidgetToSetup()
@@ -2699,6 +2886,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         if w === widgetSettingsWeb, widgetSettingsShown { fillWidgetSettings() }
         if w === web {
             if restoreFrame != nil { applyFillClass() }
+            w.evaluateJavaScript("document.documentElement.classList.toggle('in-popover', \(displayMode == .popover))")
             if onSetupScreen, setupFromSettings,
                let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
                let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
@@ -2824,6 +3012,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         if body["disconnect"] != nil, setupOpen { disconnect() }
         if body["backToBoard"] != nil, fromWidget, onSetupScreen { showBoard() }
         if body["backToBoard"] != nil, fromSettingsPage { hideWidgetSettings() }
+        if fromSettingsPage, let raw = body["displayMode"] as? String, let mode = DisplayMode(rawValue: raw) {
+            setDisplayMode(mode)
+        }
         if fromWidget, let w = body["win"] as? String {
             windowAction(w)
         }

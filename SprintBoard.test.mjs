@@ -221,12 +221,12 @@ test("setup screen: a change of onSetupScreen runs layoutWidget on the main queu
     /var onSetupScreen = false \{\n\s*didSet \{ DispatchQueue\.main\.async \{ \[weak self\] in self\?\.layoutWidget\(\) \} \}\n\s*\}/);
 });
 
-test("setup screen: the header and tint hide there, and only there the page takes the header height", () => {
+test("setup screen: the header and tint hide there, and the page takes the header height where the header hides", () => {
   const layout = methodSource(readFileSync(SWIFT_URL, "utf8"), "layoutWidget");
-  assert.match(layout, /let tabs = !onSetupScreen\n/);
+  assert.match(layout, /let tabs = boardHeaderShown\(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown, mode: displayMode\)\n/);
   assert.match(layout, /height: material\.bounds\.height - \(tabs \? PANEL_HEADER_HEIGHT : 0\)\)/);
   assert.match(layout, /header\.isHidden = !tabs\n/);
-  assert.match(layout, /widgetTint\?\.isHidden = !tabs\n/);
+  assert.match(layout, /widgetTint\?\.isHidden = !tabs \|\| displayMode == \.popover\n/);
 });
 
 test("widget page scripts: the board page starts with hover off and can fit the window", () => {
@@ -244,4 +244,79 @@ test("widget page scripts: the Hosts and Settings pages get the fit script befor
   assert.deepEqual(loop[1].split(", "), ["hostsWeb", "widgetSettingsWeb"]);
   assert.match(loop[2], /page\.configuration\.userContentController\.addUserScript\(WKUserScript\(\n\s*source: WIDGET_PAGE_SCRIPT, injectionTime: \.atDocumentStart, forMainFrameOnly: true\)\)/);
   assert.match(tabs.slice(loop.index + loop[0].length), /loadPage\("popover\/hosts\.html", in: hostsWeb\)\n\s*loadPage\("popover\/settings\.html", in: widgetSettingsWeb\)/);
+});
+
+test("popover: opening on the Hosts tab asks for a fresh /etc/hosts status", () => {
+  const open = methodSource(readFileSync(SWIFT_URL, "utf8"), "openPanel");
+  assert.match(open, /\n\s*if widgetShownPage === hostsWeb \{ hostsMessage\(\["status": true\]\) \}\n/);
+});
+
+test("popover: a left click closes a shown popover and stops, and opens a closed one", () => {
+  const toggle = methodSource(readFileSync(SWIFT_URL, "utf8"), "togglePanel");
+  assert.match(toggle, /^\s*func togglePanel\(\) \{\n\s*if panel\.isShown \{ panel\.performClose\(nil\); return \}\n\s*openPanel\(\)\n\s*\}\n$/);
+});
+
+test("popover: closing puts nohover on the page that is on screen", () => {
+  const close = methodSource(readFileSync(SWIFT_URL, "utf8"), "popoverWillClose");
+  assert.match(close, /\n\s*widgetShownPage\.evaluateJavaScript\("document\.documentElement\.classList\.add\('nohover'\)"\)\n/);
+});
+
+test("popover: the open and close animation follows the reduce motion setting", () => {
+  const setUp = methodSource(readFileSync(SWIFT_URL, "utf8"), "setUpPanel");
+  assert.match(setUp, /\n\s*panel\.animates = !NSWorkspace\.shared\.accessibilityDisplayShouldReduceMotion\n/);
+});
+
+test("popover: only a left mouse-down on the status item's own window arms the reopen guard", () => {
+  const close = methodSource(readFileSync(SWIFT_URL, "utf8"), "popoverWillClose");
+  assert.match(close, /\n\s*if let event = NSApp\.currentEvent, event\.type == \.leftMouseDown,\n\s*event\.window != nil, event\.window === statusItem\.button\?\.window \{\n\s*panelClosedByIconAt = event\.timestamp\n\s*\}\n/);
+});
+
+test("popover: the size is fitted before the popover is shown", () => {
+  const open = methodSource(readFileSync(SWIFT_URL, "utf8"), "openPanel");
+  assert.match(open, /\n\s*fitPanel\(\)[^\n]*\n[\s\S]*\n\s*panel\.show\(relativeTo: button\.bounds, of: button, preferredEdge: \.minY\)\n/);
+});
+
+test("popover: the header height comes from whether the board header is shown", () => {
+  const fit = methodSource(readFileSync(SWIFT_URL, "utf8"), "fitPanel");
+  assert.match(fit, /\n\s*let tabs = boardHeaderShown\(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown, mode: displayMode\)\n/);
+  assert.match(fit, /header: tabs \? PANEL_HEADER_HEIGHT : 0,/);
+});
+
+test("popover: a needed sign-in opens the popover, and a closed widget stays closed", () => {
+  const src = readFileSync(SWIFT_URL, "utf8");
+  const closedPath = methodSource(src, "requireLogin").match(/if widgetClosed \{\n([\s\S]*?)\n\s*return\n/);
+  assert.ok(closedPath, "requireLogin keeps a closed path");
+  assert.match(closedPath[1], /if self\.displayMode == \.popover \{ self\.showHost\(\) \}$/);
+  assert.doesNotMatch(closedPath[1], /window\.|^\s*self\.showHost\(\)/m);
+  assert.ok(closedPath[1].indexOf('self.loadPage("setup.html")') < closedPath[1].indexOf("showHost"), "the setup page loads first");
+});
+
+test("popover: a failed sign-in opens the popover that holds the error", () => {
+  const failed = methodSource(readFileSync(SWIFT_URL, "utf8"), "setupFailed");
+  assert.match(failed, /DispatchQueue\.main\.async \{[\s\S]*sbSetupResult[\s\S]*\n\s*if self\.displayMode == \.popover \{ self\.showHost\(\) \}\n\s*\}\n/);
+});
+
+test("window lights: every button joins widgetLights, the list the switch to Popover mode hides", () => {
+  const tabs = methodSource(readFileSync(SWIFT_URL, "utf8"), "setUpWidgetTabs");
+  assert.match(tabs, /for \(i, light\) in lights\.enumerated\(\) \{[\s\S]*?header\.addSubview\(button\)\n\s*widgetLights\.append\(button\)\n\s*\}/);
+});
+
+test("popover: panelRoot is the view the popover shows", () => {
+  const setUp = methodSource(readFileSync(SWIFT_URL, "utf8"), "setUpPanel");
+  assert.match(setUp, /let content = NSViewController\(\)\n\s*content\.view = panelRoot\n\s*panel\.contentViewController = content\n/);
+});
+
+test("menu bar icon: the button's click goes to the app, set with its action", () => {
+  const launch = methodSource(readFileSync(SWIFT_URL, "utf8"), "applicationDidFinishLaunching");
+  assert.match(launch, /statusItem\.button\?\.target = self\n\s*statusItem\.button\?\.action = #selector\(statusItemClicked\)/);
+});
+
+test("popover: with no screen to measure, the fit assumes a height of 800", () => {
+  const fit = methodSource(readFileSync(SWIFT_URL, "utf8"), "fitPanel");
+  assert.match(fit, /panelContentHeight\([\s\S]*?screenHeight: screen\?\.visibleFrame\.height \?\? 800\)\)/);
+});
+
+test("popover: moveBoard leaves the views alone when the board is already on that host", () => {
+  const move = methodSource(readFileSync(SWIFT_URL, "utf8"), "moveBoard");
+  assert.match(move, /guard let header = widgetHeader, let tint = widgetTint, header\.superview !== host else \{ return \}\n\s*for view in/);
 });

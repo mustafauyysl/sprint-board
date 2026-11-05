@@ -60,6 +60,8 @@
   #disconnect.armed { color: white; background: -apple-system-red; }
   #tokenForm { margin-top: 4px; }
   #settings { margin-top: 12px; padding-top: 2px; border-top: 1px solid -apple-system-separator; }
+  .modes { display: flex; gap: 6px; margin-top: 4px; }
+  .modes button { margin-top: 0; }
   .err { margin-top: 12px; padding: 6px 8px; border-radius: 7px; font-size: 11px; color: -apple-system-label;
          background: color-mix(in srgb, -apple-system-red 14%, transparent); }
   .err ul { margin: 0; padding-left: 16px; }
@@ -92,6 +94,12 @@
   </div>
 </div>
 <div id="settings" hidden>
+  <label>Show as</label>
+  <div class="modes">
+    <button class="mode" data-mode="widget">Widget</button>
+    <button class="mode" data-mode="popover">Popover</button>
+  </div>
+  <div class="hint">Widget stays on the desktop. Popover opens from the ring icon in the menu bar. It changes at once.</div>
   <label for="org">GitHub organization</label>
   <input id="org" placeholder="empty = all your PRs" autocomplete="off" spellcheck="false">
   <div class="hint">Only PRs in this organization are watched. The board uses it at the next refresh.</div>
@@ -132,6 +140,13 @@
     $("partners").value = (s.partnerDomainSuffixes || []).join(", ");
   };
 
+  const showMode = (mode) => document.querySelectorAll(".mode").forEach((button) =>
+    button.classList.toggle("primary", button.dataset.mode === mode));
+  document.querySelectorAll(".mode").forEach((button) => button.addEventListener("click", () => {
+    showMode(button.dataset.mode);
+    post({ displayMode: button.dataset.mode });
+  }));
+
   // Signed in: the account and the settings; the sign-in block is for the first run and after Disconnect.
   window.sbSetupContext = (ctx) => {
     if (!ctx || !ctx.email) return;
@@ -143,6 +158,7 @@
     $("current").hidden = false;
     $("signin").hidden = true;
     showSettings(ctx);
+    showMode(ctx.displayMode);
     $("settings").hidden = false;
   };
 
