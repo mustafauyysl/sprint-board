@@ -1412,6 +1412,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
         material.addSubview(web)
+        // Before the first layout: in Popover mode that layout fits the popover.
+        setUpPanel()
         setUpWidgetTabs(in: material)
 
         if needsSetup() {
@@ -1445,7 +1447,6 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked)
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        setUpPanel()
         applyDisplayMode()
 
         buildMainMenu()
@@ -2053,7 +2054,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// Fits the popover to the page on screen.
     func fitPanel() {
         let tabs = boardHeaderShown(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown, mode: displayMode)
-        let screen = statusItem.button?.window?.screen ?? NSScreen.main
+        // The first layout comes before the status item exists.
+        let screen = statusItem?.button?.window?.screen ?? NSScreen.main
         let size = NSSize(width: BOARD_WIDTH, height: panelContentHeight(
             pageHeight: widgetPageHeights[widgetShownPage], header: tabs ? PANEL_HEADER_HEIGHT : 0,
             screenHeight: screen?.visibleFrame.height ?? 800))

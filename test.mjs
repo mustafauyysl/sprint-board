@@ -3774,7 +3774,11 @@ test("display mode: the saved choice applies at launch and the window stays hidd
   const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   assert.match(src, /var displayMode = displayModeChoice\(UserDefaults\.standard\.object\(forKey: DISPLAY_MODE_KEY\)\)/);
   const launch = methodSource(src, "applicationDidFinishLaunching");
-  assert.ok(launch.indexOf("setUpPanel()") < launch.indexOf("applyDisplayMode()"));
+  // In Popover mode the first layout fits the popover, before the status item exists: a nil
+  // here ends every launch, and the saved choice has no way back.
+  assert.ok(launch.indexOf("setUpPanel()") < launch.indexOf("setUpWidgetTabs(in: material)"));
+  assert.match(methodSource(src, "fitPanel"), /statusItem\?\.button\?\.window\?\.screen/);
+  assert.ok(launch.indexOf("statusItem = NSStatusBar") < launch.indexOf("applyDisplayMode()"));
   assert.match(launch, /if displayMode == \.widget \{ window\.orderFront\(nil\) \}/);
   const active = methodSource(src, "applicationDidBecomeActive");
   assert.match(active, /if displayMode == \.popover \{\n\s*if panel\.isShown \{ panel\.contentViewController\?\.view\.window\?\.makeKey\(\) \}\n\s*return\n\s*\}/);
