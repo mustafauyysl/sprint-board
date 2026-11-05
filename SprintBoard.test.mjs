@@ -281,3 +281,17 @@ test("popover: the header height comes from whether the board header is shown", 
   assert.match(fit, /\n\s*let tabs = boardHeaderShown\(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown, mode: displayMode\)\n/);
   assert.match(fit, /header: tabs \? PANEL_HEADER_HEIGHT : 0,/);
 });
+
+test("popover: a needed sign-in opens the popover, and a closed widget stays closed", () => {
+  const src = readFileSync(SWIFT_URL, "utf8");
+  const closedPath = methodSource(src, "requireLogin").match(/if widgetClosed \{\n([\s\S]*?)\n\s*return\n/);
+  assert.ok(closedPath, "requireLogin keeps a closed path");
+  assert.match(closedPath[1], /if self\.displayMode == \.popover \{ self\.showHost\(\) \}$/);
+  assert.doesNotMatch(closedPath[1], /window\.|^\s*self\.showHost\(\)/m);
+  assert.ok(closedPath[1].indexOf('self.loadPage("setup.html")') < closedPath[1].indexOf("showHost"), "the setup page loads first");
+});
+
+test("popover: a failed sign-in opens the popover that holds the error", () => {
+  const failed = methodSource(readFileSync(SWIFT_URL, "utf8"), "setupFailed");
+  assert.match(failed, /DispatchQueue\.main\.async \{[\s\S]*sbSetupResult[\s\S]*\n\s*if self\.displayMode == \.popover \{ self\.showHost\(\) \}\n\s*\}\n/);
+});

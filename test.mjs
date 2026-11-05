@@ -3832,7 +3832,7 @@ test("display mode: sign-in uses the setup page in both modes, without the windo
   assert.match(setup, /\.in-popover \.lights \{ display: none \}/);
   const finish = src.slice(src.indexOf("func webView(_ w: WKWebView, didFinish"), src.indexOf("func webView(_ w: WKWebView, didFail nav"));
   assert.match(finish, /classList\.toggle\('in-popover', \\\(displayMode == \.popover\)\)/);
-  // A hidden window takes the closed path: the page changes and nothing comes forward.
+  // A hidden window takes the closed path, and the popover opens at its end.
   assert.match(methodSource(src, "requireLogin"), /let widgetClosed = !self\.window\.isVisible && !self\.window\.isMiniaturized\n\s*if widgetClosed \{\n\s*self\.loadPage\("setup\.html"\)/);
   // The result of a sign-in depends on no page or host being on screen.
   const start = methodSource(src, "startAtlassianLogin");

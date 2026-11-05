@@ -2428,6 +2428,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             (self.setupResultTarget ?? self.web).evaluateJavaScript("window.sbSetupResult(\(json))") { _, err in
                 if let err { NSLog("sbSetupResult: \(err)") }
             }
+            // The browser closed the popover, and the error is on a page in it.
+            if self.displayMode == .popover { self.showHost() }
         }
     }
 
@@ -2741,6 +2743,9 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             if widgetClosed {
                 self.loadPage("setup.html")
                 if !canGoBack { self.clearBoardData() }
+                // A closed popover is the usual state of the mode, not a closed widget. Refreshes
+                // stop on the setup screen, so the user must see it.
+                if self.displayMode == .popover { self.showHost() }
                 return
             }
             self.lendWidgetToSetup()

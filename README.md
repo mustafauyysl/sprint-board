@@ -127,7 +127,8 @@ costs.
 - In Popover mode the window stays hidden. A left click on the ring icon opens or closes the
   popover; a right click or Control-click opens the menu, which has quit too. A click outside
   closes the popover. Sign-in works there too: the browser closes the popover, the sign-in
-  finishes without it, and the ring icon shows the new data
+  finishes without it, and the ring icon shows the new data. The popover opens by itself when
+  a session ends and when a sign-in fails
 - The app is not in the Dock or Cmd+Tab (macOS ties the two together). **Ring icon → Show in
   Dock** adds both; click it again to remove them. The choice is remembered across launches
 - Drag by the **tab header**. The three dots on it close the widget (the app keeps running; ring icon → Bring widget to front
