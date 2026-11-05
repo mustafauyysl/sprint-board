@@ -834,9 +834,10 @@ func hostsApply(_ list: HostsList, local: [String], _ action: [String: Any], par
 }
 
 /// What the Hosts tab shows: every local domain in the file with its state and its groups, and
-/// the group names.
+/// the group names. Sorted by name, not in file order: a switch can move a name to a line of its
+/// own, and its row must not jump.
 func hostsStatus(_ text: String, _ list: HostsList, writable: Bool) -> [String: Any] {
-    let domains: [[String: Any]] = hostsRows(text).map { row in
+    let domains: [[String: Any]] = hostsRows(text).sorted { $0.name < $1.name }.map { row in
         ["name": row.name, "local": row.local,
          "groups": list.groups.filter { $0.domains.contains(row.name) }.map(\.name)]
     }
