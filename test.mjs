@@ -752,7 +752,7 @@ test("board page: the page has no window buttons of its own, and a tall board sc
   const sprints = readFileSync(new URL("./popover/sprints.html", import.meta.url), "utf8");
   // The tab header holds the window buttons; the page shows the window material behind the board.
   assert.doesNotMatch(sprints, /class="lights"|data-win/);
-  assert.match(sprints, /#card \{ padding: 14px 16px 16px; \}/);
+  assert.match(sprints, /#card \{ padding: 6px 16px 16px; \}/);
   assert.match(sprints, /html, body \{[^}]*overflow-y: auto;/);
 });
 
@@ -2898,10 +2898,10 @@ test("hostsStatus: each row and its state come from the file, with its groups", 
   ]);
   assert.equal(state.mode, "ok");
   assert.deepEqual(state.domains, [
-    { name: "app.example.test", local: true, groups: [] },
     { name: "api.example.test", local: true, groups: [] },
-    { name: "old.example.test", local: false, groups: [] },
+    { name: "app.example.test", local: true, groups: [] },
     { name: "cdn.example.test", local: true, groups: ["Web"] },
+    { name: "old.example.test", local: false, groups: [] },
   ]);
   assert.deepEqual(state.groups, ["Web"]);
   assert.equal(damaged.mode, "damaged");
@@ -3896,7 +3896,7 @@ test("setup screen: in the panel a back arrow and a Settings title replace the w
   assert.match(setup, /\$\("back"\)\.addEventListener\("click", \(\) => post\(\{ backToBoard: true \}\)\);/);
   // The widget's own controls are not on the popover's page; the popover material shows through.
   assert.doesNotMatch(setup, /class="lights"|data-win|Back to board/);
-  assert.match(setup, /#card \{ padding: 14px 16px 16px; \}/);
+  assert.match(setup, /#card \{ padding: 6px 16px 16px; \}/);
 });
 
 test("board page: in the panel the could-not-refresh strip keeps clear of the header buttons", () => {
@@ -4220,10 +4220,22 @@ test("Hosts rule: a row shows each local domain in the file, wherever its line i
 test("Hosts rule: the rows come from /etc/hosts on every load; hosts.json adds no row and no state", { skip: !swiftAvailable }, () => {
   const list = JSON.stringify({ domains: ["gone.example.test", "app.example.test"], local: ["off.example.test"], groups: [] });
   const first = hostsMessageRun({ status: true }, { hosts: HOSTS_FIXTURE, list });
-  assert.deepEqual(first.reply.domains.map((d) => [d.name, d.local]), rowsOf(HOSTS_FIXTURE).map((r) => [r.name, r.local]));
+  const byName = (a, b) => (a[0] < b[0] ? -1 : 1);
+  assert.deepEqual(first.reply.domains.map((d) => [d.name, d.local]), rowsOf(HOSTS_FIXTURE).map((r) => [r.name, r.local]).sort(byName));
   const edited = swap(HOSTS_FIXTURE, "127.0.0.1 app.example.test", "#127.0.0.1 app.example.test");
   const next = hostsMessageRun({ status: true }, { hosts: edited });
   assert.equal(next.reply.domains.find((d) => d.name === "app.example.test").local, false, "a hand edit shows on the next load");
+});
+
+test("Hosts rule: the rows are sorted by name, so a switch that moves a domain to a line of its own does not move its row", { skip: !swiftAvailable }, () => {
+  const before = hostsMessageRun({ status: true }, { hosts: HOSTS_FIXTURE });
+  const names = before.reply.domains.map((d) => d.name);
+  assert.deepEqual(names, [...names].sort());
+  // hmoff.example.test shares a commented line; Local moves it to a line below the other one.
+  const after = hostsMessageRun({ setMode: "local", names: ["hmoff.example.test"] }, { hosts: HOSTS_FIXTURE });
+  assert.match(after.hosts.toString(), /#127\.0\.0\.1 hmoff2\.example\.test\n127\.0\.0\.1\thmoff\.example\.test\n/);
+  assert.deepEqual(after.reply.domains.map((d) => d.name), names);
+  assert.equal(after.reply.domains.find((d) => d.name === "hmoff.example.test").local, true);
 });
 
 test("Hosts rule: Prod keeps the line in its place as a comment, and Local makes it active again, byte for byte", { skip: !swiftAvailable }, () => {
