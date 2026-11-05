@@ -245,3 +245,39 @@ test("widget page scripts: the Hosts and Settings pages get the fit script befor
   assert.match(loop[2], /page\.configuration\.userContentController\.addUserScript\(WKUserScript\(\n\s*source: WIDGET_PAGE_SCRIPT, injectionTime: \.atDocumentStart, forMainFrameOnly: true\)\)/);
   assert.match(tabs.slice(loop.index + loop[0].length), /loadPage\("popover\/hosts\.html", in: hostsWeb\)\n\s*loadPage\("popover\/settings\.html", in: widgetSettingsWeb\)/);
 });
+
+test("popover: opening on the Hosts tab asks for a fresh /etc/hosts status", () => {
+  const open = methodSource(readFileSync(SWIFT_URL, "utf8"), "openPanel");
+  assert.match(open, /\n\s*if widgetShownPage === hostsWeb \{ hostsMessage\(\["status": true\]\) \}\n/);
+});
+
+test("popover: a left click closes a shown popover and stops, and opens a closed one", () => {
+  const toggle = methodSource(readFileSync(SWIFT_URL, "utf8"), "togglePanel");
+  assert.match(toggle, /^\s*func togglePanel\(\) \{\n\s*if panel\.isShown \{ panel\.performClose\(nil\); return \}\n\s*openPanel\(\)\n\s*\}\n$/);
+});
+
+test("popover: closing puts nohover on the page that is on screen", () => {
+  const close = methodSource(readFileSync(SWIFT_URL, "utf8"), "popoverWillClose");
+  assert.match(close, /\n\s*widgetShownPage\.evaluateJavaScript\("document\.documentElement\.classList\.add\('nohover'\)"\)\n/);
+});
+
+test("popover: the open and close animation follows the reduce motion setting", () => {
+  const setUp = methodSource(readFileSync(SWIFT_URL, "utf8"), "setUpPanel");
+  assert.match(setUp, /\n\s*panel\.animates = !NSWorkspace\.shared\.accessibilityDisplayShouldReduceMotion\n/);
+});
+
+test("popover: only a left mouse-down on the status item's own window arms the reopen guard", () => {
+  const close = methodSource(readFileSync(SWIFT_URL, "utf8"), "popoverWillClose");
+  assert.match(close, /\n\s*if let event = NSApp\.currentEvent, event\.type == \.leftMouseDown,\n\s*event\.window != nil, event\.window === statusItem\.button\?\.window \{\n\s*panelClosedByIconAt = event\.timestamp\n\s*\}\n/);
+});
+
+test("popover: the size is fitted before the popover is shown", () => {
+  const open = methodSource(readFileSync(SWIFT_URL, "utf8"), "openPanel");
+  assert.match(open, /\n\s*fitPanel\(\)[^\n]*\n[\s\S]*\n\s*panel\.show\(relativeTo: button\.bounds, of: button, preferredEdge: \.minY\)\n/);
+});
+
+test("popover: the header height comes from whether the board header is shown", () => {
+  const fit = methodSource(readFileSync(SWIFT_URL, "utf8"), "fitPanel");
+  assert.match(fit, /\n\s*let tabs = boardHeaderShown\(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown, mode: displayMode\)\n/);
+  assert.match(fit, /header: tabs \? PANEL_HEADER_HEIGHT : 0,/);
+});
