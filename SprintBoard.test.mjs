@@ -221,12 +221,12 @@ test("setup screen: a change of onSetupScreen runs layoutWidget on the main queu
     /var onSetupScreen = false \{\n\s*didSet \{ DispatchQueue\.main\.async \{ \[weak self\] in self\?\.layoutWidget\(\) \} \}\n\s*\}/);
 });
 
-test("setup screen: the header and tint hide there, and only there the page takes the header height", () => {
+test("setup screen: the header and tint hide there, and the page takes the header height where the header hides", () => {
   const layout = methodSource(readFileSync(SWIFT_URL, "utf8"), "layoutWidget");
-  assert.match(layout, /let tabs = !onSetupScreen\n/);
+  assert.match(layout, /let tabs = boardHeaderShown\(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown, mode: displayMode\)\n/);
   assert.match(layout, /height: material\.bounds\.height - \(tabs \? PANEL_HEADER_HEIGHT : 0\)\)/);
   assert.match(layout, /header\.isHidden = !tabs\n/);
-  assert.match(layout, /widgetTint\?\.isHidden = !tabs\n/);
+  assert.match(layout, /widgetTint\?\.isHidden = !tabs \|\| displayMode == \.popover\n/);
 });
 
 test("widget page scripts: the board page starts with hover off and can fit the window", () => {
