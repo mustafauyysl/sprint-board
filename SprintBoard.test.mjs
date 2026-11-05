@@ -236,3 +236,12 @@ test("widget page scripts: the board page starts with hover off and can fit the 
   assert.match(config, /cfg\.userContentController\.addUserScript\(WKUserScript\(\n\s*source: source, injectionTime: \.atDocumentStart, forMainFrameOnly: true\)\)/);
   assert.match(launch, /web = DragWebView\(frame: [^\n]*configuration: cfg\)/);
 });
+
+test("widget page scripts: the Hosts and Settings pages get the fit script before they load", () => {
+  const tabs = methodSource(readFileSync(SWIFT_URL, "utf8"), "setUpWidgetTabs");
+  const loop = tabs.match(/for page in \[([^\]]*)\] as \[WKWebView\] \{\n([\s\S]*?)\n {8}\}\n/);
+  assert.ok(loop, "the tab page loop not found in setUpWidgetTabs");
+  assert.deepEqual(loop[1].split(", "), ["hostsWeb", "widgetSettingsWeb"]);
+  assert.match(loop[2], /page\.configuration\.userContentController\.addUserScript\(WKUserScript\(\n\s*source: WIDGET_PAGE_SCRIPT, injectionTime: \.atDocumentStart, forMainFrameOnly: true\)\)/);
+  assert.match(tabs.slice(loop.index + loop[0].length), /loadPage\("popover\/hosts\.html", in: hostsWeb\)\n\s*loadPage\("popover\/settings\.html", in: widgetSettingsWeb\)/);
+});
