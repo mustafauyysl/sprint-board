@@ -850,10 +850,40 @@ func hostsFileText(_ data: Data) -> (text: String, bom: Bool)? {
     return (text, bom)
 }
 
+let HOSTS_DELETE_BACKUP_PREFIX = "hosts.before-delete-"
+let HOSTS_DELETE_BACKUPS_KEPT = 20
+
+/// UTC, so a daylight saving change cannot put the names out of time order.
+func hostsDeleteBackupName(_ date: Date) -> String {
+    let format = DateFormatter()
+    format.locale = Locale(identifier: "en_US_POSIX")
+    format.timeZone = TimeZone(identifier: "UTC")
+    format.dateFormat = "yyyyMMdd'T'HHmmss.SSS'Z'"
+    return HOSTS_DELETE_BACKUP_PREFIX + format.string(from: date)
+}
+
+/// A delete never overwrites an earlier delete's copy: a name that is taken moves on by a millisecond.
+func hostsDeleteBackupPath(in dir: String, at date: Date) -> String {
+    var stamp = date
+    while true {
+        let path = (dir as NSString).appendingPathComponent(hostsDeleteBackupName(stamp))
+        if !FileManager.default.fileExists(atPath: path) { return path }
+        stamp += 0.001
+    }
+}
+
+/// The copies past the limit, oldest first. A file of any other name is not ours and never goes.
+func hostsDeleteBackupsPast(_ names: [String]) -> [String] {
+    let shape = "^" + NSRegularExpression.escapedPattern(for: HOSTS_DELETE_BACKUP_PREFIX) + "[0-9]{8}T[0-9]{6}\\.[0-9]{3}Z$"
+    return Array(names.filter { $0.range(of: shape, options: .regularExpression) != nil }.sorted()
+        .dropLast(HOSTS_DELETE_BACKUPS_KEPT))
+}
+
 /// Applies an edit to the hosts file; returns an error for the user, or nil on success. Writes IN PLACE: the user may write /etc/hosts (its owner here) but cannot
 /// create files in /etc, so temp-file-and-rename is impossible — and writing in place keeps
 /// the file's owner and mode exactly as they were. The previous contents go to `backupDir`
-/// first: hosts.bak every time, hosts.before-sprint-board once.
+/// first: hosts.bak every time, hosts.before-sprint-board once, and a timestamped copy for
+/// each delete, of which the last 20 stay.
 func writeHostsFile(_ edit: HostsEdit, path: String, backupDir: String) -> String? {
     let fm = FileManager.default
     guard let data = fm.contents(atPath: path), let file = hostsFileText(data) else {
@@ -874,6 +904,12 @@ func writeHostsFile(_ edit: HostsEdit, path: String, backupDir: String) -> Strin
     guard (try? data.write(to: URL(fileURLWithPath: backup), options: .atomic)) != nil else {
         return "Could not back up \(path); nothing was changed."
     }
+    if !edit.removed.isEmpty {
+        let copy = hostsDeleteBackupPath(in: backupDir, at: Date())
+        guard (try? data.write(to: URL(fileURLWithPath: copy), options: .atomic)) != nil else {
+            return "Could not back up \(path); nothing was changed."
+        }
+    }
     let out = (file.bom ? Data([0xEF, 0xBB, 0xBF]) : Data()) + Data(next.utf8)
     // No .atomic option: written in place.
     guard (try? out.write(to: URL(fileURLWithPath: path))) != nil else {
@@ -882,6 +918,11 @@ func writeHostsFile(_ edit: HostsEdit, path: String, backupDir: String) -> Strin
     // Read it back: name lookups use what the file holds, not what we meant to write.
     guard fm.contents(atPath: path) == out else {
         return "\(path) did not keep the change; check it by hand (the previous version is in \(backup))."
+    }
+    if !edit.removed.isEmpty {
+        for name in hostsDeleteBackupsPast((try? fm.contentsOfDirectory(atPath: backupDir)) ?? []) {
+            try? fm.removeItem(atPath: (backupDir as NSString).appendingPathComponent(name))
+        }
     }
     return nil
 }

@@ -2691,7 +2691,7 @@ function hostsRun(ops) {
   if (!hostsDriver) {
     const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
     const consts = ["HOSTS_BLOCK_START", "HOSTS_BLOCK_END", "HOSTS_LEGACY_BLOCK_START", "HOSTS_LEGACY_BLOCK_END",
-      "HOSTS_SYSTEM_NAMES", "HOSTS_LOCAL_ADDRESSES", "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS"].map((name) => {
+      "HOSTS_SYSTEM_NAMES", "HOSTS_LOCAL_ADDRESSES", "HOSTS_DELETE_BACKUP_PREFIX", "HOSTS_DELETE_BACKUPS_KEPT", "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS"].map((name) => {
       const line = src.match(new RegExp(`^let ${name} = .*$`, "m"));
       assert.ok(line, `${name} not found in SprintBoard.swift`);
       return line[0];
@@ -2700,7 +2700,7 @@ function hostsRun(ops) {
     const funcs = ["hostsName", "hostsEntry", "hostsMarkers", "hostsBlockRange", "managedHosts", "hostsLocalLine", "hostsCommented",
       "hostsUncommented", "hostsLineWithout", "hostsEntryWithout", "hostsRows", "hostsSwitched", "hostsAdded", "hostsRemoved", "hostsEdited",
       "hostsPartnerName", "partnerDomainSuffixes", "hostsGroupName", "hostsList", "hostsListJSON", "hostsApply", "hostsStatus",
-      "hostsFileText", "writeHostsFile", "chromeRefreshScript", "chromeRefreshNote", "chromeMissingFlags"].map((name) => swiftSource(src, name));
+      "hostsFileText", "hostsDeleteBackupName", "hostsDeleteBackupPath", "hostsDeleteBackupsPast", "writeHostsFile", "chromeRefreshScript", "chromeRefreshNote", "chromeMissingFlags"].map((name) => swiftSource(src, name));
     const driver = `import Foundation
 ${consts.join("\n")}
 ${structs.join("\n")}
@@ -2735,6 +2735,10 @@ let results: [Any] = ops.map { op in
                              toLocal: op["toLocal"] as? [String] ?? [], toProd: op["toProd"] as? [String] ?? [])
         return writeHostsFile(edit, path: op["path"] as! String, backupDir: op["backupDir"] as! String)
             .map { $0 as Any } ?? NSNull()
+    case "deleteBackupName": return hostsDeleteBackupName(Date(timeIntervalSince1970: (op["ms"] as! Double) / 1000))
+    case "deleteBackupPath":
+        return hostsDeleteBackupPath(in: op["dir"] as! String, at: Date(timeIntervalSince1970: (op["ms"] as! Double) / 1000))
+    case "deleteBackupsPast": return hostsDeleteBackupsPast(op["names"] as! [String])
     case "chromeScript": return chromeRefreshScript()
     case "missingFlags": return chromeMissingFlags(op["commandLine"] as! String)
     case "insecureFlags": return CHROME_INSECURE_FLAGS
@@ -3754,7 +3758,7 @@ function appRun(input, env = {}) {
   if (!appDriver) {
     const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
     const consts = ["HOSTS_BLOCK_START", "HOSTS_BLOCK_END", "HOSTS_LEGACY_BLOCK_START", "HOSTS_LEGACY_BLOCK_END",
-      "HOSTS_SYSTEM_NAMES", "HOSTS_LOCAL_ADDRESSES", "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS", "JIRA_KEYCHAIN", "JIRA_OAUTH_KEYCHAIN"].map((name) => {
+      "HOSTS_SYSTEM_NAMES", "HOSTS_LOCAL_ADDRESSES", "HOSTS_DELETE_BACKUP_PREFIX", "HOSTS_DELETE_BACKUPS_KEPT", "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS", "JIRA_KEYCHAIN", "JIRA_OAUTH_KEYCHAIN"].map((name) => {
       const line = src.match(new RegExp(`^let ${name} = .*$`, "m"));
       assert.ok(line, `${name} not found in SprintBoard.swift`);
       return line[0];
@@ -3763,7 +3767,7 @@ function appRun(input, env = {}) {
     const funcs = ["hostsName", "hostsEntry", "hostsMarkers", "hostsBlockRange", "managedHosts", "hostsLocalLine", "hostsCommented",
       "hostsUncommented", "hostsLineWithout", "hostsEntryWithout", "hostsRows", "hostsSwitched", "hostsAdded", "hostsRemoved", "hostsEdited",
       "hostsPartnerName", "hostsGroupName",
-      "hostsList", "hostsListJSON", "hostsApply", "hostsStatus", "hostsFileText", "writeHostsFile", "chromeMissingFlags",
+      "hostsList", "hostsListJSON", "hostsApply", "hostsStatus", "hostsFileText", "hostsDeleteBackupName", "hostsDeleteBackupPath", "hostsDeleteBackupsPast", "writeHostsFile", "chromeMissingFlags",
       "partnerDomainSuffixes", "needsSetup"].map((name) => swiftSource(src, name));
     const methods = ["readHostsList", "writeHostsList", "migrateHostsList", "hostsMessage", "readHostsText", "hostsPartnerSuffixes", "scheduleChromeRefresh",
       "openInsecureChrome", "cachedKeychainGet", "forgetCachedTokens", "tokenPayload"].map((name) => methodSource(src, name));
@@ -4184,6 +4188,116 @@ test("Hosts delete: the backup is taken before each delete", { skip: !swiftAvail
     assert.equal(readFileSync(join(backupDir, "hosts.bak"), "utf8"), HOSTS_FIXTURE);
     assert.equal(hostsOne({ op: "write", path, backupDir, removed: ["off.example.test"] }), null);
     assert.equal(readFileSync(join(backupDir, "hosts.bak"), "utf8"), one);
+  });
+});
+
+const DELETE_BACKUP_NAME = /^hosts\.before-delete-\d{8}T\d{6}\.\d{3}Z$/;
+const deleteBackups = (dir) => (existsSync(dir) ? readdirSync(dir) : []).filter((name) => DELETE_BACKUP_NAME.test(name)).sort();
+
+test("Hosts delete: each delete keeps its own timestamped copy of the file", { skip: !swiftAvailable }, () => {
+  withHostsFile(HOSTS_FIXTURE, 0o644, ({ path, backupDir, read }) => {
+    assert.equal(hostsOne({ op: "write", path, backupDir, removed: ["app.example.test"] }), null);
+    const one = read();
+    assert.equal(hostsOne({ op: "write", path, backupDir, removed: ["off.example.test"] }), null);
+    const kept = deleteBackups(backupDir);
+    assert.equal(kept.length, 2);
+    assert.equal(readFileSync(join(backupDir, kept[0]), "utf8"), HOSTS_FIXTURE, "the older copy is not overwritten");
+    assert.equal(readFileSync(join(backupDir, kept[1]), "utf8"), one);
+    assert.equal(readFileSync(join(backupDir, "hosts.bak"), "utf8"), one, "hosts.bak still holds the last version");
+    assert.equal(readFileSync(join(backupDir, "hosts.before-sprint-board"), "utf8"), HOSTS_FIXTURE, "and the first copy stays");
+  });
+});
+
+test("Hosts delete: a copy holds the exact bytes of the file", { skip: !swiftAvailable }, () => {
+  const bytes = Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from("127.0.0.1 app.example.test\r\n127.0.0.1 two.example.test\n")]);
+  withHostsFile(bytes, 0o644, ({ path, backupDir }) => {
+    assert.equal(hostsOne({ op: "write", path, backupDir, removed: ["two.example.test"] }), null);
+    assert.deepEqual(readFileSync(join(backupDir, deleteBackups(backupDir)[0])), bytes);
+  });
+});
+
+test("Hosts delete: only a write that deletes takes a timestamped copy", { skip: !swiftAvailable }, () => {
+  withHostsFile(HOSTS_FIXTURE, 0o644, ({ path, backupDir }) => {
+    assert.equal(hostsOne({ op: "write", path, backupDir, toProd: ["app.example.test"] }), null);
+    assert.equal(hostsOne({ op: "write", path, backupDir, added: ["new.example.test"] }), null);
+    assert.deepEqual(deleteBackups(backupDir), [], "a switch and an add use hosts.bak only");
+    assert.ok(existsSync(join(backupDir, "hosts.bak")));
+  });
+});
+
+test("Hosts delete: a delete that changes nothing takes no copy", { skip: !swiftAvailable }, () => {
+  withHostsFile(HOSTS_FIXTURE, 0o644, ({ path, backupDir, read }) => {
+    assert.equal(hostsOne({ op: "write", path, backupDir, removed: ["absent.example.test"] }), null);
+    assert.equal(read(), HOSTS_FIXTURE);
+    assert.deepEqual(deleteBackups(backupDir), []);
+  });
+});
+
+test("Hosts delete: the last 20 copies stay and the older ones go", { skip: !swiftAvailable }, () => {
+  const names = Array.from({ length: 25 }, (_, i) => `d${String(i).padStart(2, "0")}.example.test`);
+  const file = names.map((name) => `127.0.0.1 ${name}\n`).join("");
+  withHostsFile(file, 0o644, ({ path, backupDir, read }) => {
+    mkdirSync(backupDir);
+    const foreign = ["hosts.before-delete-notes", "hosts.before-delete-20000101T000000.000Z.keep", "other-20000101T000000.000Z"];
+    for (const name of foreign) writeFileSync(join(backupDir, name), "mine");
+    const old = "hosts.before-delete-20000101T000000.000Z";
+    writeFileSync(join(backupDir, old), "old");
+    writeFileSync(join(backupDir, "hosts.bak"), "previous");
+    writeFileSync(join(backupDir, "hosts.before-sprint-board"), "first");
+
+    const results = hostsRun(names.map((name) => ({ op: "write", path, backupDir, removed: [name] })));
+    assert.deepEqual(results, names.map(() => null));
+    assert.equal(read(), "");
+
+    const kept = deleteBackups(backupDir);
+    assert.equal(kept.length, 20);
+    assert.ok(!kept.includes(old), "a copy from an earlier run counts as well");
+    const expected = names.slice(5).map((_, i) => names.slice(5 + i).map((name) => `127.0.0.1 ${name}\n`).join(""));
+    assert.deepEqual(kept.map((name) => readFileSync(join(backupDir, name), "utf8")), expected, "newest 20, in time order");
+    for (const name of foreign) assert.equal(readFileSync(join(backupDir, name), "utf8"), "mine", `${name} is not ours`);
+    assert.equal(readFileSync(join(backupDir, "hosts.before-sprint-board"), "utf8"), "first");
+  });
+});
+
+test("Hosts delete: 20 copies are all kept, and the 21st removes one", { skip: !swiftAvailable }, () => {
+  const names = (count) => Array.from({ length: count }, (_, i) => `hosts.before-delete-202611${String(i + 1).padStart(2, "0")}T090000.000Z`);
+  assert.deepEqual(hostsOne({ op: "deleteBackupsPast", names: names(20) }), []);
+  assert.deepEqual(hostsOne({ op: "deleteBackupsPast", names: [...names(21)].reverse() }), [names(21)[0]], "the oldest, in any list order");
+});
+
+test("Hosts delete: copy names are UTC, sort by time, and never repeat", { skip: !swiftAvailable }, () => {
+  const at = Date.UTC(2026, 10, 5, 9, 7, 3, 42);
+  assert.equal(hostsOne({ op: "deleteBackupName", ms: at }), "hosts.before-delete-20261105T090703.042Z");
+  const dir = mkdtempSync(join(tmpdir(), "sprint-board-backupname-"));
+  try {
+    const first = hostsOne({ op: "deleteBackupPath", dir, ms: at });
+    assert.equal(first, join(dir, "hosts.before-delete-20261105T090703.042Z"));
+    writeFileSync(first, "taken");
+    const second = hostsOne({ op: "deleteBackupPath", dir, ms: at });
+    assert.equal(second, join(dir, "hosts.before-delete-20261105T090703.043Z"), "the same moment gets the next name");
+    assert.ok(first < second);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Hosts delete: a copy that cannot be written stops the delete", { skip: !swiftAvailable }, () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const writer = swiftSource(src, "writeHostsFile");
+  assert.match(writer, /guard \(try\? data\.write\(to: URL\(fileURLWithPath: copy\), options: \.atomic\)\) != nil else \{\n\s+return "Could not back up/);
+  assert.ok(writer.indexOf("fileURLWithPath: copy") < writer.indexOf("out.write(to:"), "the copy comes first");
+  assert.ok(writer.indexOf("hostsDeleteBackupsPast(") > writer.indexOf("did not keep the change"),
+    "old copies go only after the change is read back, so a failed delete removes none");
+
+  withHostsFile(HOSTS_FIXTURE, 0o644, ({ path, backupDir, read }) => {
+    mkdirSync(backupDir);
+    chmodSync(backupDir, 0o555);
+    try {
+      assert.match(hostsOne({ op: "write", path, backupDir, removed: ["app.example.test"] }), /Could not back up/);
+      assert.equal(read(), HOSTS_FIXTURE);
+    } finally {
+      chmodSync(backupDir, 0o755);
+    }
   });
 });
 

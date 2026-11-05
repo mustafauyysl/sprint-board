@@ -36,7 +36,8 @@ Deliberately kept **outside** the code folder:
 - `~/.local/state/sprint-widget/` — `state.json` (the last seen most overdue task / broken CI /
   review record, which is what stops a sound repeating) + `notes.json`, and the Hosts tab's
   backups: `hosts.bak` before every write to `/etc/hosts`, `hosts.before-sprint-board` once,
-  and `hosts.json.before-file-rows`, a copy of an old `hosts.json` taken before its migration
+  `hosts.before-delete-<UTC time>` before each delete (the last 20 stay), and
+  `hosts.json.before-file-rows`, a copy of an old `hosts.json` taken before its migration
 - `~/.config/sprint-widget/hosts.json` — the Hosts tab's groups, nothing else. The domains and
   their Local or Prod state are read from `/etc/hosts` on every load.
 - Jira token — **keychain**, service `sprint-board-jira` (overridable in config)
