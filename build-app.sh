@@ -3,7 +3,7 @@
 #
 #   ./build-app.sh            DEVELOPMENT: installs the bundle into /Applications
 #                             and points the data layer at the REPO (an appdir
-#                             file). Editing view.html / fetch.mjs / lib.mjs needs
+#                             file). Editing a page / fetch.mjs / lib.mjs needs
 #                             NO rebuild — just restart the app.
 #
 #   ./build-app.sh --release  DISTRIBUTION: copies the data layer INSIDE the
@@ -122,6 +122,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <!-- No Dock icon: this is a desktop widget. Quit/refresh live in the menu bar item. -->
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSAppleEventsUsageDescription</key><string>After a Hosts switch, Sprint Board runs a short script in an open Google Chrome tab that makes Chrome drop its open connections, so pages follow the new address. The script reads nothing from the page.</string>
 </dict>
 </plist>
 PLIST
@@ -148,7 +149,8 @@ fetch_node() {
 
 if [ "$RELEASE" = "1" ]; then
   # Data layer INSIDE the bundle, so whoever downloads it never clones the repo.
-  cp fetch.mjs lib.mjs view.html setup.html config.example.json "$APP/Contents/Resources/"
+  cp fetch.mjs lib.mjs setup.html config.example.json "$APP/Contents/Resources/"
+  cp -R popover "$APP/Contents/Resources/"
   say "✓ data layer embedded in the bundle"
 
   # Node INSIDE the bundle too, so it opens even with node NOT INSTALLED.
@@ -168,7 +170,7 @@ if [ "$RELEASE" = "1" ]; then
   chmod +x "$APP/Contents/Resources/node"
   say "✓ node embedded ($(lipo -archs "$APP/Contents/Resources/node"))"
 else
-  # In development read from the repo, so editing view.html needs no rebuild.
+  # In development read from the repo, so editing a page needs no rebuild.
   printf '%s' "$(pwd -P)" > "$APP/Contents/Resources/appdir"
 fi
 
@@ -182,7 +184,7 @@ if [ -n "${DEV_ID:-}" ]; then
       --entitlements node.entitlements --sign "$DEV_ID" "$APP/Contents/Resources/node"
   fi
   # --options runtime (hardened runtime) is REQUIRED for notarisation.
-  codesign --force --timestamp --options runtime --sign "$DEV_ID" "$APP"
+  codesign --force --timestamp --options runtime --entitlements app.entitlements --sign "$DEV_ID" "$APP"
 else
   say "→ ad-hoc signature (development)"
   codesign --force --sign - "$APP"

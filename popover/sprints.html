@@ -1,0 +1,622 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sprint Board</title>
+<style>
+  /* The popover's Sprint tab. The popover's material shows through the page, so greys are white
+     with alpha (system greys fade on it), as on the Hosts tab. */
+  :root { color-scheme: dark;
+          --t1: rgba(255,255,255,.96); --t2: rgba(255,255,255,.8); --t3: rgba(255,255,255,.62);
+          --fill: rgba(255,255,255,.05);
+          /* Every grey hover, on every popover page: rows, headers, cards and buttons */
+          --hover: rgba(255,255,255,.12); }
+  * { box-sizing: border-box; }
+  /* The popover reaches a new height a moment after the page does; a scroll bar flashed for
+     that moment. The page still scrolls, without a bar and without the trackpad bounce. */
+  html, body { margin: 0; padding: 0; background: transparent; overflow-x: hidden; overflow-y: auto; scrollbar-width: none; }
+  html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }
+  html { overscroll-behavior: none; }
+  body { font: 13px -apple-system, system-ui; line-height: 1.35; color: -apple-system-label;
+         font-variant-numeric: tabular-nums; -webkit-user-select: none; user-select: none; cursor: default; }
+  #card { padding: 14px 16px 16px; }
+
+  /* SF Symbols: Swift injects each one as a mask image on .s-<name> */
+  .sym { display: inline-block; width: 13px; height: 13px; flex: none; vertical-align: -2px; background-color: currentColor;
+         -webkit-mask-size: contain; -webkit-mask-repeat: no-repeat; -webkit-mask-position: center; }
+  .sym.sm { width: 11px; height: 11px; vertical-align: -1px; }
+  .c-red { color: -apple-system-red; } .c-orange { color: -apple-system-orange; }
+  .c-yellow { color: -apple-system-yellow; } .c-green { color: -apple-system-green; }
+  .c-blue { color: -apple-system-blue; } .c-purple { color: -apple-system-purple; }
+  .c-gray { color: -apple-system-gray; } .c-2 { color: var(--t2); }
+
+  /* Header: the sprint's name and two buttons. The refresh button grows to the left on hover and
+     shows how old the data is; its icon's own margin makes 7 px on its right look like 9 px. */
+  .hdr { display: flex; align-items: center; gap: 8px; }
+  .hdr .name { flex: 1; min-width: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tools { display: inline-flex; gap: 2px; }
+  .rf { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 26px;
+        border-radius: 6px; cursor: pointer; color: var(--t2); }
+  .rf .sym { width: 16px; height: 16px; }
+  /* The gear swaps the page on click; after a swap it waits for a real mouse move (nohover) */
+  :where(html:not(.nohover)) .rf:hover { background: var(--hover); color: -apple-system-label; }
+  .rf.expand { width: auto; min-width: 30px; padding: 0 7px; transition: padding .2s cubic-bezier(.2,.7,.3,1), background-color .15s; }
+  .rf .when { max-width: 0; overflow: hidden; white-space: nowrap; opacity: 0; font-size: 10px; color: var(--t2);
+              transition: max-width .2s cubic-bezier(.2,.7,.3,1), opacity .15s, margin .2s; }
+  .rf.expand:hover { padding-left: 9px; }
+  .rf.expand:hover .when { max-width: 140px; opacity: 1; margin-right: 6px; }
+  /* fetch.mjs takes ~13 s; a refresh button that did not spin felt like the click had not landed */
+  .rf.spin .sym { animation: sbSpin 1s linear infinite; color: -apple-system-control-accent; }
+  @keyframes sbSpin { to { transform: rotate(360deg); } }
+
+  /* Three cards: the sprint, the team goal (it opens its tasks) and the days left */
+  .tiles { display: grid; grid-template-columns: 1fr 1.25fr 62px; gap: 8px; margin-top: 12px; }
+  .tiles.two { grid-template-columns: 1fr 62px; }
+  .tile { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 10px; background: rgba(255,255,255,.06); }
+  .tile.fold:hover, .tile.open { background: var(--hover); }
+  .tile b { display: block; font-size: 12px; }
+  .tile small { display: block; font-size: 11px; color: var(--t2); white-space: nowrap; }
+  .tile small.c-red { color: -apple-system-red; }
+  .tile small.c-yellow { color: -apple-system-yellow; }
+  .tile.days { flex-direction: column; justify-content: center; gap: 0; padding: 9px 4px; text-align: center; }
+  .tile.days .big { font-size: 17px; font-weight: 700; line-height: 1.1; }
+  .tile.days small { margin-top: 1px; }
+  .ring { width: 48px; height: 48px; flex: none; }
+  .ring.accent { color: -apple-system-control-accent; }
+  .ring text { font: 700 7.5px -apple-system, system-ui; letter-spacing: -.2px; fill: rgba(255,255,255,.96); }
+
+  /* The team goal's tasks: counts as pills (the empty ones left out); each row fades from its
+     risk colour on the left to transparent on the right */
+  .gpanel { margin-top: 8px; padding: 4px; border-radius: 10px; background: rgba(255,255,255,.06); }
+  .gnone { font-size: 11px; color: var(--t2); }
+  .gpills { display: flex; gap: 6px; margin: 0 0 4px; }
+  .gpill { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; font-size: 10px; font-weight: 600; }
+  .gpill.red { color: -apple-system-red; background: rgba(255,69,58,.18); }
+  .gpill.yellow { color: -apple-system-yellow; background: rgba(255,214,10,.16); }
+  .gpill.ok { color: var(--t2); background: rgba(255,255,255,.1); }
+  .gpill.done { color: -apple-system-green; background: rgba(48,209,88,.16); }
+  .grow { display: flex; align-items: center; gap: 6px; padding: 2px 2px 2px 6px; margin: 2px 0px 0;
+          border-radius: 8px; white-space: nowrap; cursor: pointer;
+          background: linear-gradient(90deg, color-mix(in srgb, var(--risk) 22%, transparent), transparent); }
+  .grow:hover { background: var(--hover); }
+  .grow.red { --risk: -apple-system-red; }
+  .grow.yellow { --risk: -apple-system-yellow; }
+  .grow.ok { --risk: -apple-system-gray; }
+  .grow.done { --risk: -apple-system-green; }
+  .grow.done { opacity: .55; }
+  .grow.done .gkey { text-decoration: line-through; }
+  .gsum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .gkey { font-weight: 600; }
+  .gstat { flex: none; max-width: 38%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; height: 18px; line-height: 18px;
+           padding: 0 7px; border-radius: 999px; font-size: 11px; color: var(--t2); background: rgba(255,255,255,.1); }
+
+  /* Most overdue on two lines: what it is on the left, its status and how far past the limit on the right */
+  .overdue { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer;
+             background: color-mix(in srgb, -apple-system-red 14%, transparent); }
+  .overdue .body { flex: 1; min-width: 0; }
+  .overdue .l { display: flex; align-items: baseline; gap: 8px; }
+  .overdue .lt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .overdue .rt { flex: none; font-size: 11px; color: var(--t2); }
+  .overdue .l2 .lt { font-size: 11px; color: var(--t2); }
+  /* Drawn in CSS: WebKit paints a native progress bar grey whenever the window is not key */
+  progress { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 6px; margin: 6px 0 1px; border: 0; }
+  progress::-webkit-progress-bar { background: color-mix(in srgb, -apple-system-label 12%, transparent); border-radius: 3px; }
+  progress::-webkit-progress-value { background: -apple-system-red; border-radius: 3px; }
+  .all-clear { display: flex; align-items: center; gap: 7px; margin-top: 10px; white-space: nowrap; overflow: hidden; }
+
+  /* Notices: a refresh that failed over good data, GitHub off, a new version */
+  .off, .upd, .stale { display: flex; gap: 7px; align-items: flex-start; margin-top: 9px; padding: 6px 8px;
+                       border-radius: 7px; font-size: 11px; background: var(--fill); }
+  .off { color: var(--t2); }
+  .upd { cursor: pointer; background: color-mix(in srgb, -apple-system-blue 12%, transparent); }
+  .upd:hover { background: color-mix(in srgb, -apple-system-blue 20%, transparent); }
+  .stale { margin: 10px 0 0; background: color-mix(in srgb, -apple-system-yellow 16%, transparent); }
+  .clear { display: flex; align-items: center; gap: 7px; margin-top: 6px; font-size: 11px; color: var(--t2); }
+
+  /* Two levels that read apart at a glance: the main headers (MY TASKS, GITHUB, NOTES) bright, bold
+     and in capitals with a rule; the section headers under them light and dim */
+  .h { display: flex; align-items: center; gap: 8px; margin: 12px 0 2px; font-size: 11px; font-weight: 700;
+       letter-spacing: .1em; text-transform: uppercase; color: var(--t1); }
+  .h::after { content: ""; flex: 1; border-top: 1px solid -apple-system-separator; }
+  .h .n { font-weight: 500; color: var(--t3); }
+  .ghd { display: flex; align-items: center; gap: 6px; margin: 8px 0 4px; padding: 2px 8px; border-radius: 8px;
+         font-size: 11px; font-weight: 500; color: var(--t3); }
+  .ghd .n { font-weight: 500; color: rgba(255,255,255,.42); }
+
+  /* Every list folds; rows grow in or fold away, the chevron turns, fills fade */
+  .fold { cursor: pointer; }
+  .fold:hover { background: var(--hover); }
+  .fold .chev { margin-left: auto; color: var(--t2); }
+  .fold:hover .chev { color: -apple-system-label; }
+  .fold-body { overflow: clip; }
+  .row, .brow, .item, .fold, .tile, .grow, .chev { transition: background-color .15s, color .15s; }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+    .rf.spin .sym { animation: none; opacity: .45; }
+  }
+
+  /* Task rows, past sprints' rows and GitHub rows: one light box, set 6 px in, 4 px apart. The box
+     fades in from the left to its icon's colour (white when the icon has none). */
+  .row, .brow, .item { display: flex; align-items: center; gap: 6px; margin: 0 0 4px 6px; padding: 2px 4px; border-radius: 8px;
+                       white-space: nowrap; cursor: pointer; --icon: #fff;
+                       background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--icon) 8%, transparent)); }
+  .row:hover, .brow:hover, .item:hover { background: var(--hover); }
+  :is(.row, .brow, .item):has(> .sym.c-red) { --icon: -apple-system-red; }
+  :is(.row, .brow, .item):has(> .sym.c-orange) { --icon: -apple-system-orange; }
+  :is(.row, .brow, .item):has(> .sym.c-yellow) { --icon: -apple-system-yellow; }
+  :is(.row, .brow, .item):has(> .sym.c-green) { --icon: -apple-system-green; }
+  :is(.row, .brow, .item):has(> .sym.c-blue) { --icon: -apple-system-blue; }
+  :is(.row, .brow, .item):has(> .sym.c-purple) { --icon: -apple-system-purple; }
+  :is(.row, .brow, .item):has(> .sym.c-gray) { --icon: -apple-system-gray; }
+
+  .row { align-items: baseline; }
+  .row > .sym { align-self: flex-start; margin-top: 2px; }
+  .row .k { min-width: 68px; flex: none; font-weight: 500; }
+  .row .qa { flex: none; max-width: 66px; overflow: hidden; text-overflow: ellipsis; color: var(--t2); }
+  .row .carry { flex: none; text-align: right; color: -apple-system-purple; }
+  .row .d { flex: none; width: 24px; text-align: right; }
+  .row.done { opacity: .5; }
+  /* Struck through = work finished. Jira's "done" category alone does not say that: some of the
+     statuses mean "waiting to ship to prod", less faded and not struck. */
+  .row.done.finished .k, .row.done.cancelled .k { text-decoration: line-through; }
+  .row.done.pending .k { color: -apple-system-green; }
+  .row.warn .d, .row.warn .k { color: -apple-system-orange; }
+  .row.critical .d, .row.critical .k { color: -apple-system-red; }
+  /* Waiting-to-ship and shipped rows fade, but their PR column stays lit */
+  .row.done:is(.pending, .finished) { opacity: 1; }
+  .row.done:is(.pending, .finished) > :not(.rp) { opacity: .5; }
+  .row.done.pending > :not(.rp) { opacity: .78; }
+  .goal { flex: none; padding: 0 7px; border-radius: 999px; font-size: 10px; font-weight: 600; line-height: 16px;
+          color: #5cb0ff; background: rgba(10,132,255,.18); }
+
+  /* Every PR of a task stays reachable: its state is the number's colour, its mark and its tooltip,
+     and numbers that do not fit go to a second line */
+  .rp { flex: 1; min-width: 0; text-align: right; font-size: 11px; }
+  .rp .g + .g { margin-left: 4px; }
+  .rp .c { white-space: nowrap; cursor: pointer; margin-right: 2px; }
+  .rp .c:hover { text-decoration: underline; }
+  .rp .c .sym { margin-left: 1px; }
+  .rp .open { color: -apple-system-green; }
+  .rp .merged, .rp .deployed { color: -apple-system-purple; }
+  .rp .none { color: var(--t3); }
+  .rp .badge { color: var(--t2); } .rp .badge.good { color: -apple-system-green; }
+  .rp .bad { color: -apple-system-red; } .rp .wait { color: -apple-system-orange; }
+
+  /* Past sprints' tasks awaiting release */
+  .brow .bkey { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .brow .bstatus { flex: none; max-width: 58%; overflow: hidden; text-overflow: ellipsis; color: var(--t2); }
+
+  /* GitHub rows; a review request waiting two days or more sits in a yellow box */
+  .item .main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .side { flex: none; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--t2); }
+  .item.late { background: color-mix(in srgb, -apple-system-yellow 16%, transparent); }
+  .item.late:hover { background: color-mix(in srgb, -apple-system-yellow 24%, transparent); }
+  .item.late .side { color: -apple-system-orange; }
+
+  .notes .nrow { display: flex; gap: 6px; align-items: baseline; padding: 1px 0; }
+  .notes .ntext { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .notes .ndel { flex: none; color: var(--t3); cursor: pointer; }
+  .notes .ndel:hover { color: -apple-system-red; }
+  .notes .ninput { width: 100%; height: 26px; margin-top: 4px; padding: 0 10px; border-radius: 7px; outline: none;
+                   font: 12px -apple-system, system-ui; color: inherit; -webkit-user-select: text; user-select: text;
+                   background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.14); }
+
+  .err { min-height: 44px; font-size: 12px; white-space: pre-wrap; }
+  .err .hint { margin-top: 6px; color: var(--t2); font-size: 11px; }
+</style>
+
+<div id="card"><div class="err">Fetching data…</div></div>
+
+<script>
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const clip = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
+  const sym = (name, cls = "") => `<i class="sym s-${name.replace(/\./g, "-")}${cls ? " " + cls : ""}"></i>`;
+  const pct = (a, b) => b ? Math.round(a / b * 100) + "%" : "—";
+  const hhmm = (iso) => new Date(iso).toTimeString().slice(0, 5);
+  // The refresh time reads as an age, so it is not taken for the clock.
+  const ago = (iso) => {
+    const minutes = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return minutes + " min ago";
+    return Math.floor(minutes / 60) + " h ago";
+  };
+  const post = (message) => window.webkit?.messageHandlers?.sb?.postMessage(message);
+
+  // A task's icon: finished, cancelled or waiting to ship; on fire; carried over; not started;
+  // or the kind of work under way (in review, in testing, the rest).
+  const DONE_ICON = { finished: sym("checkmark.circle.fill", "c-green"), cancelled: sym("xmark.circle", "c-gray"),
+                      pending: sym("shippingbox.fill", "c-green") };
+  const workIcon = (t) => {
+    const status = String(t.status || "").toLowerCase();
+    if (status.includes("review")) return sym("eye", "c-blue");
+    if (/test|uat|qa/.test(status)) return sym("checklist", "c-blue");
+    return sym("circle.lefthalf.filled", "c-blue");
+  };
+  const icon = (t) => {
+    if (t.done) return DONE_ICON[t.release] || DONE_ICON.pending;
+    if (t.alert) return sym("flame.fill", "c-red");
+    if (t.carriedOver) return sym("arrow.uturn.forward.circle", "c-purple");
+    if (t.statusCategory === "new") return sym("circle", "c-gray");
+    return workIcon(t);
+  };
+
+  // A PR's number carries its state: the CI mark of an open PR, the merge mark or the globe of a
+  // merged or deployed one. An unknown CI state (a draft, a failed query) gets no class and no
+  // mark: painting it green would claim it passed.
+  const PR_MARK = { FAILURE: "xmark", ERROR: "xmark", PENDING: "clock", EXPECTED: "clock", SUCCESS: "checkmark" };
+  const prMark = (s) => PR_MARK[s] ? sym(PR_MARK[s], "sm") : "";
+  const PR_STATE_MARK = { merged: "arrow.triangle.merge", deployed: "globe" };
+  const prStateMark = (status) => PR_STATE_MARK[status] ? sym(PR_STATE_MARK[status], "sm") : "";
+  const prClass = (s) => {
+    if (s === "FAILURE" || s === "ERROR") return "bad";
+    if (s === "PENDING" || s === "EXPECTED") return "wait";
+    return s ? "good" : "";
+  };
+  const prNumber = (p) => {
+    const why = (p.checks || []).length ? " · " + p.checks.join(", ") : "";
+    return `<span class="c${p.ci ? " " + prClass(p.ci) : ""}" data-url="${esc(p.url)}"
+      title="${esc(p.repo)}#${esc(p.number)} · ${esc(p.status)} · ${esc(p.title)}${esc(why)}">#${esc(p.number)}${prMark(p.ci)}${prStateMark(p.status)}</span>`;
+  };
+  // When the PR search failed, the open-PR search may still have given the task its badge.
+  const searchFailed = (t) => t.pr
+    ? `<span class="badge ${prClass(t.pr.state)}" title="the GitHub PR search failed: ${t.pr.count} open PR(s), CI from the open-PR search">${sym("arrow.triangle.pull")}${t.pr.count}${prMark(t.pr.state)}</span>`
+    : `<span class="none" title="the GitHub PR search failed">PRs ?</span>`;
+  const prColumn = (t) => {
+    const prs = t.releasePrs;
+    if (prs === null) return searchFailed(t);
+    if (!Array.isArray(prs)) return "";
+    if (!prs.length) return `<span class="none">no PR</span>`;
+    return ["open", "merged", "deployed"].map((state) => {
+      const ofState = prs.filter((p) => p.status === state);
+      return ofState.length ? `<span class="g ${state}">${ofState.map((p) => prNumber(p) + " ").join("")}</span>` : "";
+    }).join("");
+  };
+
+  const taskRow = (t) => `
+        <div class="row ${esc(t.tier)}${t.release ? " " + esc(t.release) : ""}" data-url="${esc(t.url)}"
+             title="${esc(t.summary)}&#10;${esc(t.status)}: ${t.daysInStatus} business days (limit ${t.threshold}d) · age ${t.ageDays}d">
+          ${icon(t)}
+          <span class="k">${esc(t.key)}</span>
+          ${t.goal ? `<span class="goal">GOAL</span>` : ""}
+          <span class="qa">${t.qaShort ? sym("testtube.2") + " " + esc(t.qaShort) : ""}</span>
+          <span class="carry"${t.carriedOver ? ` title="carried over: this is its sprint #${t.sprintCount}"` : ""}>${t.carriedOver ? sym("arrow.uturn.forward", "sm") + t.sprintCount : ""}</span>
+          <span class="rp">${prColumn(t)}</span>
+          <span class="d" title="${t.daysInStatus} business days in ${esc(t.status)} (limit ${t.threshold}d)&#10;opened ${t.ageDays} business days ago">${t.daysInStatus}d</span>
+        </div>`;
+
+  // Folding: every list folds and stays as the user left it across refreshes; a list the user
+  // never touched keeps its default.
+  const FOLD = new Map();
+  const isOpen = (key, byDefault) => FOLD.has(key) ? FOLD.get(key) : byDefault;
+  const chevron = (open) => sym(open ? "chevron.up" : "chevron.down", "sm chev");
+  const foldHeader = (cls, key, open, label) =>
+    `<div class="${cls} fold" data-fold="${esc(key)}" data-open="${open ? 1 : 0}">${label}${chevron(open)}</div>`;
+  const foldBody = (key, html) => `<div class="fold-body" data-body="${esc(key)}">${html}</div>`;
+
+  // The team goal: a card with a ring that opens the goal tasks below the cards.
+  const RISK_WORD = { red: "critical", yellow: "at risk", ok: "on track", done: "done" };
+  const RISK_MEANING = {
+    red: "Critical for its stage: too few working days left for where it is",
+    yellow: "At risk for its stage: few working days left for where it is",
+    ok: "On track: enough working days left for its stage",
+    done: "Done in Jira",
+  };
+  const goalCounts = (g) => {
+    const count = { red: 0, yellow: 0, ok: 0, done: 0 };
+    (g.rows || []).forEach((r) => { count[r.risk] = (count[r.risk] || 0) + 1; });
+    return count;
+  };
+  const ring = (done, total, cls) => {
+    const share = total ? Math.min(1, done / total) : 0;
+    return `<svg class="ring ${cls}" viewBox="0 0 36 36"><circle cx="18" cy="18" r="14" fill="none" stroke="rgba(255,255,255,.14)" stroke-width="4"/>`
+      + `<circle cx="18" cy="18" r="14" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-dasharray="${(share * 87.96).toFixed(1)} 87.96" transform="rotate(-90 18 18)"/>`
+      + `<text x="18" y="20.7" text-anchor="middle">${pct(done, total)}</text></svg>`;
+  };
+  const riskLine = (count) => {
+    if (count.red) return `<small class="c-red">${count.red} critical</small>`;
+    if (count.yellow) return `<small class="c-yellow">${count.yellow} at risk</small>`;
+    return "";
+  };
+  const goalTile = (g) => {
+    const color = { red: "c-red", yellow: "c-yellow" }[g.worst] || "c-blue";
+    const lines = g.error ? `<small>could not read</small>` : `<small>${g.done} of ${g.total} done</small>${riskLine(goalCounts(g))}`;
+    const open = isOpen("goals", false);
+    return foldHeader(`tile${open ? " open" : ""}`, "goals", open,
+      `${ring(g.error ? 0 : g.done, g.error ? 0 : g.total, color)}<div><b>Team goal</b>${lines}</div>`);
+  };
+  const goalPills = (count) => ["red", "yellow", "ok", "done"].filter((k) => count[k]).map((k) =>
+    `<span class="gpill ${k}" title="${RISK_MEANING[k]}">${count[k]} ${RISK_WORD[k]}</span>`).join("");
+  // The first pill names the board column (the status itself when no column lists it), the second
+  // the owner's first name; the full status and name are in the row's tooltip.
+  const goalRows = (rows) => rows.map((r) => `
+        <div class="grow ${esc(r.risk)}" data-url="${esc(r.url)}" title="${esc(r.summary)}&#10;${esc(r.status)} · ${esc(r.owner || "Unassigned")}">
+          <span class="gsum"><span class="gkey">${esc(r.key)}</span> ${esc(r.summary)}</span>
+          <span class="gstat">${esc(r.stage || r.status)}</span>
+          <span class="gstat">${esc(r.ownerShort || "Unassigned")}</span>
+        </div>`).join("");
+  const goalPanel = (g) => {
+    if (g.error) return `<div class="gpanel"><div class="gnone">Could not read the goal tasks: ${esc(g.error)}</div></div>`;
+    if (!g.rows.length) return `<div class="gpanel"><div class="gnone">No goal tasks in this sprint.</div></div>`;
+    return `<div class="gpanel"><div class="gpills">${goalPills(goalCounts(g))}</div>${goalRows(g.rows)}</div>`;
+  };
+
+  const daysTile = (n) => `<div class="tile days"><span class="big">${n == null ? "—" : n}</span><small>${n === 1 ? "day left" : "days left"}</small></div>`;
+  const overdueShare = (o) => Math.max(.15, Math.min(1, (o.ratio - 1) / 2));
+  const overdueCard = (o) => `
+      <div class="overdue" data-url="${esc(o.url)}" title="${esc(o.summary)}${o.carriedOver ? "&#10;carried over, sprint " + o.sprintCount : ""}">
+        ${sym("exclamationmark.triangle.fill", "c-red")}
+        <div class="body">
+          <div class="l"><span class="lt"><b>${esc(o.key)}</b> <span class="c-2">· Most overdue</span></span><span class="rt">${esc(o.status)} · ${o.daysInStatus}d</span></div>
+          <div class="l l2"><span class="lt">${esc(o.summary)}</span><span class="rt">${o.threshold > 0 ? `${o.ratio}× limit` : "limit 0"}</span></div>
+          <progress value="${overdueShare(o)}" max="1"></progress>
+        </div>
+      </div>`;
+  const allClear = () => `<div class="all-clear">${sym("checkmark.seal.fill", "c-green")}<span>Nothing overdue</span><span class="c-2">— every task is within its limit</span></div>`;
+
+  let LAST = null;
+  let LAST_OK = null;    // the last successful data; a failed refresh must not wipe the board
+  let staleNote = null;
+  let refreshing = false;  // a refresh was asked for and its result has not arrived
+  const staleHtml = () => staleNote ? `<div class="stale">${sym("exclamationmark.triangle.fill", "c-yellow")}<div>Could not refresh: <b>${esc(staleNote.error)}</b><br>
+        Showing data as of ${hhmm(staleNote.at)}. It will retry shortly; press Refresh
+        if you would rather not wait.</div></div>` : "";
+
+  // The top: three cards, the goal tasks when opened, the most overdue task.
+  const topHtml = (d) => {
+    const g = d.sprintGoal;
+    return `
+      ${staleHtml()}
+      <div class="tiles${g ? "" : " two"}">
+        <div class="tile">${ring(d.done, d.total, "accent")}<div><b>Sprint</b><small>${d.done} of ${d.total} done</small></div></div>
+        ${g ? goalTile(g) : ""}
+        ${daysTile((d.sprint || {}).daysLeft)}
+      </div>
+      ${g && isOpen("goals", false) ? foldBody("goals", goalPanel(g)) : ""}
+      ${d.overdue ? overdueCard(d.overdue) : allClear()}`;
+  };
+
+  // My tasks, one folding section per status. Finished and cancelled ones (phase 2 and 3) start
+  // folded; the rest is work still tracked and starts open.
+  const tasksHtml = (d) => `
+      <div class="h">My tasks <span class="n">${(d.tasks || []).length}</span></div>
+      ${(d.groups || []).map((g) => {
+        const key = "status:" + g.status;
+        const open = isOpen(key, g.phase < 2);
+        return `
+        ${foldHeader("ghd", key, open, `${esc(g.status)} <span class="n">${g.tasks.length}</span>`)}
+        ${open ? foldBody(key, g.tasks.map(taskRow).join("")) : ""}`;
+      }).join("")}`;
+
+  // Work left behind in a past sprint that never shipped; the main query no longer returns it.
+  const pastSprintsHtml = (rows) => rows.length ? `
+      <div class="ghd">Past sprints · awaiting release <span class="n">${rows.length}</span></div>
+      ${rows.map((r) => `
+        <div class="brow" data-url="${esc(r.url)}" title="${esc(r.summary)}&#10;${esc(r.status)} · ${r.days} business days">
+          ${sym("shippingbox.fill", "c-green")}
+          <span class="bkey">${esc(r.key)}</span>
+          <span class="bstatus">${esc(clip(r.status, 16))}${r.sprint
+            ? " · " + esc(clip(r.sprint.replace(/^.*Sprint/i, "Sprint"), 12)) : ""} · ${r.days}d</span>
+        </div>`).join("")}` : "";
+
+  // GitHub, in the widget's order: waiting for review, awaiting your review, merge blocked. A PR
+  // whose merge state GitHub has not settled sits under Merge Blocked, in grey.
+  const githubSplit = (d) => {
+    const prs = d.pullRequests || [];
+    return {
+      reviews: d.reviewRequests || [],
+      blocked: prs.filter((p) => p.kind !== "checking"),
+      waiting: d.waitingPrs || [],
+      checking: prs.filter((p) => p.kind === "checking"),
+    };
+  };
+  const ghItem = (url, title, iconHtml, main, side, cls = "") => `
+      <div class="item${cls ? " " + cls : ""}" data-url="${esc(url)}" title="${esc(title)}">${iconHtml}<span class="main">${main}</span><span class="side">${side}</span></div>`;
+  const ghRef = (p) => `${esc(p.repo)}#${p.number}`;
+  const ghSection = (id, label, items) => {
+    if (!items.length) return "";
+    const key = "github:" + id;
+    const open = isOpen(key, true);
+    return `
+      ${foldHeader("ghd", key, open, `${label} <span class="n">${items.length}</span>`)}
+      ${open ? foldBody(key, items.join("")) : ""}`;
+  };
+  const githubNotes = (d, empty) => {
+    if (d.prsAvailable === false) {
+      const why = d.githubOrgError
+        ? `PR/CI bands are off — ${esc(d.githubOrgError)}. Fix it in Settings.`
+        : `PR/CI bands are off — GitHub could not be reached. Run <b>gh auth login</b>, or add a GitHub token in Settings.`;
+      return `<div class="off">${sym("info.circle")}<div>${why}</div></div>`;
+    }
+    if (empty && d.reviewsAvailable !== false && !d.requiredError) {
+      return `<div class="clear">${sym("checkmark.seal.fill", "c-green")}<span>No PR waiting, to review or blocked</span></div>`;
+    }
+    return "";
+  };
+  const githubHtml = (d) => {
+    const { reviews, blocked, waiting, checking } = githubSplit(d);
+    const sections = [
+      ["waiting", "Waiting For Review", waiting.map((p) => ghItem(p.url, p.key || p.title || "", sym("hourglass", "c-orange"),
+        ghRef(p), esc((p.checks || []).join(", ") || "?")))],
+      ["reviews", "Awaiting Your Review", reviews.map((p) => ghItem(p.url, p.key || p.title || "",
+        p.days >= 2 ? sym("clock", "c-orange") : sym("arrow.triangle.pull", "c-blue"),
+        `${ghRef(p)} <span class="c-2">· review</span>`, `${esc(p.author)} · ${p.days}d`, p.days >= 2 ? "late" : ""))],
+      ["blocked", "Merge Blocked", [...blocked, ...checking].map((p) => ghItem(p.url, p.title,
+        p.kind === "checking" ? sym("ellipsis.circle", "c-gray") : sym("xmark.circle.fill", "c-red"), ghRef(p), esc((p.reasons || []).join(" · "))))],
+    ];
+    const total = sections.reduce((n, [, , items]) => n + items.length, 0);
+    const count = total ? ` <span class="n">${total}</span>` : "";
+    return `
+      <div class="h">GitHub${count}</div>${sections.map(([id, label, items]) => ghSection(id, label, items)).join("")}${githubNotes(d, !total)}`;
+  };
+
+  // Notes come from Swift (a file); a redraw keeps what is being typed.
+  let NOTES = [];
+  window.sbNotes = (n) => {
+    NOTES = Array.isArray(n) ? n : [];
+    if (LAST) draw(LAST);
+  };
+  const notesHtml = () => `
+    <div class="notes">
+      <div class="h">Notes ${NOTES.length ? `<span class="n">${NOTES.length}/6</span>` : ""}</div>
+      ${NOTES.map((n) => `
+        <div class="nrow">
+          <span class="ntext">${esc(n.text)}</span>
+          <span class="ndel" data-del="${esc(n.id)}" title="Delete">${sym("xmark", "sm")}</span>
+        </div>`).join("")}
+      <input class="ninput" type="text" maxlength="500" placeholder="${NOTES.length >= 6
+        ? "List full — the oldest note drops" : "Add a note"}">
+    </div>`;
+  const updateHtml = (u) => u ? `<div class="upd" data-url="${esc(u.url || "")}">
+        ${sym("arrow.down.circle", "c-blue")}<span>Version <b>${esc(u.version)}</b> is available — click to download</span></div>` : "";
+
+  // The popover follows the card's height. A list folding or opening tells it the final height
+  // once, so it does not resize at every frame.
+  let foldMoving = false;
+  const fit = () => {
+    if (foldMoving) return;
+    const card = document.getElementById("card");
+    if (card.querySelector(":scope > .err") && card.offsetHeight <= window.innerHeight) return;
+    post({ height: card.offsetHeight });
+  };
+  new ResizeObserver(fit).observe(document.getElementById("card"));
+
+  // A list opens and folds the way the Hosts tab's do: its rows grow in or fold away and the
+  // chevron turns. A second click while a list moves starts a new run; only the latest redraws.
+  const FOLD_MOTION = { duration: 200, easing: "cubic-bezier(.2,.7,.3,1)" };
+  let foldRun = 0;
+  const toggleFold = (key, wasOpen) => {
+    FOLD.set(key, !wasOpen);
+    const card = document.getElementById("card");
+    const bodyOf = () => card.querySelector(`[data-body="${CSS.escape(key)}"]`);
+    const chevronOf = () => card.querySelector(`[data-fold="${CSS.escape(key)}"] .chev`);
+    const cardHeightWith = (body, css) => {
+      body.style.cssText = css;
+      const height = card.offsetHeight;
+      body.style.cssText = "";
+      return height;
+    };
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches || (wasOpen && !bodyOf())) {
+      draw(LAST);
+      return;
+    }
+    const run = ++foldRun;
+    const isLatest = () => run === foldRun;
+    const settle = () => {
+      if (!isLatest()) return;
+      foldMoving = false;
+      fit();
+    };
+    foldMoving = true;
+    if (!wasOpen) draw(LAST);
+    const body = bodyOf();
+    const shownHeight = body.offsetHeight;
+    body.getAnimations().forEach((animation) => animation.cancel());
+    const closedHeight = cardHeightWith(body, "display: none");
+    // Margins around a list merge once it is gone; the fold takes that gap away as well.
+    const mergedGap = cardHeightWith(body, "height: 0") - closedHeight;
+    const shown = { height: shownHeight + "px", opacity: 1, marginBottom: "0px" };
+    const folded = { height: "0px", opacity: 0, marginBottom: -mergedGap + "px" };
+    const turned = { transform: "rotate(180deg)" };
+    const upright = { transform: "rotate(0deg)" };
+    if (wasOpen) {
+      post({ height: closedHeight });
+      chevronOf()?.animate([upright, turned], { ...FOLD_MOTION, fill: "forwards" });
+      // A newer click cancels this run's motion; settle then does nothing.
+      body.animate([shown, folded], { ...FOLD_MOTION, fill: "forwards" }).finished.then(() => {
+        if (isLatest()) draw(LAST);
+        settle();
+      }, settle);
+      return;
+    }
+    post({ height: card.offsetHeight });
+    chevronOf()?.animate([turned, upright], FOLD_MOTION);
+    body.animate([folded, shown], FOLD_MOTION).finished.then(settle, settle);
+  };
+
+  const updateAgo = () => {
+    const el = document.getElementById("ago");
+    if (el && LAST) el.textContent = "Updated " + ago(LAST.generatedAt);
+  };
+  setInterval(updateAgo, 30000);
+  document.addEventListener("visibilitychange", updateAgo);
+
+  // The card's clicks, handled once: the closest target wins, so a PR inside a task row opens the
+  // PR, not the task as well.
+  document.getElementById("card").addEventListener("click", (e) => {
+    const el = e.target.closest("[data-url], [data-fold], [data-del], #rf, #gear");
+    if (!el) return;
+    if (el.dataset.fold) {
+      toggleFold(el.dataset.fold, isOpen(el.dataset.fold, el.dataset.open === "1"));
+    } else if (el.dataset.del) {
+      post({ noteDel: el.dataset.del });
+    } else if (el.id === "rf") {
+      if (refreshing) return;   // one refresh at a time, ~13 s
+      refreshing = true;
+      el.classList.add("spin");
+      post({ refresh: true });
+    } else if (el.id === "gear") {
+      post({ settings: true });
+    } else if (el.dataset.url && el.dataset.url !== "#") {
+      post({ open: el.dataset.url });
+    }
+  });
+  // Enter adds the note; Swift sends the list back through sbNotes.
+  document.getElementById("card").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || !e.target.matches(".ninput")) return;
+    post({ noteAdd: e.target.value });
+    e.target.value = "";
+  });
+
+  function draw(d) {
+    LAST = d;
+    const card = document.getElementById("card");
+    const prevInput = card.querySelector(".ninput");
+    const hadFocus = !!prevInput && document.activeElement === prevInput;
+    const typed = prevInput ? prevInput.value : "";
+    if (!d || !d.ok) {
+      card.innerHTML = `<div class="err">${sym("exclamationmark.triangle.fill", "c-red")} ${esc(d && d.error || "No data")}</div>`;
+      return;
+    }
+    card.innerHTML = `
+      <div class="hdr">
+        <span class="name">${esc((d.sprint || {}).name)}</span>
+        <span class="tools"><span class="rf expand" id="rf" title="Refresh now"><span class="when" id="ago">Updated ${ago(d.generatedAt)}</span>${sym("arrow.clockwise")}</span><span class="rf" id="gear" title="Settings">${sym("gearshape")}</span></span>
+      </div>
+      ${topHtml(d)}
+      ${tasksHtml(d)}
+      ${pastSprintsHtml(d.pendingRelease || [])}
+      ${githubHtml(d)}
+      ${updateHtml(d.update)}
+      ${notesHtml()}
+    `;
+    if (refreshing) card.querySelector("#rf").classList.add("spin");
+    const input = card.querySelector(".ninput");
+    input.value = typed;
+    if (hadFocus) input.focus();
+    fit();
+  }
+
+  // fetch.mjs takes ~13 s; on the first launch after a rebuild it can take 80 s while macOS asks
+  // for keychain access. A counter shows the app has not hung.
+  const T0 = Date.now();
+  const waitTimer = setInterval(() => {
+    const sec = Math.round((Date.now() - T0) / 1000);
+    document.getElementById("card").innerHTML = `<div class="err">${sym("hourglass", "c-2")} Fetching data… ${sec}s` +
+      (sec > 25 ? `<div class="hint">macOS may ask for keychain permission on first launch.
+             If a permission dialog appeared, choose <b>Always Allow</b>;
+             it is one-off — later launches take ~13s.</div>` : "") + `</div>`;
+  }, 1000);
+
+  window.sbRender = (d) => {
+    clearInterval(waitTimer);
+    refreshing = false;
+    // A failed refresh over good data keeps the data and puts a "could not refresh" strip on top.
+    if (d && d.ok === false && LAST_OK) {
+      staleNote = { error: d.error || "unknown error", at: LAST_OK.generatedAt };
+      d = LAST_OK;
+    } else if (d && d.ok) {
+      LAST_OK = d;
+      staleNote = null;
+    }
+    draw(d);
+  };
+</script>

@@ -28,11 +28,11 @@ func findExecutable(_ name: String) -> String? {
     return nil
 }
 
-/// Where the data layer (fetch.mjs / lib.mjs / view.html) lives.
+/// Where the data layer (fetch.mjs / lib.mjs / the pages) lives.
 ///
 /// Three modes, in this order:
 ///  1. An `appdir` file — a DEVELOPMENT build. build-app.sh writes the repo path,
-///     so editing view.html only requires restarting the app.
+///     so editing a page only requires restarting the app.
 ///  2. The bundle's own Resources — a DISTRIBUTION build (--release). The files
 ///     are INSIDE the .app, so whoever downloads it never clones the repo.
 ///  3. The old fixed path — backwards compatibility.
@@ -79,10 +79,10 @@ func needsSetup() -> Bool {
     else { return true }
     // In an OAuth setup what we look for is the refresh token, not an API token.
     if (cfg["authMode"] as? String) == "oauth" {
-        return keychainGet(service: JIRA_OAUTH_KEYCHAIN, account: email) == nil
+        return !keychainHas(service: JIRA_OAUTH_KEYCHAIN, account: email)
     }
     let service = (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
-    return keychainGet(service: service, account: email) == nil
+    return !keychainHas(service: service, account: email)
 }
 
 func keychainGet(service: String, account: String) -> String? {
@@ -96,6 +96,17 @@ func keychainGet(service: String, account: String) -> String? {
     guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
           let d = out as? Data else { return nil }
     return String(data: d, encoding: .utf8)
+}
+
+/// Whether the item exists, without reading the secret. macOS asks the user for permission
+/// when an app reads the secret (unless they chose "Always Allow"); this check does not
+/// read it, so asking "is anyone signed in?" never shows that dialog.
+func keychainHas(service: String, account: String) -> Bool {
+    SecItemCopyMatching([
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: account,
+    ] as CFDictionary, nil) == errSecSuccess
 }
 
 /// The Jira Cloud host a typed site names, or nil. Basic auth sends the token itself, so it
@@ -165,6 +176,7 @@ func setupContext(_ cfg: [String: Any]) -> [String: Any]? {
         "githubOrg": (cfg["githubOrg"] as? String) ?? "",
         "showDraftPrs": (cfg["showDraftPrs"] as? Bool) ?? true,
         "sprintGoalTracking": (cfg["sprintGoalTracking"] as? Bool) ?? false,
+        "partnerDomainSuffixes": partnerDomainSuffixes(cfg),
         "hint": disconnectHint(cfg),
     ]
 }
@@ -305,6 +317,7 @@ enum TokenResult {
     case ok(String)
     case needsLogin
     case temporary
+    case denied
 }
 
 func getJSON(_ urlString: String, bearer: String) -> Any? {
@@ -380,6 +393,641 @@ final class CallbackListener {
     }
 }
 
+// --- /etc/hosts ------------------------------------------------------------
+// The Hosts tab switches domains between local (127.0.0.1) and prod (real DNS), one by one
+// or a filtered group at a time, like iHosts. /etc/hosts is the source of truth: each local
+// domain in the file is a row, an active line is Local, and a line kept as a comment is Prod.
+// A switch keeps the line in its place. Sprint Board's marked block only takes the domains
+// added with +. hosts.json holds the user's groups, nothing else.
+let HOSTS_PATH = "/etc/hosts"
+let HOSTS_BLOCK_START = "# >>> extension manages >>>"
+let HOSTS_BLOCK_END = "# <<< extension manages <<<"
+/// The markers before the rename. A block under them is still the managed block (one under each
+/// kind of marker is a damaged file); the next write puts it back in place under the markers above.
+let HOSTS_LEGACY_BLOCK_START = "# >>> sprint-board hosts managed >>>"
+let HOSTS_LEGACY_BLOCK_END = "# <<< sprint-board hosts managed <<<"
+/// Names macOS keeps for itself. A line that holds one is never shown or changed.
+let HOSTS_SYSTEM_NAMES = Set(["localhost", "localhost.localdomain", "broadcasthost", "ip6-localhost", "ip6-loopback"])
+/// The addresses that make a domain local.
+let HOSTS_LOCAL_ADDRESSES = Set(["127.0.0.1", "::1"])
+/// The user's groups. Not config.json: fetch.mjs rewrites that file.
+let HOSTS_LIST_PATH = ("~/.config/sprint-widget/hosts.json" as NSString).expandingTildeInPath
+let HOSTS_BACKUP_DIR = ("~/.local/state/sprint-widget" as NSString).expandingTildeInPath
+
+/// A domain typed by the user, normalised (lower case; scheme, path, port and a trailing dot
+/// dropped), or nil when it is not a hostname. Only names that pass this reach /etc/hosts,
+/// so typed text can never add a line of its own (a newline, a second address).
+func hostsName(_ raw: String) -> String? {
+    var s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if let r = s.range(of: "://") { s = String(s[r.upperBound...]) }
+    if let i = s.firstIndex(where: { "/?#".contains($0) }) { s = String(s[..<i]) }
+    if let i = s.lastIndex(of: ":"), s[s.index(after: i)...].allSatisfy({ $0.isASCII && $0.isNumber }) {
+        s = String(s[..<i])
+    }
+    if s.hasSuffix(".") { s.removeLast() }
+    let labels = s.split(separator: ".", omittingEmptySubsequences: false)
+    let valid = s.count <= 253 && labels.count >= 2
+        && labels.allSatisfy { label in
+            (1...63).contains(label.count) && label.first != "-" && label.last != "-"
+                && label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        }
+        && !labels[labels.count - 1].allSatisfy(\.isNumber)
+    return valid ? s : nil
+}
+
+/// An active /etc/hosts line as its address and names; nil for comments and blank lines.
+func hostsEntry(_ line: String) -> (address: String, names: [String])? {
+    let active = line.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+    let fields = active.split(whereSeparator: \.isWhitespace).map { $0.lowercased() }
+    return fields.count >= 2 ? (fields[0], Array(fields.dropFirst())) : nil
+}
+
+/// Line indices of Sprint Board's block markers, the current ones or the ones before the rename.
+func hostsMarkers(_ lines: [String]) -> (starts: [Int], ends: [Int]) {
+    let trimmed = lines.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    let starts: Set = [HOSTS_BLOCK_START, HOSTS_LEGACY_BLOCK_START], ends: Set = [HOSTS_BLOCK_END, HOSTS_LEGACY_BLOCK_END]
+    return (trimmed.indices.filter { starts.contains(trimmed[$0]) },
+            trimmed.indices.filter { ends.contains(trimmed[$0]) })
+}
+
+/// The block's line range, nil when there is none. Only meaningful when the block is not
+/// damaged (managedHosts != nil).
+func hostsBlockRange(_ lines: [String]) -> ClosedRange<Int>? {
+    let m = hostsMarkers(lines)
+    guard let start = m.starts.first, let end = m.ends.first, start < end else { return nil }
+    return start...end
+}
+
+/// The domains in Sprint Board's block ([] when there is no block), or nil when the block
+/// is damaged — a marker missing, repeated or out of order. A damaged file is never written.
+func managedHosts(_ text: String) -> [String]? {
+    let lines = text.components(separatedBy: "\n")
+    let m = hostsMarkers(lines)
+    if m.starts.isEmpty && m.ends.isEmpty { return [] }
+    guard m.starts.count == 1, m.ends.count == 1, m.starts[0] < m.ends[0] else { return nil }
+    return lines[(m.starts[0] + 1)..<m.ends[0]].flatMap { hostsEntry($0)?.names ?? [] }
+}
+
+/// A line that holds local domains: active, or a comment that is clearly a host entry (one "#",
+/// a local address, then only valid names). Names that are not domains stay out of `names`.
+/// nil for any other line, and for a line with a system name.
+func hostsLocalLine(_ line: String) -> (active: Bool, address: String, names: [String])? {
+    if let entry = hostsEntry(line) {
+        guard HOSTS_LOCAL_ADDRESSES.contains(entry.address),
+              !entry.names.contains(where: HOSTS_SYSTEM_NAMES.contains) else { return nil }
+        let names = entry.names.filter { hostsName($0) == $0 }
+        return names.isEmpty ? nil : (true, entry.address, names)
+    }
+    let start = line.drop(while: { $0 == " " || $0 == "\t" })
+    guard start.hasPrefix("#"), let entry = hostsEntry(String(start.dropFirst())),
+          HOSTS_LOCAL_ADDRESSES.contains(entry.address),
+          entry.names.allSatisfy({ hostsName($0) == $0 && !HOSTS_SYSTEM_NAMES.contains($0) }) else { return nil }
+    return (false, entry.address, entry.names)
+}
+
+/// The line as a comment. Every other byte stays, so hostsUncommented gives it back.
+func hostsCommented(_ line: String) -> String {
+    let start = line.firstIndex { $0 != " " && $0 != "\t" } ?? line.endIndex
+    return String(line[..<start]) + "#" + line[start...]
+}
+
+/// The commented line as an active one: the "#" goes, with the spaces after it.
+func hostsUncommented(_ line: String) -> String {
+    guard let mark = line.firstIndex(of: "#") else { return line }
+    return String(line[..<mark]) + line[line.index(after: mark)...].drop(while: { $0 == " " || $0 == "\t" })
+}
+
+/// The active line without `names`. Every other word keeps the space before it.
+func hostsLineWithout(_ line: String, _ names: Set<String>) -> String {
+    let end = line.firstIndex(of: "#") ?? line.endIndex
+    var words: [Range<String.Index>] = []
+    var i = line.startIndex
+    while i < end {
+        guard !line[i].isWhitespace else { i = line.index(after: i); continue }
+        var j = i
+        while j < end, !line[j].isWhitespace { j = line.index(after: j) }
+        words.append(i..<j)
+        i = j
+    }
+    guard let first = words.first, let last = words.last else { return line }
+    var out = String(line[..<first.upperBound])
+    for k in words.indices.dropFirst() where !names.contains(line[words[k]].lowercased()) {
+        out += line[words[k - 1].upperBound..<words[k].lowerBound] + line[words[k]]
+    }
+    return out + line[last.upperBound...]
+}
+
+/// The line that hostsLocalLine accepted, in the same state, without `names`: the "#" and the
+/// spaces after it stay. nil when no name is left on it.
+func hostsEntryWithout(_ line: String, _ names: Set<String>) -> String? {
+    var start = line.startIndex
+    if let mark = line.firstIndex(where: { $0 != " " && $0 != "\t" }), line[mark] == "#" {
+        start = line.index(after: mark)
+    }
+    let rest = hostsLineWithout(String(line[start...]), names)
+    return hostsEntry(rest) == nil ? nil : String(line[..<start]) + rest
+}
+
+/// One domain on the Hosts tab. A domain on several lines is one row: Local when any of them is
+/// active.
+struct HostsRow: Equatable {
+    var name: String
+    var local: Bool
+}
+
+/// The rows of a hosts file, in file order.
+func hostsRows(_ text: String) -> [HostsRow] {
+    var rows: [HostsRow] = []
+    var seen: [String: Int] = [:]
+    for line in text.components(separatedBy: "\n") {
+        guard let entry = hostsLocalLine(line) else { continue }
+        for name in entry.names {
+            if let row = seen[name] {
+                rows[row].local = rows[row].local || entry.active
+            } else {
+                seen[name] = rows.count
+                rows.append(HostsRow(name: name, local: entry.active))
+            }
+        }
+    }
+    return rows
+}
+
+/// The file with `names` switched. Prod turns off every active line of a name; Local turns on one
+/// commented line of a name that has no active line. A line turns in its place. When other names
+/// share it, the line keeps them as they are and the switched names go on a new line right below.
+func hostsSwitched(_ text: String, _ names: Set<String>, local: Bool) -> String {
+    let lines = text.components(separatedBy: "\n")
+    var wanted = names
+    if local { wanted.subtract(hostsRows(text).filter(\.local).map(\.name)) }
+    var out: [String] = []
+    for line in lines {
+        guard let entry = hostsLocalLine(line), entry.active != local else { out.append(line); continue }
+        let hits = entry.names.filter(wanted.contains)
+        guard !hits.isEmpty else { out.append(line); continue }
+        if local { wanted.subtract(hits) }
+        guard let rest = hostsEntryWithout(line, Set(hits)) else {
+            out.append(local ? hostsUncommented(line) : hostsCommented(line))
+            continue
+        }
+        let moved = "\(entry.address)\t\(hits.joined(separator: " "))"
+        out += [rest, local ? moved : "#\(moved)"]
+    }
+    return out.joined(separator: "\n")
+}
+
+/// The file with new domains in Sprint Board's block, in Prod; the block is made at the end when
+/// there is none, and an old block takes the current markers. A name already in the file is left
+/// out. The names are validated again here, at the last step before the file. nil when the block
+/// is damaged.
+func hostsAdded(_ text: String, _ names: [String]) -> String? {
+    guard managedHosts(text) != nil else { return nil }
+    var seen = Set(hostsRows(text).map(\.name))
+    let clean = names.compactMap(hostsName).filter { seen.insert($0).inserted }
+    guard !clean.isEmpty else { return text }
+    let entries = clean.map { "#127.0.0.1\t\($0)" }
+    var lines = text.components(separatedBy: "\n")
+    if let range = hostsBlockRange(lines) {
+        let held = Array(lines[(range.lowerBound + 1)..<range.upperBound])
+        lines.replaceSubrange(range, with: [HOSTS_BLOCK_START] + held + entries + [HOSTS_BLOCK_END])
+    } else {
+        // Appended after the last line, keeping the file's final newline if it had one, so
+        // removing the block later gives back exactly the original bytes.
+        let finalNewline = lines.last == ""
+        if finalNewline { lines.removeLast() }
+        lines += [HOSTS_BLOCK_START] + entries + [HOSTS_BLOCK_END] + (finalNewline ? [""] : [])
+    }
+    return lines.joined(separator: "\n")
+}
+
+/// The file with `names` gone from every line, active or commented, in the block or outside it.
+/// A line left without a name goes, with its trailing comment; a block left empty goes too. A
+/// line with a system name never counts as an entry, so it stays. nil when the block is damaged.
+func hostsRemoved(_ text: String, _ names: [String]) -> String? {
+    guard managedHosts(text) != nil else { return nil }
+    let gone = Set(names)
+    func kept(_ lines: ArraySlice<String>) -> [String] {
+        lines.compactMap { line -> String? in
+            guard let entry = hostsLocalLine(line), entry.names.contains(where: gone.contains) else { return line }
+            return hostsEntryWithout(line, gone)
+        }
+    }
+    let lines = text.components(separatedBy: "\n")
+    guard let range = hostsBlockRange(lines) else { return kept(lines[...]).joined(separator: "\n") }
+    let inside = Array(lines[(range.lowerBound + 1)..<range.upperBound])
+    let held = kept(inside[...])
+    let empty = held.allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
+    let block = held == inside ? Array(lines[range]) : empty ? [] : [HOSTS_BLOCK_START] + held + [HOSTS_BLOCK_END]
+    return (kept(lines[..<range.lowerBound]) + block + kept(lines[(range.upperBound + 1)...])).joined(separator: "\n")
+}
+
+/// What one Hosts action changes in the file.
+struct HostsEdit: Equatable {
+    var added: [String]
+    var removed: [String]
+    var toLocal: [String]
+    var toProd: [String]
+    var removedLocal = false
+    var isEmpty: Bool { added.isEmpty && removed.isEmpty && toLocal.isEmpty && toProd.isEmpty }
+    /// A new domain starts as a comment, so only these change what a name resolves to.
+    var changesResolution: Bool { !toLocal.isEmpty || !toProd.isEmpty || removedLocal }
+}
+
+/// The file after an edit; nil when the block is damaged.
+func hostsEdited(_ text: String, _ edit: HostsEdit) -> String? {
+    guard let next = hostsRemoved(text, edit.removed).flatMap({ hostsAdded($0, edit.added) }) else { return nil }
+    return hostsSwitched(hostsSwitched(next, Set(edit.toLocal), local: true), Set(edit.toProd), local: false)
+}
+
+struct HostsGroup: Equatable {
+    var name: String
+    var domains: [String]
+}
+
+/// The domains of the file in order, read from /etc/hosts on every load and never saved, and the
+/// user's named groups, which hosts.json keeps. A domain may be in several groups. A group may
+/// name a domain that is not in the file now.
+struct HostsList: Equatable {
+    var domains: [String] = []
+    var groups: [HostsGroup] = []
+}
+
+/// The domains a partner's local environment answers on are `<partner>.<suffix>`, one for each
+/// suffix in the config's `partnerDomainSuffixes`; "Add partner" adds them together. Without
+/// any, the Hosts tab has no "Add partner" and no domain counts as a partner's.
+func partnerDomainSuffixes(_ config: [String: Any]) -> [String] {
+    var seen = Set<String>()
+    return (config["partnerDomainSuffixes"] as? [String] ?? []).compactMap(hostsName).filter { seen.insert($0).inserted }
+}
+/// The partner domain suffixes a typed, comma-separated list gives: [] for none, nil when an
+/// entry is not a domain name.
+func partnerSuffixList(_ raw: String) -> [String]? {
+    let entries = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    let names = entries.map(hostsName)
+    guard !names.contains(where: { $0 == nil }) else { return nil }
+    var seen = Set<String>()
+    return names.compactMap { $0 }.filter { seen.insert($0).inserted }
+}
+/// The group every partner domain goes into, whichever way it was added; made when missing.
+let PARTNERS_GROUP = "Partners"
+
+/// A partner's panel name as typed (a pasted partner domain or URL gives its first label), or
+/// nil when it cannot start a host name: letters, digits and inner hyphens, at most 60 characters.
+func hostsPartnerName(_ raw: String) -> String? {
+    let host = hostsName(raw) ?? raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let first = host.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
+    guard (1...60).contains(first.count), first.first != "-", first.last != "-",
+          first.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }) else { return nil }
+    return first
+}
+
+/// A group name as typed: trimmed, 1–40 characters, one line.
+func hostsGroupName(_ raw: String) -> String? {
+    let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard (1...40).contains(name.count), !name.contains(where: { $0.isNewline || $0 == "\t" }) else { return nil }
+    return name
+}
+
+/// The list from hosts.json; nil when the file's shape is wrong anywhere — a group of the wrong
+/// type is not dropped quietly, or the next save would lose it for good. Invalid or repeated
+/// values are dropped. A file from before /etc/hosts became the source of truth also has
+/// "domains": a group then keeps only domains in it, as that file promised.
+func hostsList(fromJSON object: Any?) -> HostsList? {
+    guard let json = object as? [String: Any], json["groups"] != nil || json["domains"] != nil else { return nil }
+    let raw = json["domains"] as? [String]
+    guard raw != nil || json["domains"] == nil else { return nil }
+    let rawGroups = json["groups"] ?? [[String: Any]]()
+    guard let groupObjects = rawGroups as? [[String: Any]],
+          groupObjects.allSatisfy({ $0["name"] is String && ($0["domains"] == nil || $0["domains"] is [String]) })
+    else { return nil }
+    var seen = Set<String>()
+    let domains = (raw ?? []).compactMap(hostsName).filter { seen.insert($0).inserted }
+    var names = Set<String>()
+    let groups = groupObjects.compactMap { g -> HostsGroup? in
+        guard let name = (g["name"] as? String).flatMap(hostsGroupName), names.insert(name.lowercased()).inserted
+        else { return nil }
+        var members = Set<String>()
+        let listed = (g["domains"] as? [String] ?? []).compactMap(hostsName)
+            .filter { (raw == nil || seen.contains($0)) && members.insert($0).inserted }
+        return HostsGroup(name: name, domains: listed)
+    }
+    return HostsList(domains: domains, groups: groups)
+}
+
+/// What hosts.json holds.
+func hostsListJSON(_ list: HostsList) -> [String: Any] {
+    ["groups": list.groups.map { ["name": $0.name, "domains": $0.domains] }]
+}
+
+/// One Hosts tab action applied to the list and to the local domains. Returns both — `local` in
+/// list order — and an error for the user. Pure: the caller compares the result with what it
+/// passed in, and writes the files. Actions: add (+ group),
+/// addPartner (+ group), remove, setMode + names, groupAdd (+ domain), groupRename
+/// {from, to}, groupDelete, groupDeleteWithDomains, member {domain, group, on}. Group names
+/// match without regard to case. `partners` are the partner domain suffixes.
+func hostsApply(_ list: HostsList, local: [String], _ action: [String: Any], partners: [String])
+    -> (list: HostsList, local: [String], error: String?) {
+    var list = list
+    var localSet = Set(local)
+    var error: String?
+    func group(_ name: Any?) -> Int? {
+        guard let name = name as? String else { return nil }
+        return list.groups.firstIndex { $0.name.lowercased() == name.lowercased() }
+    }
+    func join(_ domain: String, _ g: Int?) {
+        guard let g, list.domains.contains(domain), !list.groups[g].domains.contains(domain) else { return }
+        list.groups[g].domains.append(domain)
+    }
+    // Made when missing, found without regard to case.
+    func ensureGroup(_ name: String) -> Int? {
+        if group(name) == nil { list.groups.append(HostsGroup(name: name, domains: [])) }
+        return group(name)
+    }
+    // A partner's domain (<partner>.<suffix>, the partner one label) also joins the Partners group.
+    func joinPartners(_ name: String) {
+        let isPartner = partners.contains { suffix in
+            guard name.hasSuffix(".\(suffix)") else { return false }
+            let partner = String(name.dropLast(suffix.count + 1))
+            return hostsPartnerName(partner) == partner
+        }
+        if isPartner { join(name, ensureGroup(PARTNERS_GROUP)) }
+    }
+    func addDomain(_ name: String, into g: Int?) {
+        if !list.domains.contains(name) { list.domains.append(name) }   // a new domain starts in prod
+        joinPartners(name)
+        join(name, g)
+    }
+
+    if let raw = action["add"] as? String {
+        if let name = hostsName(raw) {
+            addDomain(name, into: group(action["group"]))
+        } else {
+            error = "“\(raw.trimmingCharacters(in: .whitespacesAndNewlines))” is not a domain name."
+        }
+    }
+    if let raw = action["addPartner"] as? String {
+        if partners.isEmpty {
+            error = "Adding a partner needs its domain suffixes: partnerDomainSuffixes in the config."
+        } else if let partner = hostsPartnerName(raw) {
+            // addDomain puts each of them in the Partners group.
+            for name in partners.compactMap({ hostsName("\(partner).\($0)") }) {
+                addDomain(name, into: group(action["group"]))
+            }
+        } else {
+            error = "“\(raw.trimmingCharacters(in: .whitespacesAndNewlines))” is not a partner name: up to 60 letters, digits and hyphens, as in the panel."
+        }
+    }
+    if let name = action["remove"] as? String {
+        list.domains.removeAll { $0 == name }
+        for g in list.groups.indices { list.groups[g].domains.removeAll { $0 == name } }
+        localSet.remove(name)
+    }
+    if let mode = action["setMode"] as? String, let names = action["names"] as? [String] {
+        let known = names.filter { list.domains.contains($0) }
+        if mode == "local" { localSet.formUnion(known) } else if mode == "prod" { localSet.subtract(known) }
+    }
+    if let raw = action["groupAdd"] as? String {
+        if let name = hostsGroupName(raw) {
+            let domain = action["domain"] as? String
+            if group(name) == nil {
+                list.groups.append(HostsGroup(name: name, domains: []))
+            } else if domain == nil {
+                error = "There is already a group called “\(name)”."
+            }
+            if let domain { join(domain, group(name)) }   // "New group…" from a domain's menu
+        } else {
+            error = "A group name needs 1 to 40 characters on one line."
+        }
+    }
+    if let rename = action["groupRename"] as? [String: Any], let from = group(rename["from"]) {
+        if let to = (rename["to"] as? String).flatMap(hostsGroupName) {
+            if let other = group(to), other != from {
+                error = "There is already a group called “\(to)”."
+            } else {
+                list.groups[from].name = to
+            }
+        } else {
+            error = "A group name needs 1 to 40 characters on one line."
+        }
+    }
+    if let g = group(action["groupDelete"]) {
+        list.groups.remove(at: g)   // its domains stay in the list
+    }
+    if let g = group(action["groupDeleteWithDomains"]) {
+        // A partner (or any group) removed as one piece: its domains leave the list, every
+        // other group and the block.
+        let doomed = Set(list.groups[g].domains)
+        list.groups.remove(at: g)
+        list.domains.removeAll { doomed.contains($0) }
+        for i in list.groups.indices { list.groups[i].domains.removeAll { doomed.contains($0) } }
+        localSet.subtract(doomed)
+    }
+    if let member = action["member"] as? [String: Any], let domain = member["domain"] as? String,
+       let g = group(member["group"]) {
+        if member["on"] as? Bool == true {
+            join(domain, g)
+        } else {
+            list.groups[g].domains.removeAll { $0 == domain }
+        }
+    }
+    return (list, list.domains.filter { localSet.contains($0) }, error)
+}
+
+/// What the Hosts tab shows: every local domain in the file with its state and its groups, and
+/// the group names.
+func hostsStatus(_ text: String, _ list: HostsList, writable: Bool) -> [String: Any] {
+    let domains: [[String: Any]] = hostsRows(text).map { row in
+        ["name": row.name, "local": row.local,
+         "groups": list.groups.filter { $0.domains.contains(row.name) }.map(\.name)]
+    }
+    return ["mode": managedHosts(text) == nil ? "damaged" : "ok", "domains": domains,
+            "groups": list.groups.map(\.name), "writable": writable]
+}
+
+/// The text of a hosts file, and whether it starts with a UTF-8 byte-order mark (some editors
+/// write one; it is put back on write). nil when the bytes are not UTF-8: such a file is
+/// neither shown as a mode nor written.
+func hostsFileText(_ data: Data) -> (text: String, bom: Bool)? {
+    let bom = data.starts(with: [0xEF, 0xBB, 0xBF])
+    guard let text = String(data: bom ? data.dropFirst(3) : data, encoding: .utf8) else { return nil }
+    return (text, bom)
+}
+
+let HOSTS_DELETE_BACKUP_PREFIX = "hosts.before-delete-"
+let HOSTS_DELETE_BACKUPS_KEPT = 20
+
+/// UTC, so a daylight saving change cannot put the names out of time order.
+func hostsDeleteBackupName(_ date: Date) -> String {
+    let format = DateFormatter()
+    format.locale = Locale(identifier: "en_US_POSIX")
+    format.timeZone = TimeZone(identifier: "UTC")
+    format.dateFormat = "yyyyMMdd'T'HHmmss.SSS'Z'"
+    return HOSTS_DELETE_BACKUP_PREFIX + format.string(from: date)
+}
+
+/// A delete never overwrites an earlier delete's copy: a name that is taken moves on by a millisecond.
+func hostsDeleteBackupPath(in dir: String, at date: Date) -> String {
+    var stamp = date
+    while true {
+        let path = (dir as NSString).appendingPathComponent(hostsDeleteBackupName(stamp))
+        if !FileManager.default.fileExists(atPath: path) { return path }
+        stamp += 0.001
+    }
+}
+
+/// The copies past the limit, oldest first. A file of any other name is not ours and never goes.
+func hostsDeleteBackupsPast(_ names: [String]) -> [String] {
+    let shape = "^" + NSRegularExpression.escapedPattern(for: HOSTS_DELETE_BACKUP_PREFIX) + "[0-9]{8}T[0-9]{6}\\.[0-9]{3}Z$"
+    return Array(names.filter { $0.range(of: shape, options: .regularExpression) != nil }.sorted()
+        .dropLast(HOSTS_DELETE_BACKUPS_KEPT))
+}
+
+/// Applies an edit to the hosts file; returns an error for the user, or nil on success. Writes IN PLACE: the user may write /etc/hosts (its owner here) but cannot
+/// create files in /etc, so temp-file-and-rename is impossible — and writing in place keeps
+/// the file's owner and mode exactly as they were. The previous contents go to `backupDir`
+/// first: hosts.bak every time, hosts.before-sprint-board once, and a timestamped copy for
+/// each delete, of which the last 20 stay.
+func writeHostsFile(_ edit: HostsEdit, path: String, backupDir: String) -> String? {
+    let fm = FileManager.default
+    guard let data = fm.contents(atPath: path), let file = hostsFileText(data) else {
+        return "Could not read \(path) as text; nothing was changed."
+    }
+    guard let next = hostsEdited(file.text, edit) else {
+        return "Sprint Board's block in \(path) is damaged (a marker line is missing or repeated). Fix it by hand; nothing was changed."
+    }
+    if next == file.text { return nil }
+    guard fm.isWritableFile(atPath: path) else {
+        return "\(path) is not writable by your user, so Sprint Board cannot change it."
+    }
+    // The backups are the file's exact bytes, not a re-encoding of its text.
+    try? fm.createDirectory(atPath: backupDir, withIntermediateDirectories: true)
+    let original = (backupDir as NSString).appendingPathComponent("hosts.before-sprint-board")
+    if !fm.fileExists(atPath: original) { fm.createFile(atPath: original, contents: data) }
+    let backup = (backupDir as NSString).appendingPathComponent("hosts.bak")
+    guard (try? data.write(to: URL(fileURLWithPath: backup), options: .atomic)) != nil else {
+        return "Could not back up \(path); nothing was changed."
+    }
+    if !edit.removed.isEmpty {
+        let copy = hostsDeleteBackupPath(in: backupDir, at: Date())
+        guard (try? data.write(to: URL(fileURLWithPath: copy), options: .atomic)) != nil else {
+            return "Could not back up \(path); nothing was changed."
+        }
+    }
+    let out = (file.bom ? Data([0xEF, 0xBB, 0xBF]) : Data()) + Data(next.utf8)
+    // No .atomic option: written in place.
+    guard (try? out.write(to: URL(fileURLWithPath: path))) != nil else {
+        return "Could not write \(path) (the previous version is in \(backup))."
+    }
+    // Read it back: name lookups use what the file holds, not what we meant to write.
+    guard fm.contents(atPath: path) == out else {
+        return "\(path) did not keep the change; check it by hand (the previous version is in \(backup))."
+    }
+    if !edit.removed.isEmpty {
+        for name in hostsDeleteBackupsPast((try? fm.contentsOfDirectory(atPath: backupDir)) ?? []) {
+            try? fm.removeItem(atPath: (backupDir as NSString).appendingPathComponent(name))
+        }
+    }
+    return nil
+}
+
+/// How long a Chrome refresh may take before osascript is stopped.
+let CHROME_REFRESH_TIMEOUT: TimeInterval = 20
+
+/// AppleScript that makes Chrome drop its open connections and its DNS cache so its pages follow
+/// a hosts switch: Chrome keeps sending a host to the connection it already has. It calls
+/// chrome.benchmarking (present only when Chrome was started with --enable-net-benchmarking) in
+/// a web tab that is already open, so nothing visible happens; once per window, incognito ones
+/// too, because each profile has its own connections. The active tab goes first: it is always
+/// loaded, while an inactive tab may be discarded and never answer. A window without a web tab,
+/// or one closed meanwhile (-1728), is skipped. A failing window does not stop the others, and
+/// the first failure is raised at the end. Chrome is never started for this.
+func chromeRefreshScript() -> String {
+    let flush = "(function(){if(!window.chrome||!chrome.benchmarking)return 'no-benchmarking';chrome.benchmarking.clearHostResolverCache();chrome.benchmarking.closeConnections();return 'ok';})()"
+    return """
+    if application id "com.google.Chrome" is not running then return
+    tell application id "com.google.Chrome"
+        set failure to missing value
+        repeat with w in (every window)
+            set windowFailure to missing value
+            try
+                set activeTab to active tab of w
+                set candidates to {activeTab}
+                repeat with t in (tabs of w)
+                    if id of t is not (id of activeTab) then set end of candidates to (contents of t)
+                end repeat
+                repeat with t in candidates
+                    if (URL of t) starts with "http" then
+                        try
+                            with timeout of 3 seconds
+                                set outcome to execute t javascript "\(flush)"
+                            end timeout
+                            if outcome is "ok" then
+                                set windowFailure to missing value
+                                exit repeat
+                            end if
+                            if outcome is "no-benchmarking" then
+                                set windowFailure to {"Chrome was not started with --enable-net-benchmarking", 9101}
+                                exit repeat
+                            end if
+                            set windowFailure to {"Chrome answered " & (outcome as text), 9102}
+                        on error errText number errNumber
+                            if errNumber is not -1728 then set windowFailure to {errText, errNumber}
+                            if errNumber is 12 then exit repeat
+                        end try
+                    end if
+                end repeat
+            on error errText number errNumber
+                if errNumber is not -1728 then set windowFailure to {errText, errNumber}
+            end try
+            if windowFailure is not missing value and failure is missing value then set failure to windowFailure
+        end repeat
+        if failure is not missing value then error (item 1 of failure) number (item 2 of failure)
+    end tell
+    """
+}
+
+/// What the Hosts tab says after a Chrome refresh, from osascript's exit and its error output
+/// ("…execution error: <message> (<number>)"); nil when there is nothing to say: success, or
+/// Chrome quit in between. Anything unrecognised keeps its own text, so no failure is hidden.
+func chromeRefreshNote(status: Int32, stderr: String, timedOut: Bool) -> String? {
+    if timedOut { return "Chrome did not answer, so its pages may keep the old address until reloaded." }
+    guard status != 0 else { return nil }
+    let text = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+    var message = text
+    var code: Int?
+    if text.hasSuffix(")"), let open = text.range(of: " (", options: .backwards),
+       let n = Int(text[open.upperBound..<text.index(before: text.endIndex)]) {
+        code = n
+        message = String(text[..<open.lowerBound])
+    }
+    if let r = message.range(of: "execution error: ") { message = String(message[r.upperBound...]) }
+    let prefix = "Google Chrome got an error: "
+    if message.hasPrefix(prefix) { message = String(message.dropFirst(prefix.count)) }
+    switch code {
+    case .some(12) where message.contains("AppleScript is turned off"):
+        return "Chrome kept its old connections: in that window's profile turn on View › Developer › Allow JavaScript from Apple Events."
+    case .some(9101) where message.contains("--enable-net-benchmarking"):
+        return "Chrome kept its old connections: quit it (⌘Q) and open it with the Chrome button above."
+    case .some(-1743):
+        return "macOS did not let Sprint Board refresh Chrome: allow it in System Settings › Privacy & Security › Automation."
+    case .some(-600), .some(-609):
+        return nil
+    default:
+        return message.isEmpty ? "Could not refresh Chrome (osascript exited with \(status))." : "Could not refresh Chrome: \(message)"
+    }
+}
+
+/// The flags the Hosts tab's Chrome button starts Chrome with: local sites with self-signed
+/// certificates open, and chrome.benchmarking exists for chromeRefreshScript.
+let CHROME_INSECURE_FLAGS = ["--ignore-certificate-errors", "--allow-insecure-localhost", "--enable-net-benchmarking"]
+
+/// The CHROME_INSECURE_FLAGS a running Chrome's command line (as `ps` prints it) lacks; each
+/// flag must appear as a whole word.
+func chromeMissingFlags(_ commandLine: String) -> [String] {
+    let words = Set(commandLine.split(whereSeparator: \.isWhitespace).map(String.init))
+    return CHROME_INSECURE_FLAGS.filter { !words.contains($0) }
+}
+
 let APP_DIR = resolveAppDir()
 let NODE = resolveNode()
 /// Cloudflare WARP intercepts TLS, and because Node does not read the macOS
@@ -389,7 +1037,7 @@ let REFRESH_SECONDS: TimeInterval = 30 * 60
 let NOTES_PATH = ("~/.local/state/sprint-widget/notes.json" as NSString).expandingTildeInPath
 let MAX_NOTES = 6
 let NOTE_LIMIT = 500
-/// The corner radius of the board card in view.html and setup.html; the window material follows it.
+/// The corner radius of the card in setup.html; the window material follows it.
 let CARD_RADIUS: CGFloat = 10
 
 /// `frame` moved, and shortened if needed, to lie inside the visible area of its own screen: the
@@ -409,7 +1057,7 @@ func onScreen(_ frame: NSRect, near current: NSRect? = nil) -> NSRect {
     return f
 }
 
-/// A stretchable mask that rounds the popover material's corners to `radius`.
+/// A stretchable mask that rounds the window material's corners to `radius`.
 func roundedMask(_ radius: CGFloat) -> NSImage {
     let side = radius * 2 + 1
     let mask = NSImage(size: NSSize(width: side, height: side), flipped: false) { r in
@@ -428,7 +1076,7 @@ let PAGE_SYMBOLS = [
     "checkmark.circle.fill", "xmark.circle", "xmark.circle.fill", "xmark.octagon.fill", "shippingbox",
     "shippingbox.fill", "flame.fill", "arrow.uturn.forward.circle", "arrow.uturn.forward", "circle",
     "circle.lefthalf.filled", "testtube.2", "arrow.triangle.pull", "checkmark", "xmark", "clock", "eye",
-    "hourglass", "ellipsis.circle", "info.circle", "arrow.down.circle",
+    "hourglass", "ellipsis.circle", "info.circle", "arrow.down.circle", "chevron.down", "chevron.up", "chevron.left", "globe", "arrow.triangle.merge", "checklist",
 ]
 
 func symbolStyleSheet() -> String {
@@ -454,6 +1102,66 @@ func symbolStyleSheet() -> String {
     return css
 }
 
+/// A script that adds `symbolStyleSheet()` to a page once it has loaded.
+func symbolScript() -> WKUserScript? {
+    guard let css = try? JSONSerialization.data(withJSONObject: symbolStyleSheet(), options: .fragmentsAllowed),
+          let literal = String(data: css, encoding: .utf8) else { return nil }
+    let js = "(() => { const s = document.createElement('style'); s.textContent = \(literal); document.head.appendChild(s); })()"
+    return WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+}
+
+/// The board's width.
+let BOARD_WIDTH: CGFloat = 430
+/// The widget's tabs, in order: segment title and page.
+let PANEL_TABS: [(title: String, page: String)] = [
+    ("Sprint", "popover/sprints.html"),
+    ("Hosts", "popover/hosts.html"),
+]
+/// The page the widget shows as its board.
+let WIDGET_BOARD_PAGE = "popover/sprints.html"
+let WIDGET_TAB_KEY = "widgetTab"
+/// The motion of a fold in popover/sprints.html (FOLD_MOTION), so the window edge moves with it.
+let WIDGET_FIT_SECONDS: TimeInterval = 0.2
+let WIDGET_FIT_CURVE = CAMediaTimingFunction(controlPoints: 0.2, 0.7, 0.3, 1)
+/// The tint of the widget's board, behind the tab header and the tab pages.
+let WIDGET_TINT = NSColor(srgbRed: 28 / 255, green: 28 / 255, blue: 30 / 255, alpha: 0.8)
+/// Runs in the widget's tab pages. Swift calls sbFit after fill mode; these pages have no own one.
+let WIDGET_PAGE_SCRIPT = #"""
+addEventListener('DOMContentLoaded', () => {
+  const card = document.getElementById('card');
+  const handlers = window.webkit?.messageHandlers;
+  if (!card || window.sbFit) return;
+  window.sbFit = () => requestAnimationFrame(() => (handlers?.sb ?? handlers?.hosts)?.postMessage({ height: card.offsetHeight }));
+});
+"""#
+/// Runs first in every page of the widget.
+let PANEL_PAGE_SCRIPT = """
+document.documentElement.classList.add('nohover');
+addEventListener('mousemove', (e) => {
+  if (e.movementX || e.movementY) document.documentElement.classList.remove('nohover');
+}, true);
+"""
+/// Height of the tab header above the pages.
+let PANEL_HEADER_HEIGHT: CGFloat = 38
+
+/// A saved tab from another build may not exist in this one.
+func widgetTabIndex(_ saved: Int) -> Int {
+    PANEL_TABS.indices.contains(saved) ? saved : 0
+}
+
+/// The page the widget shows. The setup screen is `web` over the whole window; Settings goes over the tabs.
+func widgetPageName(onSetupScreen: Bool, settingsShown: Bool, tab: Int) -> String {
+    if onSetupScreen { return "setup.html" }
+    if settingsShown { return "popover/settings.html" }
+    return PANEL_TABS[widgetTabIndex(tab)].page
+}
+
+/// The window height for a page. The setup screen has no tab header.
+func widgetWindowHeight(pageHeight: CGFloat, onSetupScreen: Bool) -> CGFloat {
+    pageHeight + (onSetupScreen ? 0 : PANEL_HEADER_HEIGHT)
+}
+
+
 /// Dragging the top strip moves the window; everything else reaches the WebView
 /// as a normal click. (CSS -webkit-app-region is Electron-specific and does
 /// nothing in WKWebView — and isMovableByWindowBackground is not enough either,
@@ -463,31 +1171,79 @@ func symbolStyleSheet() -> String {
 /// arc and a check. Being a template image it is drawn black (the track as alpha)
 /// and macOS handles the tinting. Drawn paths, not an SF Symbol, so it matches the
 /// app icon on every macOS version.
-func ringIcon(_ side: CGFloat) -> NSImage {
+/// What the menu bar icon shows: the sprint's progress as the ring, and in it a check, an
+/// exclamation mark when something needs you, or three dots before the first data. A failed
+/// refresh fades the last state: what it shows is old.
+struct MenuIconState: Equatable {
+    var progress: Double? = nil
+    var needsYou = false
+    var stale = false
+}
+
+/// "Needs you" is a review waiting two days or more, or an own PR that cannot merge (conflict,
+/// broken required check, changes requested). A PR GitHub is still checking and an overdue task
+/// do not count: the popover shows them, and an icon that never leaves the alert says nothing.
+func menuIconState(_ obj: [String: Any]?, ok: Bool, previous: MenuIconState) -> MenuIconState {
+    guard ok, let obj else {
+        var faded = previous
+        faded.stale = true
+        return faded
+    }
+    let done = (obj["done"] as? NSNumber)?.doubleValue ?? 0
+    let total = (obj["total"] as? NSNumber)?.doubleValue ?? 0
+    let reviews = obj["reviewRequests"] as? [[String: Any]] ?? []
+    let blocked = obj["pullRequests"] as? [[String: Any]] ?? []
+    let lateReview = reviews.contains { (($0["days"] as? NSNumber)?.intValue ?? 0) >= 2 }
+    let cannotMerge = blocked.contains { ($0["kind"] as? String) != "checking" }
+    let progress = total > 0 ? min(1, done / total) : 0
+    return MenuIconState(progress: progress, needsYou: lateReview || cannotMerge, stale: false)
+}
+
+func ringIcon(_ side: CGFloat, _ state: MenuIconState = MenuIconState()) -> NSImage {
     let img = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
         func p(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
             NSPoint(x: x * side, y: y * side)
         }
+        let ink = NSColor.black.withAlphaComponent(state.stale ? 0.45 : 1)
         let center = p(0.5, 0.5), radius = side * 0.38
         let track = NSBezierPath()
         track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
         track.lineWidth = side * 0.11
-        NSColor.black.withAlphaComponent(0.3).setStroke()
+        NSColor.black.withAlphaComponent(state.stale ? 0.14 : 0.3).setStroke()
         track.stroke()
 
-        let arc = NSBezierPath()
-        arc.appendArc(withCenter: center, radius: radius, startAngle: 90, endAngle: -180, clockwise: true)
-        arc.lineWidth = side * 0.11
-        arc.lineCapStyle = .round
-        let check = NSBezierPath()
-        check.move(to: p(0.34, 0.50))
-        check.line(to: p(0.45, 0.39))
-        check.line(to: p(0.66, 0.62))
-        check.lineWidth = side * 0.10
-        check.lineCapStyle = .round
-        check.lineJoinStyle = .round
-        NSColor.black.setStroke()
-        for path in [arc, check] { path.stroke() }
+        ink.setStroke()
+        ink.setFill()
+        if let progress = state.progress, progress > 0 {
+            let arc = NSBezierPath()
+            arc.appendArc(withCenter: center, radius: radius, startAngle: 90,
+                          endAngle: 90 - 360 * CGFloat(min(progress, 0.999)), clockwise: true)
+            arc.lineWidth = side * 0.11
+            arc.lineCapStyle = .round
+            arc.stroke()
+        }
+        if state.progress == nil {
+            for x in [0.34, 0.5, 0.66] as [CGFloat] {
+                NSBezierPath(ovalIn: NSRect(x: (x - 0.05) * side, y: 0.45 * side, width: 0.1 * side, height: 0.1 * side)).fill()
+            }
+        } else if state.needsYou {
+            let bar = NSBezierPath()
+            bar.move(to: p(0.5, 0.64))
+            bar.line(to: p(0.5, 0.47))
+            bar.lineWidth = side * 0.11
+            bar.lineCapStyle = .round
+            bar.stroke()
+            NSBezierPath(ovalIn: NSRect(x: 0.44 * side, y: 0.27 * side, width: 0.12 * side, height: 0.12 * side)).fill()
+        } else {
+            let check = NSBezierPath()
+            check.move(to: p(0.34, 0.50))
+            check.line(to: p(0.45, 0.39))
+            check.line(to: p(0.66, 0.62))
+            check.lineWidth = side * 0.10
+            check.lineCapStyle = .round
+            check.lineJoinStyle = .round
+            check.stroke()
+        }
         return true
     }
     img.isTemplate = true          // adapts itself to a light/dark menu bar
@@ -533,10 +1289,38 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var web: DragWebView!
     var timer: Timer?
     var statusItem: NSStatusItem!
+    var menuIcon = MenuIconState()
+    /// The widget's tab header, Hosts page and Settings page. Its Sprint page is `web`.
+    var widgetTabControl: NSSegmentedControl!
+    var hostsWeb: WKWebView!
+    var widgetSettingsWeb: WKWebView!
+    var widgetSettingsShown = false
+    var widgetHeader: NSView?
+    var widgetTint: NSView?
+    /// The height each widget page last reported, so the window follows the active tab.
+    var widgetPageHeights: [WKWebView: CGFloat] = [:]
+    /// The window height of the move under way, and a number that tells a newer move from an older one.
+    var widgetFitTarget: CGFloat?
+    var widgetFitRun = 0
+    /// The setup page that started a sign-in; its errors go back there.
+    var setupResultTarget: WKWebView?
     var retryTimer: Timer?
     var retryCount = 0
-    var ready = false
-    var pendingJSON: String?
+    /// A fetch.mjs run (or the keychain read before it) is under way. Main thread only.
+    var fetchInFlight = false
+    var settingsChanged = false
+    /// Counts the times the board's data was dropped (Disconnect, a session that ended): a fetch
+    /// started before belongs to the account that left. Main thread only.
+    var boardGeneration = 0
+    /// The board page has finished loading. A render sent to a page that is still loading is
+    /// lost, so it receives data only after this.
+    var boardLoaded = false
+    /// The last fetch result and the last successful one, replayed to a board page that
+    /// finishes loading after they arrived.
+    var lastJSON: String?
+    var lastOkJSON: String?
+    /// Whether the widget was hidden when Settings borrowed it; the way back hides it again.
+    var widgetHiddenBeforeSetup: Bool?
     /// Set by "Refresh now" and the refresh button: the next result is reported as a notification.
     var manualRefreshPending = false
     /// The widget's frame before it was made to fill the screen; nil while it is normal size.
@@ -556,12 +1340,11 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         cfg.userContentController.add(self, name: "sb")
         // Transparent backing: show the card's own background, not a window rectangle.
         cfg.setValue(false, forKey: "drawsBackground")
-        if let css = try? JSONSerialization.data(withJSONObject: symbolStyleSheet(), options: .fragmentsAllowed),
-           let literal = String(data: css, encoding: .utf8) {
-            let js = "(() => { const s = document.createElement('style'); s.textContent = \(literal); document.head.appendChild(s); })()"
-            cfg.userContentController.addUserScript(
-                WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        for source in [PANEL_PAGE_SCRIPT, WIDGET_PAGE_SCRIPT] {
+            cfg.userContentController.addUserScript(WKUserScript(
+                source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
+        if let script = symbolScript() { cfg.userContentController.addUserScript(script) }
 
         let frame = savedFrame()
         window = BoardWindow(contentRect: frame, styleMask: [.borderless, .resizable, .miniaturizable],
@@ -573,7 +1356,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.isMovableByWindowBackground = true
 
         // The system material behind the transparent page. Always active: following the
-        // window's key state would turn the panel flat whenever another app has focus.
+        // window's key state would turn the widget flat whenever another app has focus.
         let material = NSVisualEffectView(frame: NSRect(origin: .zero, size: frame.size))
         material.material = .popover
         material.blendingMode = .behindWindow
@@ -592,12 +1375,13 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
         material.addSubview(web)
+        setUpWidgetTabs(in: material)
 
         if needsSetup() {
             onSetupScreen = true
             loadPage("setup.html")
         } else {
-            loadPage("view.html")
+            loadPage(WIDGET_BOARD_PAGE)
         }
 
         // Menu bar item: with no Dock icon (LSUIElement) this is the ONLY UI route to
@@ -611,7 +1395,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         let menu = NSMenu()
         let mRefresh = NSMenuItem(title: "Refresh now", action: #selector(menuRefresh), keyEquivalent: "r")
         let mFront = NSMenuItem(title: "Bring widget to front", action: #selector(menuFront), keyEquivalent: "")
-        let mSetup = NSMenuItem(title: "Settings…", action: #selector(menuSetup), keyEquivalent: "")
+        let mSetup = NSMenuItem(title: "Settings…", action: #selector(menuSettings), keyEquivalent: "")
         dockItem = NSMenuItem(title: "Show in Dock", action: #selector(toggleDock), keyEquivalent: "")
         dockItem?.state = dockChoice(UserDefaults.standard.object(forKey: SHOW_IN_DOCK_KEY)) ? .on : .off
         for m in [mRefresh, mFront, mSetup, dockItem!] { m.target = self; menu.addItem(m) }
@@ -649,11 +1433,25 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// requires editing config by hand.
     @objc func menuSetup() {
         manualRefreshPending = false
-        setupFromSettings = !needsSetup()
+        setupFromSettings = false
         onSetupScreen = true
+        lendWidgetToSetup()
         loadPage("setup.html")
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Settings… in the menu and every gear come here. Sign-in has its own screen in the widget.
+    @objc func menuSettings() {
+        if onSetupScreen {
+            // Already open in the widget, possibly behind other windows.
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        } else if needsSetup() {
+            menuSetup()
+        } else {
+            showWidgetSettings()
+        }
     }
 
     @objc func menuRefresh() {
@@ -664,6 +1462,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// Brings the window back when it has ended up behind other windows, was minimised
     /// to the Dock, or was closed with the widget's own close button.
     @objc func menuFront() {
+        // Asked for explicitly, so leaving Settings must not hide it again.
+        widgetHiddenBeforeSetup = nil
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.orderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -701,22 +1501,34 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
         jiraAccessToken = nil
         jiraAccessExpiry = nil
+        forgetCachedTokens()
         setupFromSettings = false
         manualRefreshPending = false
+        widgetSettingsShown = false
         onSetupScreen = true
+        setupResultTarget = nil
         loadPage("setup.html")
+        clearBoardData()
     }
 
-    /// Writes the board settings from the setup screen. fetch.mjs reads the config on every
-    /// run, so the next refresh uses them.
-    func saveSettings(_ s: [String: Any]) {
+    /// Writes the board settings from the setup screen. fetch.mjs reads the config when it
+    /// starts, so a refresh starts here, and a fetch already running is followed by another.
+    func saveSettings(_ s: [String: Any], reply page: WKWebView) {
         guard let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
               var cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any] else {
-            settingsResult(["errors": ["Could not read the config file."]]); return
+            settingsResult(["errors": ["Could not read the config file."]], to: page); return
         }
         guard let org = githubOrgName((s["githubOrg"] as? String) ?? "") else {
-            settingsResult(["errors": ["Not a valid GitHub organization name: letters, digits and single hyphens, at most 39 characters."]])
+            settingsResult(["errors": ["Not a valid GitHub organization name: letters, digits and single hyphens, at most 39 characters."]], to: page)
             return
+        }
+        // Only popover/settings.html sends them; a save from setup.html leaves them as they are.
+        if let typed = s["partnerDomainSuffixes"] as? String {
+            guard let partners = partnerSuffixList(typed) else {
+                settingsResult(["errors": ["Partner domains are domain names separated by commas, as in panel.example.com, api.example.com."]], to: page)
+                return
+            }
+            cfg["partnerDomainSuffixes"] = partners
         }
         let drafts = (s["showDraftPrs"] as? Bool) ?? true
         let goals = (s["sprintGoalTracking"] as? Bool) ?? false
@@ -725,27 +1537,34 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         cfg["sprintGoalTracking"] = goals
         guard let data = try? JSONSerialization.data(withJSONObject: cfg, options: .prettyPrinted),
               (try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))) != nil else {
-            settingsResult(["errors": ["Could not write the config file."]]); return
+            settingsResult(["errors": ["Could not write the config file."]], to: page); return
         }
-        settingsResult(["saved": true, "githubOrg": org, "showDraftPrs": drafts, "sprintGoalTracking": goals])
+        settingsChanged = true
+        reload()
+        settingsResult(["saved": true, "githubOrg": org, "showDraftPrs": drafts, "sprintGoalTracking": goals,
+                        "partnerDomainSuffixes": partnerDomainSuffixes(cfg)], to: page)
     }
 
-    func settingsResult(_ res: [String: Any]) {
+    func settingsResult(_ res: [String: Any], to page: WKWebView) {
         let json = (try? JSONSerialization.data(withJSONObject: res))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        web.evaluateJavaScript("window.sbSettingsResult && window.sbSettingsResult(\(json))")
+        page.evaluateJavaScript("window.sbSettingsResult && window.sbSettingsResult(\(json))")
     }
 
     /// The green button: the widget fills the screen with larger text; again restores it.
     func toggleFill() {
         if let frame = restoreFrame {
             web.pageZoom = 1
+            hostsWeb.pageZoom = 1
+            widgetSettingsWeb.pageZoom = 1
             // The animation runs a nested run loop: height reports must still wait until it ends.
             window.setFrame(frame, display: true, animate: true)
             restoreFrame = nil
         } else if let screen = window.screen ?? NSScreen.main {
             restoreFrame = window.frame
             web.pageZoom = 1.4
+            hostsWeb.pageZoom = 1.4
+            widgetSettingsWeb.pageZoom = 1.4
             window.setFrame(screen.visibleFrame, display: true, animate: true)
         }
         // The zoom scales the card's CSS corners; the material must follow them.
@@ -753,14 +1572,17 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         window.invalidateShadow()
         applyFillClass()
         if restoreFrame == nil {
-            web.evaluateJavaScript("window.sbFit && window.sbFit()") { _, err in
-                if let err { dbg("fit: \(err.localizedDescription)") }
+            for page in widgetPages {
+                page.evaluateJavaScript("window.sbFit && window.sbFit()") { _, err in
+                    if let err { dbg("fit: \(err.localizedDescription)") }
+                }
             }
         }
     }
 
     func applyCornerRadius(_ radius: CGFloat) {
         (window.contentView as? NSVisualEffectView)?.maskImage = roundedMask(radius)
+        widgetTint?.layer?.cornerRadius = radius
     }
 
     func applyFillClass() {
@@ -801,6 +1623,524 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         return false
     }
 
+    // MARK: widget tabs
+
+    /// The tab header holds the window buttons, so every page has them. The Hosts and Settings
+    /// pages stay loaded behind the Sprint page, so each keeps its state. The setup screen uses
+    /// the whole window and brings its own card and window buttons.
+    func setUpWidgetTabs(in material: NSView) {
+        let tint = NSView(frame: material.bounds)
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = WIDGET_TINT.cgColor
+        tint.layer?.cornerRadius = CARD_RADIUS
+        tint.autoresizingMask = [.width, .height]
+        material.addSubview(tint, positioned: .below, relativeTo: web)
+        widgetTint = tint
+
+        hostsWeb = makeTabWebView(handler: "hosts")
+        widgetSettingsWeb = makeTabWebView(handler: "sb")
+        for page in [hostsWeb, widgetSettingsWeb] as [WKWebView] {
+            page.configuration.userContentController.addUserScript(WKUserScript(
+                source: WIDGET_PAGE_SCRIPT, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            page.autoresizingMask = [.width, .height]
+            page.isHidden = true
+            material.addSubview(page)
+        }
+
+        let width = material.bounds.width
+        let header = NSView(frame: NSRect(x: 0, y: material.bounds.height - PANEL_HEADER_HEIGHT,
+                                          width: width, height: PANEL_HEADER_HEIGHT))
+        header.autoresizingMask = [.width, .minYMargin]
+        header.appearance = NSAppearance(named: .darkAqua)
+        material.addSubview(header)
+        widgetHeader = header
+
+        widgetTabControl = NSSegmentedControl(labels: PANEL_TABS.map(\.title), trackingMode: .selectOne,
+                                              target: self, action: #selector(widgetTabChanged))
+        widgetTabControl.sizeToFit()
+        widgetTabControl.frame.origin = NSPoint(x: (width - widgetTabControl.frame.width) / 2,
+                                                y: (PANEL_HEADER_HEIGHT - widgetTabControl.frame.height) / 2)
+        widgetTabControl.autoresizingMask = [.minXMargin, .maxXMargin]
+        header.addSubview(widgetTabControl)
+
+        let lights: [(color: UInt32, action: String)] = [(0xff5f57, "close"), (0xfebc2e, "minimize"), (0x28c840, "fill")]
+        for (i, light) in lights.enumerated() {
+            let button = NSButton(frame: NSRect(x: 16 + CGFloat(i) * 20, y: (PANEL_HEADER_HEIGHT - 12) / 2, width: 12, height: 12))
+            button.title = ""
+            button.isBordered = false
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 6
+            button.layer?.backgroundColor = NSColor(srgbRed: CGFloat(light.color >> 16 & 255) / 255,
+                                                    green: CGFloat(light.color >> 8 & 255) / 255,
+                                                    blue: CGFloat(light.color & 255) / 255, alpha: 1).cgColor
+            button.identifier = NSUserInterfaceItemIdentifier(light.action)
+            button.toolTip = light.action
+            button.target = self
+            button.action = #selector(widgetLightClicked)
+            header.addSubview(button)
+        }
+
+        loadPage("popover/hosts.html", in: hostsWeb)
+        loadPage("popover/settings.html", in: widgetSettingsWeb)
+        let saved = UserDefaults.standard.integer(forKey: WIDGET_TAB_KEY)
+        widgetTabControl.selectedSegment = widgetTabIndex(saved)
+        layoutWidget()
+    }
+
+    var widgetPages: [WKWebView] { [web, hostsWeb, widgetSettingsWeb] }
+
+    /// Pages start with `nohover`, which the hover styles of the buttons that swap pages wait on;
+    /// the first real mouse move drops it.
+    func makeTabWebView(handler: String) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.userContentController.add(self, name: handler)
+        cfg.userContentController.addUserScript(WKUserScript(
+            source: PANEL_PAGE_SCRIPT, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        if let script = symbolScript() { cfg.userContentController.addUserScript(script) }
+        cfg.setValue(false, forKey: "drawsBackground")
+        let w = WKWebView(frame: .zero, configuration: cfg)
+        w.navigationDelegate = self
+        w.setValue(false, forKey: "drawsBackground")
+        return w
+    }
+
+    var widgetShownPage: WKWebView { widgetPages.first { !$0.isHidden } ?? web }
+
+    /// The page the widget's state asks for. Until the swap, `widgetShownPage` is the one on screen.
+    var widgetTargetPage: WKWebView {
+        switch widgetPageName(onSetupScreen: onSetupScreen, settingsShown: widgetSettingsShown,
+                              tab: widgetTabControl.selectedSegment) {
+        case "popover/hosts.html": return hostsWeb
+        case "popover/settings.html": return widgetSettingsWeb
+        default: return web
+        }
+    }
+
+    /// Places the header and the pages for the setup screen or the selected tab.
+    func layoutWidget() {
+        guard let header = widgetHeader, let material = window.contentView else { return }
+        let tabs = !onSetupScreen
+        let pageFrame = NSRect(x: 0, y: 0, width: material.bounds.width,
+                               height: material.bounds.height - (tabs ? PANEL_HEADER_HEIGHT : 0))
+        for page in widgetPages { page.frame = pageFrame }
+        header.isHidden = !tabs
+        widgetTint?.isHidden = !tabs
+        let target = widgetTargetPage
+        for page in widgetPages { page.isHidden = page !== target }
+        widgetTabControl.isHidden = target === widgetSettingsWeb
+        fitWidget()
+    }
+
+    /// The window follows the active page. It keeps its top edge and never leaves the screen: it
+    /// would run under the Dock and be saved so. While it fills the screen its size is fixed.
+    /// With `animated` the bottom edge moves with the page's fold motion. A page reports its new
+    /// height before its motion starts, so a move in one step cuts or uncovers the board before
+    /// the content arrives. A WKWebView redraws at each resize, so the pages stay pinned at the
+    /// taller height for the move and take their exact height once, at its end.
+    func fitWidget(animated: Bool = false) {
+        guard restoreFrame == nil, let height = widgetPageHeights[widgetShownPage] else { return }
+        var f = window.frame
+        let top = f.maxY
+        f.size.height = widgetWindowHeight(pageHeight: height, onSetupScreen: onSetupScreen)
+        f.origin.y = top - f.height
+        f = onScreen(f, near: window.frame)
+        let now = window.frame
+        if let target = widgetFitTarget {
+            // A fold reports its height more than once; the move under way already goes there.
+            if abs(f.height - target) < 0.5 { return }
+        } else if abs(f.minX - now.minX) < 0.5, abs(f.minY - now.minY) < 0.5, abs(f.height - now.height) < 0.5 {
+            return
+        }
+        widgetFitRun += 1
+        let run = widgetFitRun
+        let move = animated && window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let interrupted = widgetFitTarget != nil
+        widgetFitTarget = move ? f.height : nil
+        if move { pinWidgetPages(windowHeight: f.height) }
+        guard move || interrupted else {
+            window.setFrame(f, display: true)
+            window.invalidateShadow()
+            saveFrame()
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = move ? WIDGET_FIT_SECONDS : 0
+            context.timingFunction = WIDGET_FIT_CURVE
+            window.animator().setFrame(f, display: true)
+        }, completionHandler: { [weak self] in
+            guard let self, run == self.widgetFitRun else { return }
+            self.widgetFitTarget = nil
+            for page in self.widgetPages { page.autoresizingMask = [.width, .height] }
+            self.layoutWidget()
+            self.window.invalidateShadow()
+            self.saveFrame()
+        })
+    }
+
+    /// Pages keep their top edge and height while the window moves under them.
+    func pinWidgetPages(windowHeight: CGFloat) {
+        let height = windowHeight - PANEL_HEADER_HEIGHT
+        for page in widgetPages {
+            page.autoresizingMask = [.width, .minYMargin]
+            guard height > page.frame.height else { continue }
+            page.frame = NSRect(x: 0, y: page.frame.maxY - height, width: page.frame.width, height: height)
+        }
+    }
+
+    @objc func widgetTabChanged() {
+        UserDefaults.standard.set(widgetTabControl.selectedSegment, forKey: WIDGET_TAB_KEY)
+        swapWidgetPage { [weak self] in
+            // /etc/hosts may have been edited by hand since the tab was last drawn.
+            guard let self, self.widgetShownPage === self.hostsWeb else { return }
+            self.hostsMessage(["status": true])
+        }
+    }
+
+    /// One way to change the page. A hidden WKWebView keeps the last mouse position it saw, so the
+    /// page being left turns hover off and paints that, then the two pages trade places in one step.
+    func swapWidgetPage(then after: @escaping () -> Void = {}) {
+        let leaving = widgetShownPage
+        let page = widgetTargetPage
+        var swapped = false
+        let swap = { [weak self] in
+            guard let self, !swapped else { return }
+            swapped = true
+            // A newer request took over; it does the swap.
+            guard self.widgetTargetPage === page else { return }
+            self.layoutWidget()
+            after()
+        }
+        let hoverOff = "document.documentElement.classList.add('nohover')"
+        guard leaving !== page, window.isVisible else {
+            leaving.evaluateJavaScript(hoverOff)
+            swap()
+            return
+        }
+        leaving.callAsyncJavaScript("\(hoverOff); await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))",
+                                   arguments: [:], in: nil, in: .page) { _ in swap() }
+        // Animation frames stop when the page cannot draw; the swap must happen anyway.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { swap() }
+    }
+
+    /// Settings over the tabs, with a back arrow. Partner domains are only on this page. It stays
+    /// loaded and is filled for each opening, then shown at its new height, so it opens in one step.
+    func showWidgetSettings() {
+        lendWidgetToSetup()
+        fillWidgetSettings { [weak self] height in
+            guard let self else { return }
+            if let height { self.widgetPageHeights[self.widgetSettingsWeb] = height }
+            self.widgetSettingsShown = true
+            NSApp.activate(ignoringOtherApps: true)
+            self.window.makeKeyAndOrderFront(nil)
+            self.swapWidgetPage()
+        }
+    }
+
+    /// Answers the page's height; nil before the page has loaded, and didFinish fills it then.
+    func fillWidgetSettings(_ done: @escaping (CGFloat?) -> Void = { _ in }) {
+        var context: Any = NSNull()
+        if let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
+           let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+           let signedIn = setupContext(cfg) {
+            context = signedIn
+        }
+        let args = (try? JSONSerialization.data(withJSONObject: [context, [String]()]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[null, []]"
+        widgetSettingsWeb.evaluateJavaScript("window.sbSettingsShow ? window.sbSettingsShow(...\(args)) : null") { height, _ in
+            done((height as? Double).map { CGFloat($0) })
+        }
+    }
+
+    func hideWidgetSettings() {
+        widgetSettingsShown = false
+        swapWidgetPage { [weak self] in
+            guard let self else { return }
+            // Partner domains may have changed, and /etc/hosts may have been edited by hand.
+            if self.widgetShownPage === self.hostsWeb { self.hostsMessage(["status": true]) }
+            if self.widgetHiddenBeforeSetup == true { self.window.orderOut(nil) }
+            self.widgetHiddenBeforeSetup = nil
+        }
+    }
+
+    @objc func widgetLightClicked(_ button: NSButton) {
+        windowAction(button.identifier?.rawValue ?? "")
+    }
+
+    func windowAction(_ action: String) {
+        switch action {
+        case "close": window.orderOut(nil)
+        case "minimize": window.miniaturize(nil)
+        case "fill": toggleFill()
+        default: break
+        }
+    }
+
+    /// Settings opens in the widget. Whether the widget was hidden is remembered so the way
+    /// back can hide it again.
+    func lendWidgetToSetup() {
+        // Minimised is not closed: a minimised widget reports isVisible == false too.
+        if widgetHiddenBeforeSetup == nil { widgetHiddenBeforeSetup = !window.isVisible && !window.isMiniaturized }
+    }
+
+    /// Back from the setup screen to the board, whichever way: Back to board or a finished
+    /// sign-in.
+    func showBoard() {
+        onSetupScreen = false
+        setupFromSettings = false
+        setupResultTarget = nil
+        widgetSettingsShown = false
+        loadPage(WIDGET_BOARD_PAGE)
+        reload()
+        if widgetHiddenBeforeSetup == true { window.orderOut(nil) }
+        widgetHiddenBeforeSetup = nil
+    }
+
+    /// Signed out: no board, nor the menu bar icon, may keep showing the previous account.
+    func clearBoardData() {
+        lastJSON = nil
+        lastOkJSON = nil
+        boardGeneration += 1
+        menuIcon = MenuIconState()
+        statusItem.button?.image = ringIcon(18, menuIcon)
+    }
+
+    // MARK: hosts
+
+    /// One change at a time, and the file I/O stays off the main thread.
+    let hostsQueue = DispatchQueue(label: "sprint-board.hosts")
+
+    func readHostsList() -> HostsList? {
+        guard let d = FileManager.default.contents(atPath: HOSTS_LIST_PATH) else { return nil }
+        return hostsList(fromJSON: try? JSONSerialization.jsonObject(with: d))
+    }
+
+    func writeHostsList(_ list: HostsList) -> Bool {
+        try? FileManager.default.createDirectory(atPath: (HOSTS_LIST_PATH as NSString).deletingLastPathComponent,
+                                                 withIntermediateDirectories: true)
+        guard let d = try? JSONSerialization.data(withJSONObject: hostsListJSON(list), options: .prettyPrinted) else {
+            return false
+        }
+        return (try? d.write(to: URL(fileURLWithPath: HOSTS_LIST_PATH), options: .atomic)) != nil
+    }
+
+    /// hosts.json from before /etc/hosts became the source of truth also held the domains. The
+    /// file goes to the backup folder once, then only the groups stay. When either step fails the
+    /// old file stays as it is: the groups still read from it, and the next load tries again.
+    func migrateHostsList(_ list: HostsList) {
+        guard let data = FileManager.default.contents(atPath: HOSTS_LIST_PATH),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              Set(json.keys) != ["groups"] else { return }
+        try? FileManager.default.createDirectory(atPath: HOSTS_BACKUP_DIR, withIntermediateDirectories: true)
+        let backup = (HOSTS_BACKUP_DIR as NSString).appendingPathComponent("hosts.json.before-file-rows")
+        guard FileManager.default.fileExists(atPath: backup)
+                || (try? data.write(to: URL(fileURLWithPath: backup), options: .atomic)) != nil else { return }
+        _ = writeHostsList(list)
+    }
+
+    /// Messages from popover/hosts.html (see hostsApply for the actions; status on top).
+    /// Every action is answered with the full state, its error included, so a failure is never
+    /// silent. hosts.json is saved before /etc/hosts is written; /etc/hosts is not written when the
+    /// groups could not be saved, and they are rolled back when /etc/hosts could not be written,
+    /// so the two stay in step.
+    func hostsMessage(_ body: [String: Any]) {
+        if body["openChrome"] != nil {
+            chromeQueue.async { [weak self] in self?.openInsecureChrome() }
+            return
+        }
+        // The page also posts its height here; that is not an action and must not be
+        // answered, or every redraw would ask for the next one.
+        let actions = ["status", "add", "addPartner", "remove", "setMode", "groupAdd", "groupRename", "groupDelete",
+                       "groupDeleteWithDomains", "member"]
+        guard body.keys.contains(where: actions.contains) else { return }
+        hostsQueue.async { [weak self] in
+            guard let self else { return }
+            let writable = FileManager.default.isWritableFile(atPath: HOSTS_PATH)
+            // An unreadable file is NOT an empty one: read as empty it would show every domain
+            // as prod while the block still points them at this machine.
+            guard let text = self.readHostsText() else {
+                var state = hostsStatus("", self.readHostsList() ?? HostsList(), writable: writable)
+                state["mode"] = "unreadable"
+                state["error"] = "Could not read /etc/hosts as text, so nothing can be shown or changed."
+                self.replyHosts(state, to: body)
+                return
+            }
+            let saved = self.readHostsList()
+            if saved == nil, FileManager.default.fileExists(atPath: HOSTS_LIST_PATH) {
+                var state = hostsStatus(text, HostsList(), writable: writable)
+                state["error"] = "Could not read the domain list (\(HOSTS_LIST_PATH)). Fix or delete that file; nothing was changed."
+                self.replyHosts(state, to: body)
+                return
+            }
+            if let saved { self.migrateHostsList(saved) }
+            let rows = hostsRows(text)
+            let before = HostsList(domains: rows.map(\.name), groups: saved?.groups ?? [])
+            // With a damaged block nothing that writes the file may run (the page disables these too).
+            let writes = ["add", "addPartner", "remove", "setMode", "groupDeleteWithDomains"]
+            if managedHosts(text) == nil, body.keys.contains(where: writes.contains) {
+                var state = hostsStatus(text, before, writable: writable)
+                state["error"] = "Sprint Board's block in /etc/hosts is damaged; fix it by hand first. Nothing was changed."
+                self.replyHosts(state, to: body)
+                return
+            }
+            if let name = body["remove"] as? String, HOSTS_SYSTEM_NAMES.contains(name.lowercased()) {
+                var state = hostsStatus(text, before, writable: writable)
+                state["error"] = "“\(name)” is a system entry, so it stays."
+                self.replyHosts(state, to: body)
+                return
+            }
+            let wasLocal = rows.filter(\.local).map(\.name)
+            let result = hostsApply(before, local: wasLocal, body, partners: self.hostsPartnerSuffixes())
+            var list = result.list
+            var error = result.error
+
+            if list.groups != before.groups {
+                if !self.writeHostsList(list) {
+                    list = before
+                    error = "Could not save the domain list to \(HOSTS_LIST_PATH); nothing was changed."
+                }
+            }
+            let kept = Set(result.list.domains)
+            let gone = before.domains.filter { !kept.contains($0) }
+            let edit = HostsEdit(added: result.list.domains.filter { !before.domains.contains($0) }, removed: gone,
+                                 toLocal: result.local.filter { !wasLocal.contains($0) },
+                                 toProd: wasLocal.filter { kept.contains($0) && !result.local.contains($0) },
+                                 removedLocal: rows.contains { $0.local && gone.contains($0.name) })
+            // Opening the tab only reads: a status never writes /etc/hosts or refreshes Chrome.
+            if body["status"] == nil, list == result.list, !edit.isEmpty {
+                if let failed = writeHostsFile(edit, path: HOSTS_PATH, backupDir: HOSTS_BACKUP_DIR) {
+                    error = failed
+                    // Keep the groups in step with the file that stayed as it was.
+                    if list.groups != before.groups, self.writeHostsList(before) { list = before }
+                } else {
+                    if edit.changesResolution { self.scheduleChromeRefresh() }
+                }
+            }
+
+            var state = self.readHostsText().map { hostsStatus($0, list, writable: writable) }
+                ?? hostsStatus("", list, writable: writable).merging(["mode": "unreadable"]) { $1 }
+            if let error { state["error"] = error }
+            self.replyHosts(state, to: body)
+        }
+    }
+
+    func readHostsText() -> String? {
+        FileManager.default.contents(atPath: HOSTS_PATH).flatMap(hostsFileText)?.text
+    }
+
+    func hostsPartnerSuffixes() -> [String] {
+        let config = (try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        return partnerDomainSuffixes(config)
+    }
+
+    /// The page gets the partner suffixes with every state, so "Add partner" follows the config,
+    /// and the requestId of the message answered, so it can tell its action's reply from a state
+    /// Swift sent on its own (a tab switch).
+    func replyHosts(_ state: [String: Any], to body: [String: Any]) {
+        var state = state
+        state["partnerSuffixes"] = hostsPartnerSuffixes()
+        state["requestId"] = body["requestId"]
+        let json = (try? JSONSerialization.data(withJSONObject: state))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        DispatchQueue.main.async {
+            self.hostsWeb.evaluateJavaScript("window.sbHosts && window.sbHosts(\(json))") { _, err in
+                if let err { dbg("sbHosts: \(err.localizedDescription)") }
+            }
+        }
+    }
+
+    // MARK: Chrome refresh
+
+    /// The refresh still waiting to run; a burst of switches runs it once. Main thread only.
+    var chromeRefresh: DispatchWorkItem?
+    let chromeQueue = DispatchQueue(label: "sprint-board.chrome")
+
+    /// After a switch changed what a name resolves to (see chromeRefreshScript for why).
+    func scheduleChromeRefresh() {
+        DispatchQueue.main.async {
+            self.chromeRefresh?.cancel()
+            let item = DispatchWorkItem { [weak self] in self?.refreshChrome() }
+            self.chromeRefresh = item
+            self.chromeQueue.asyncAfter(deadline: .now() + 0.3, execute: item)
+        }
+    }
+
+    func refreshChrome() {
+        // Not running: nothing holds an old connection, and a note from earlier no longer applies.
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: "com.google.Chrome").isEmpty else {
+            showChromeNote(nil)
+            return
+        }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", chromeRefreshScript()]
+        let err = Pipe()
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = err
+        do { try p.run() } catch {
+            showChromeNote("Could not refresh Chrome: \(error.localizedDescription)")
+            return
+        }
+        let deadline = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + CHROME_REFRESH_TIMEOUT, execute: deadline)
+        let out = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        p.waitUntilExit()
+        deadline.cancel()
+        if !out.isEmpty { dbg("chrome refresh (exit \(p.terminationStatus)): \(out)") }
+        showChromeNote(chromeRefreshNote(status: p.terminationStatus, stderr: out,
+                                         timedOut: p.terminationReason == .uncaughtSignal))
+    }
+
+    /// The Hosts tab's Chrome button: starts Chrome with CHROME_INSECURE_FLAGS, or brings it to
+    /// the front when it already runs with them. A Chrome already running without them is left
+    /// alone (flags only apply at launch, and a restart would lose its tabs and session cookies);
+    /// the note says to quit it first. Runs on chromeQueue.
+    func openInsecureChrome() {
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") else {
+            showChromeNote("Google Chrome is not installed.")
+            return
+        }
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: "com.google.Chrome").first {
+            let ps = Process()
+            ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+            ps.arguments = ["-ww", "-o", "args=", "-p", String(running.processIdentifier)]
+            let out = Pipe()
+            ps.standardOutput = out
+            ps.standardError = FileHandle.nullDevice
+            do { try ps.run() } catch {
+                showChromeNote("Could not check how Chrome was started: \(error.localizedDescription)")
+                return
+            }
+            let commandLine = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            ps.waitUntilExit()
+            let missing = chromeMissingFlags(commandLine)
+            // An empty answer means Chrome quit meanwhile: start it below.
+            if !commandLine.isEmpty, !missing.isEmpty {
+                showChromeNote("Chrome is already open without \(missing.joined(separator: " ")): quit it (⌘Q) and press the Chrome button again.")
+                return
+            }
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.arguments = CHROME_INSECURE_FLAGS
+        config.activates = true
+        DispatchQueue.main.async {
+            NSWorkspace.shared.openApplication(at: app, configuration: config) { [weak self] _, error in
+                self?.showChromeNote(error.map { "Could not open Chrome: \($0.localizedDescription)" })
+            }
+        }
+    }
+
+    /// Shows a note under the Hosts list; nil clears it.
+    func showChromeNote(_ note: String?) {
+        let arg = (try? JSONSerialization.data(withJSONObject: note.map { $0 as Any } ?? NSNull(), options: .fragmentsAllowed))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "null"
+        DispatchQueue.main.async {
+            self.hostsWeb.evaluateJavaScript("window.sbHostsNote && window.sbHostsNote(\(arg))") { _, err in
+                if let err { dbg("sbHostsNote: \(err.localizedDescription)") }
+            }
+        }
+    }
+
     // MARK: notifications
 
     func notifyUser(id: String, title: String, body: String, url: String?) {
@@ -817,12 +2157,12 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     /// New conflicts always notify; a refresh the user asked for also reports its result.
     func notifyFromResult(_ obj: [String: Any]?, ok: Bool) {
-        let notes = resultNotifications(obj, ok: ok, manual: manualRefreshPending, onSetupScreen: onSetupScreen)
+        let notes = resultNotifications(obj, ok: ok, manual: manualRefreshPending, onSetupScreen: setupBlocksFetch)
         for n in notes {
             guard let id = n["id"], let title = n["title"] else { continue }
             notifyUser(id: id, title: title, body: n["body"] ?? "", url: n["url"])
         }
-        if !onSetupScreen { manualRefreshPending = false }
+        if !setupBlocksFetch { manualRefreshPending = false }
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
@@ -845,13 +2185,13 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         let y = d.object(forKey: "sbY") as? Double
         let h = d.object(forKey: "sbH") as? Double ?? 420
         guard let screen = NSScreen.main else {
-            return NSRect(x: 40, y: 40, width: 430, height: h)
+            return NSRect(x: 40, y: 40, width: BOARD_WIDTH, height: h)
         }
         // Default: top-left corner (on macOS y is measured from the bottom up).
         let vf = screen.visibleFrame
         return onScreen(NSRect(x: x ?? (vf.minX + 40),
                                y: y ?? (vf.maxY - h - 40),
-                               width: 430, height: h))
+                               width: BOARD_WIDTH, height: h))
     }
 
     func saveFrame() {
@@ -879,21 +2219,30 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// The data layer must not run while the setup screen is open: setup.html has no
     /// sbRender, so pushing data there fails with "A JavaScript exception occurred" —
     /// and with no config written yet, fetch would fail anyway.
-    var onSetupScreen = false
+    var onSetupScreen = false {
+        didSet { DispatchQueue.main.async { [weak self] in self?.layoutWidget() } }
+    }
     /// The setup screen was opened from Settings while signed in, so it offers "Back to board".
     var setupFromSettings = false
+    /// The user opened Settings while signed in: nothing is wrong, so refreshes go on behind it
+    /// and reach the board. A setup screen that opened itself (sign-in needed, or macOS refused
+    /// the token read) stops them, or each one would ask again.
+    var setupBlocksFetch: Bool { onSetupScreen }
 
-    /// Loads an HTML page from the bundle/repo.
-    func loadPage(_ name: String) {
+    /// Loads an HTML page from the bundle/repo, into the widget unless told otherwise.
+    func loadPage(_ name: String, in view: WKWebView? = nil) {
+        let target: WKWebView = view ?? web
+        // Not a board until this load finishes (didFinish sets it again).
+        if target === web { boardLoaded = false }
         let url = URL(fileURLWithPath: "\(APP_DIR)/\(name)")
-        web.loadFileURL(url, allowingReadAccessTo: URL(fileURLWithPath: APP_DIR))
+        target.loadFileURL(url, allowingReadAccessTo: URL(fileURLWithPath: APP_DIR))
     }
 
     func setupFailed(_ errors: [String]) {
         let json = (try? JSONSerialization.data(withJSONObject: ["errors": errors]))
             .flatMap { String(data: $0, encoding: .utf8) } ?? #"{"errors":["unknown error"]}"#
         DispatchQueue.main.async {
-            self.web.evaluateJavaScript("window.sbSetupResult(\(json))") { _, err in
+            (self.setupResultTarget ?? self.web).evaluateJavaScript("window.sbSetupResult(\(json))") { _, err in
                 if let err { NSLog("sbSetupResult: \(err)") }
             }
         }
@@ -996,11 +2345,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         jiraAccessToken = access
         jiraAccessExpiry = Date().addingTimeInterval(TimeInterval((tok["expires_in"] as? Int) ?? 3600))
 
-        DispatchQueue.main.async {
-            self.onSetupScreen = false
-            self.loadPage("view.html")
-            self.reload()
-        }
+        DispatchQueue.main.async { self.showBoard() }
     }
 
     /// The API-token route, for when "Sign in with Atlassian" is not available. The token
@@ -1030,6 +2375,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         guard keychainSet(service: JIRA_TOKEN_KEYCHAIN, account: email, value: token) else {
             setupFailed(["Could not save the token to the keychain."]); return
         }
+        forgetCachedTokens()
 
         var cfg = (try? JSONSerialization.jsonObject(with: Data(contentsOf:
                     URL(fileURLWithPath: "\(APP_DIR)/config.example.json")))) as? [String: Any] ?? [:]
@@ -1061,11 +2407,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))
         }
 
-        DispatchQueue.main.async {
-            self.onSetupScreen = false
-            self.loadPage("view.html")
-            self.reload()
-        }
+        DispatchQueue.main.async { self.showBoard() }
     }
 
     /// A valid access token; when expired it is refreshed silently via the Worker.
@@ -1075,7 +2417,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             dbg("token: from memory"); return .ok(t)
         }
         guard let refresh = keychainGet(service: JIRA_OAUTH_KEYCHAIN, account: email) else {
-            dbg("token: NO refresh in keychain"); return .needsLogin
+            // The item still there means the read was refused (Deny in macOS's dialog): the
+            // session is valid, so the board stays and offers Back to board.
+            let denied = keychainHas(service: JIRA_OAUTH_KEYCHAIN, account: email)
+            dbg("token: NO refresh read, denied: \(denied)"); return denied ? .denied : .needsLogin
         }
         let r = postJSON(WORKER_URL + "/refresh", ["refresh_token": refresh])
         guard let status = r.status else {
@@ -1112,6 +2457,40 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         return j["jiraAuthState"]
     }
 
+    /// The Jira API token, read from the keychain once per launch. Unless the user chose
+    /// "Always Allow", macOS asks for permission on EVERY read, and the board refreshes every
+    /// 30 minutes (plus ⟳ and retries) — re-reading each time asked again and again. Kept in
+    /// memory like the OAuth access token; forgotten when this app replaces or removes the
+    /// token (sign-in, Disconnect), and on quit. Only app-written tokens are cached: the
+    /// GitHub token can change outside the app, so it is still read on every refresh.
+    var keychainCache: [String: String] = [:]
+    /// Bumped by forgetCachedTokens, so a read that was under way then does not store the
+    /// old token afterwards.
+    var keychainCacheGeneration = 0
+    /// Guards the two above only, never a keychain read: a read can wait on a permission
+    /// dialog, and Disconnect (main thread) must not wait with it.
+    let keychainCacheLock = NSLock()
+
+    func cachedKeychainGet(service: String, account: String) -> String? {
+        let key = service + "\n" + account
+        keychainCacheLock.lock()
+        let hit = keychainCache[key], generation = keychainCacheGeneration
+        keychainCacheLock.unlock()
+        if let hit { return hit }
+        let value = keychainGet(service: service, account: account)
+        keychainCacheLock.lock()
+        if let value, generation == keychainCacheGeneration { keychainCache[key] = value }
+        keychainCacheLock.unlock()
+        return value
+    }
+
+    func forgetCachedTokens() {
+        keychainCacheLock.lock()
+        keychainCache.removeAll()
+        keychainCacheGeneration += 1
+        keychainCacheLock.unlock()
+    }
+
     /// Reads the tokens from the keychain and builds the JSON handed to fetch.mjs.
     ///
     /// The APP does the reading, not a `security` subprocess: because the app that
@@ -1134,10 +2513,19 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
                 case .ok(let at):   out["jiraAccessToken"] = at
                 case .needsLogin:   out["jiraAuthState"] = "needsLogin"
                 case .temporary:    out["jiraAuthState"] = "temporary"
+                case .denied:       out["jiraAuthState"] = "tokenDenied"
                 }
             } else {
                 let jiraSvc = (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
-                if let t = keychainGet(service: jiraSvc, account: email) { out["jiraToken"] = t }
+                if let t = cachedKeychainGet(service: jiraSvc, account: email) {
+                    out["jiraToken"] = t
+                } else {
+                    // Without this the run went on to fetch.mjs, whose `security` fallback
+                    // raised a second permission dialog and then left the user to find
+                    // Settings themselves. Missing: the item is gone. Denied: the read was
+                    // refused (Deny in macOS's dialog).
+                    out["jiraAuthState"] = keychainHas(service: jiraSvc, account: email) ? "tokenDenied" : "tokenMissing"
+                }
             }
             let ghSvc = (cfg["githubKeychainService"] as? String) ?? "sprint-board-github"
             if let g = keychainGet(service: ghSvc, account: email) { out["githubToken"] = g }
@@ -1155,14 +2543,26 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     /// Runs fetch.mjs in the background and hands its JSON to the web side.
     /// When the session is no longer valid (refresh token expired or revoked) this
     /// returns the user to the setup screen — all they need to do is sign in again.
-    func requireLogin(_ reason: String) {
+    /// `canGoBack`: the sign-in itself is fine (macOS refused the token read), so the setup
+    /// screen offers "Back to board" to try again and the boards keep their data.
+    func requireLogin(_ reason: String, canGoBack: Bool = false) {
         DispatchQueue.main.async {
             guard !self.onSetupScreen else { return }
             self.onSetupScreen = true
-            self.setupFromSettings = false
+            self.setupFromSettings = canGoBack
             self.manualRefreshPending = false
             self.pendingSetupError = reason
+            self.widgetSettingsShown = false
+            // The widget was closed: it keeps the setup screen without coming forward.
+            let widgetClosed = !self.window.isVisible && !self.window.isMiniaturized
+            if widgetClosed {
+                self.loadPage("setup.html")
+                if !canGoBack { self.clearBoardData() }
+                return
+            }
+            self.lendWidgetToSetup()
             self.loadPage("setup.html")
+            if !canGoBack { self.clearBoardData() }
             NSApp.activate(ignoringOtherApps: true)
             self.window.makeKeyAndOrderFront(nil)
         }
@@ -1171,11 +2571,28 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     func reload() {
         // A refresh asked for on the setup screen never runs, so it must not wait to
         // report itself on the next automatic one.
-        if onSetupScreen { manualRefreshPending = false; return }
+        if setupBlocksFetch { manualRefreshPending = false; return }
+        // One fetch at a time. A second one queued behind a keychain permission dialog would
+        // ask again right after a Deny; a refresh asked for meanwhile is reported by the
+        // running fetch (manualRefreshPending).
+        guard !fetchInFlight else { return }
+        fetchInFlight = true
+        let generation = boardGeneration
+        settingsChanged = false
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
+            // Queued after any push() below, so the flag clears once its result is handled. When
+            // the account left while it ran, push() dropped the result and the board now signed
+            // in gets its own fetch instead of waiting for the timer.
+            defer {
+                DispatchQueue.main.async {
+                    self.fetchInFlight = false
+                    if generation != self.boardGeneration || self.settingsChanged { self.reload() }
+                }
+            }
             guard let node = NODE else {
-                self.push(#"{"ok":false,"error":"node not found — looked in /opt/homebrew/bin, /usr/local/bin and /usr/bin"}"#)
+                self.push(#"{"ok":false,"error":"node not found — looked in /opt/homebrew/bin, /usr/local/bin and /usr/bin"}"#,
+                          for: generation)
                 return
             }
             // Build the payload BEFORE STARTING the child process. In OAuth mode this
@@ -1187,9 +2604,19 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             // internet is down means destroying a valid session (this happened).
             // In that case the normal flow below runs and the existing
             // "could not refresh" notice takes over.
-            if self.authState(payload) == "needsLogin" {
+            switch self.authState(payload) {
+            case "needsLogin":
                 self.requireLogin("Your Atlassian session has ended — please sign in again.")
                 return
+            case "tokenMissing":
+                self.requireLogin("Your Jira API token is no longer in the keychain — enter it again.")
+                return
+            case "tokenDenied":
+                self.requireLogin("macOS did not let Sprint Board read your Jira token. Press Back to board and choose Allow when macOS asks.",
+                                  canGoBack: true)
+                return
+            default:
+                break
             }
 
             let p = Process()
@@ -1203,7 +2630,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             p.standardOutput = pipe
             p.standardError = FileHandle.nullDevice
             do { try p.run() } catch {
-                self.push(#"{"ok":false,"error":"could not run fetch.mjs: \#(error)"}"#)
+                self.push(#"{"ok":false,"error":"could not run fetch.mjs: \#(error)"}"#, for: generation)
                 return
             }
             // Tokens go to stdin, NOT argv: argv would show up in `ps` output.
@@ -1216,7 +2643,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             p.waitUntilExit()
             let out = String(data: data, encoding: .utf8) ?? ""
             dbg("fetch output (\(out.count) bytes): \(out.prefix(240))")
-            self.push(out.isEmpty ? #"{"ok":false,"error":"fetch.mjs produced no output"}"# : out)
+            self.push(out.isEmpty ? #"{"ok":false,"error":"fetch.mjs produced no output"}"# : out, for: generation)
         }
     }
 
@@ -1232,7 +2659,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         }
     }
 
-    func push(_ json: String) {
+    func push(_ json: String, for generation: Int) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
 
@@ -1241,41 +2668,57 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             // Before the setup-screen check: fetch.mjs has already remembered these
             // conflicts, so one dropped here would never notify.
             self.notifyFromResult(obj, ok: ok)
-            if self.onSetupScreen { return }
+            if self.setupBlocksFetch { return }
+            if generation != self.boardGeneration { return }
             if ok { self.retryCount = 0; self.retryTimer?.invalidate() } else { self.scheduleRetry() }
 
-            guard self.ready else { self.pendingJSON = json; return }
-            let escaped = json.data(using: .utf8).flatMap {
-                String(data: try! JSONSerialization.data(withJSONObject: [String(data: $0, encoding: .utf8)!],
-                                                         options: [.fragmentsAllowed]), encoding: .utf8)
-            } ?? "[\"{}\"]"
-            // escaped: ["<json text>"] -> we take [0] back out and parse it.
-            // Errors are NOT swallowed: with completionHandler nil the page got stuck
-            // on "loading" leaving no trace whatsoever. Now it reaches the log.
-            self.web.evaluateJavaScript("window.sbRender(JSON.parse(\(escaped)[0]))") { _, err in
-                if let err { NSLog("SB: sbRender hatasi: \(err.localizedDescription)") }
-            }
+            self.lastJSON = json
+            if ok { self.lastOkJSON = json }
+            self.menuIcon = menuIconState(obj, ok: ok, previous: self.menuIcon)
+            self.statusItem.button?.image = ringIcon(18, self.menuIcon)
+            if self.boardLoaded { self.render(json, in: self.web) }
+        }
+    }
+
+    func render(_ json: String, in w: WKWebView) {
+        let escaped = json.data(using: .utf8).flatMap {
+            String(data: try! JSONSerialization.data(withJSONObject: [String(data: $0, encoding: .utf8)!],
+                                                     options: [.fragmentsAllowed]), encoding: .utf8)
+        } ?? "[\"{}\"]"
+        // escaped: ["<json text>"] -> we take [0] back out and parse it.
+        // Errors are NOT swallowed: with completionHandler nil the page got stuck
+        // on "loading" leaving no trace whatsoever. Now it reaches the log.
+        w.evaluateJavaScript("window.sbRender(JSON.parse(\(escaped)[0]))") { _, err in
+            if let err { NSLog("SB: sbRender hatasi: \(err.localizedDescription)") }
         }
     }
 
     func webView(_ w: WKWebView, didFinish nav: WKNavigation!) {
-        if restoreFrame != nil { applyFillClass() }
-        if onSetupScreen, setupFromSettings,
-           let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
-           let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
-           let context = setupContext(cfg) {
-            let ctx = (try? JSONSerialization.data(withJSONObject: context))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-            w.evaluateJavaScript("window.sbSetupContext && window.sbSetupContext(\(ctx))")
+        // Opened before its first load finished.
+        if w === widgetSettingsWeb, widgetSettingsShown { fillWidgetSettings() }
+        if w === web {
+            if restoreFrame != nil { applyFillClass() }
+            if onSetupScreen, setupFromSettings,
+               let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
+               let cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+               let context = setupContext(cfg) {
+                let ctx = (try? JSONSerialization.data(withJSONObject: context))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                w.evaluateJavaScript("window.sbSetupContext && window.sbSetupContext(\(ctx))")
+            }
+            if let msg = pendingSetupError {
+                pendingSetupError = nil
+                let json = (try? JSONSerialization.data(withJSONObject: ["errors": [msg]]))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                w.evaluateJavaScript("window.sbSetupResult && window.sbSetupResult(\(json))")
+            }
         }
-        if let msg = pendingSetupError {
-            pendingSetupError = nil
-            let json = (try? JSONSerialization.data(withJSONObject: ["errors": [msg]]))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-            w.evaluateJavaScript("window.sbSetupResult && window.sbSetupResult(\(json))")
-        }
-        ready = true
-        if let j = pendingJSON { pendingJSON = nil; push(j) }
+        guard w === web, w.url?.lastPathComponent == "sprints.html" else { return }
+        boardLoaded = true
+        // A page that loads after the data arrived gets it now. The last good result goes
+        // first, so a failed latest refresh still shows as a strip over the old data.
+        if let good = lastOkJSON, good != lastJSON { render(good, in: w) }
+        if let last = lastJSON { render(last, in: w) }
         pushNotes()
     }
 
@@ -1308,7 +2751,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         guard let d = try? JSONSerialization.data(withJSONObject: notes),
               let j = String(data: d, encoding: .utf8) else { return }
         DispatchQueue.main.async { [weak self] in
-            self?.web.evaluateJavaScript("window.sbNotes(\(j))", completionHandler: nil)
+            guard let self, self.boardLoaded else { return }
+            self.web.evaluateJavaScript("window.sbNotes && window.sbNotes(\(j))") { _, err in
+                if let err { dbg("sbNotes: \(err.localizedDescription)") }
+            }
         }
     }
 
@@ -1331,6 +2777,24 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
 
     func userContentController(_ c: WKUserContentController, didReceive msg: WKScriptMessage) {
         guard let body = msg.body as? [String: Any] else { return }
+        if let w = msg.webView, widgetPages.contains(w), let posted = body["height"] as? Double, posted > 60 {
+            let known = widgetPageHeights[w] != nil
+            widgetPageHeights[w] = CGFloat(posted)
+            if w === widgetShownPage { fitWidget(animated: known && w === web && !onSetupScreen) }
+        }
+        // Below is the board/setup protocol. Other tabs' pages post to their own handlers
+        // and must not reach it.
+        if msg.name == "hosts" {
+            // The gear: Settings over the tabs; its back arrow returns to Hosts.
+            if body["settings"] != nil { menuSettings() } else { hostsMessage(body) }
+            return
+        }
+        guard msg.name == "sb" else { return }
+        // The board, the setup screen and the Settings page share this handler. Window keys belong
+        // to the widget page; setup messages come from the setup screen or Settings, never the board.
+        let fromWidget = msg.webView === web
+        let fromSettingsPage = msg.webView === widgetSettingsWeb
+        let fromSetupPage = fromWidget || fromSettingsPage
 
         if let urlStr = body["open"] as? String, let url = URL(string: urlStr),
            url.scheme == "https" || url.scheme == "http" {
@@ -1340,48 +2804,27 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             manualRefreshPending = true
             reload()
         }
-        if body["atlassianLogin"] != nil {
+        if body["atlassianLogin"] != nil, fromSetupPage {
+            setupResultTarget = msg.webView
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.startAtlassianLogin() }
         }
-        if let t = body["tokenLogin"] as? [String: Any], let host = t["host"] as? String,
+        if fromSetupPage, let t = body["tokenLogin"] as? [String: Any], let host = t["host"] as? String,
            let email = t["email"] as? String, let token = t["token"] as? String {
+            setupResultTarget = msg.webView
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.finishTokenLogin(host: host, email: email, token: token)
             }
         }
         if let t = body["noteAdd"] as? String { addNote(t) }
         if let i = body["noteDel"] as? String { removeNote(i) }
-        if body["settings"] != nil, !onSetupScreen { menuSetup() }
-        if let s = body["saveSettings"] as? [String: Any], onSetupScreen { saveSettings(s) }
-        if body["disconnect"] != nil, onSetupScreen { disconnect() }
-        if body["backToBoard"] != nil, onSetupScreen {
-            onSetupScreen = false
-            setupFromSettings = false
-            loadPage("view.html")
-            reload()
-        }
-        if let w = body["win"] as? String {
-            switch w {
-            case "close": window.orderOut(nil)
-            case "minimize": window.miniaturize(nil)
-            case "fill": toggleFill()
-            default: break
-            }
-        }
-        // While the widget fills the screen its size is fixed; the page's height reports wait.
-        // The window never leaves the screen: it would run under the Dock and be saved so.
-        if let posted = body["height"] as? Double, posted > 60, restoreFrame == nil {
-            var f = window.frame
-            let top = f.maxY                    // pin the top edge, grow downwards
-            f.size.height = CGFloat(posted)
-            f.origin.y = top - f.height
-            f = onScreen(f, near: window.frame)
-            let now = window.frame
-            guard abs(f.minX - now.minX) >= 0.5 || abs(f.minY - now.minY) >= 0.5
-                    || abs(f.height - now.height) >= 0.5 else { return }
-            window.setFrame(f, display: true)
-            window.invalidateShadow()
-            saveFrame()
+        if body["settings"] != nil { menuSettings() }
+        let setupOpen = (fromWidget && onSetupScreen) || fromSettingsPage
+        if let s = body["saveSettings"] as? [String: Any], setupOpen, let page = msg.webView { saveSettings(s, reply: page) }
+        if body["disconnect"] != nil, setupOpen { disconnect() }
+        if body["backToBoard"] != nil, fromWidget, onSetupScreen { showBoard() }
+        if body["backToBoard"] != nil, fromSettingsPage { hideWidgetSettings() }
+        if fromWidget, let w = body["win"] as? String {
+            windowAction(w)
         }
     }
 
