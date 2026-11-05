@@ -317,6 +317,7 @@ enum TokenResult {
     case ok(String)
     case needsLogin
     case temporary
+    case denied
 }
 
 func getJSON(_ urlString: String, bearer: String) -> Any? {
@@ -744,10 +745,12 @@ func hostsApply(_ list: HostsList, local: [String], _ action: [String: Any], par
     }
     // A partner's domain (<partner>.<suffix>, the partner one label) also joins the Partners group.
     func joinPartners(_ name: String) {
-        guard let partner = partners.lazy
-            .compactMap({ name.hasSuffix(".\($0)") ? String(name.dropLast($0.count + 1)) : nil }).first,
-              hostsPartnerName(partner) == partner else { return }
-        join(name, ensureGroup(PARTNERS_GROUP))
+        let isPartner = partners.contains { suffix in
+            guard name.hasSuffix(".\(suffix)") else { return false }
+            let partner = String(name.dropLast(suffix.count + 1))
+            return hostsPartnerName(partner) == partner
+        }
+        if isPartner { join(name, ensureGroup(PARTNERS_GROUP)) }
     }
     func addDomain(_ name: String, into g: Int?) {
         if !list.domains.contains(name) { list.domains.append(name) }   // a new domain starts in prod
@@ -1305,6 +1308,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
     var retryCount = 0
     /// A fetch.mjs run (or the keychain read before it) is under way. Main thread only.
     var fetchInFlight = false
+    var settingsChanged = false
     /// Counts the times the board's data was dropped (Disconnect, a session that ended): a fetch
     /// started before belongs to the account that left. Main thread only.
     var boardGeneration = 0
@@ -1507,8 +1511,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         clearBoardData()
     }
 
-    /// Writes the board settings from the setup screen. fetch.mjs reads the config on every
-    /// run, so the next refresh uses them.
+    /// Writes the board settings from the setup screen. fetch.mjs reads the config when it
+    /// starts, so a refresh starts here, and a fetch already running is followed by another.
     func saveSettings(_ s: [String: Any], reply page: WKWebView) {
         guard let raw = try? Data(contentsOf: URL(fileURLWithPath: CONFIG_PATH)),
               var cfg = try? JSONSerialization.jsonObject(with: raw) as? [String: Any] else {
@@ -1535,6 +1539,8 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
               (try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))) != nil else {
             settingsResult(["errors": ["Could not write the config file."]], to: page); return
         }
+        settingsChanged = true
+        reload()
         settingsResult(["saved": true, "githubOrg": org, "showDraftPrs": drafts, "sprintGoalTracking": goals,
                         "partnerDomainSuffixes": partnerDomainSuffixes(cfg)], to: page)
     }
@@ -2411,7 +2417,10 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             dbg("token: from memory"); return .ok(t)
         }
         guard let refresh = keychainGet(service: JIRA_OAUTH_KEYCHAIN, account: email) else {
-            dbg("token: NO refresh in keychain"); return .needsLogin
+            // The item still there means the read was refused (Deny in macOS's dialog): the
+            // session is valid, so the board stays and offers Back to board.
+            let denied = keychainHas(service: JIRA_OAUTH_KEYCHAIN, account: email)
+            dbg("token: NO refresh read, denied: \(denied)"); return denied ? .denied : .needsLogin
         }
         let r = postJSON(WORKER_URL + "/refresh", ["refresh_token": refresh])
         guard let status = r.status else {
@@ -2504,6 +2513,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
                 case .ok(let at):   out["jiraAccessToken"] = at
                 case .needsLogin:   out["jiraAuthState"] = "needsLogin"
                 case .temporary:    out["jiraAuthState"] = "temporary"
+                case .denied:       out["jiraAuthState"] = "tokenDenied"
                 }
             } else {
                 let jiraSvc = (cfg["keychainService"] as? String) ?? JIRA_KEYCHAIN
@@ -2568,6 +2578,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
         guard !fetchInFlight else { return }
         fetchInFlight = true
         let generation = boardGeneration
+        settingsChanged = false
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             // Queued after any push() below, so the flag clears once its result is handled. When
@@ -2576,7 +2587,7 @@ final class App: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavi
             defer {
                 DispatchQueue.main.async {
                     self.fetchInFlight = false
-                    if generation != self.boardGeneration { self.reload() }
+                    if generation != self.boardGeneration || self.settingsChanged { self.reload() }
                 }
             }
             guard let node = NODE else {

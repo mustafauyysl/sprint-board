@@ -1,3 +1,4 @@
+import "./SprintBoard.test.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -3190,6 +3191,16 @@ test("hostsApply: addPartner adds the three partner domains in prod, in the Part
   assert.equal(r.error, null);
 });
 
+test("hostsApply: a partner domain joins Partners when a broader suffix comes first", { skip: !swiftAvailable }, () => {
+  const r = apply({ addPartner: "acme" }, [], LIST, ["example.test", "panel.example.test"]);
+  assert.equal(r.error, null);
+  assert.deepEqual(r.list.groups.at(-1), { name: "Partners", domains: ["acme.example.test", "acme.panel.example.test"] });
+  const other = apply({ add: "shop.acme.other.test" }, [], LIST, ["example.test", "panel.example.test"]);
+  assert.ok(!other.list.groups.some((g) => g.name === "Partners"), "no suffix fits, so no Partners group");
+  const deep = apply({ add: "a.b.example.test" }, [], LIST, ["example.test", "panel.example.test"]);
+  assert.ok(!deep.list.groups.some((g) => g.name === "Partners"), "the partner is one label");
+});
+
 test("hostsApply: addPartner also joins the selected group and reuses an existing Partners group", { skip: !swiftAvailable }, () => {
   const list = { domains: [], groups: [{ name: "Picked", domains: [] }, { name: "PARTNERS", domains: [] }] };
   const r = apply({ addPartner: "demopartner", group: "picked" }, [], list);
@@ -3321,6 +3332,31 @@ test("menu bar icon: signing out resets it, so it never shows the account that l
   assert.match(methodSource(src, "clearBoardData"), /menuIcon = MenuIconState\(\)\n\s*statusItem\.button\?\.image = ringIcon\(18, menuIcon\)/);
 });
 
+test("refresh: saved settings reach the board without waiting for the timer", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const save = methodSource(src, "saveSettings");
+  const wrote = save.indexOf("(try? data.write(to: URL(fileURLWithPath: CONFIG_PATH))) != nil");
+  const asked = save.indexOf("settingsChanged = true");
+  assert.ok(wrote >= 0 && asked > wrote, "only a save that reached the file asks for a refresh");
+  assert.ok(save.indexOf("reload()", asked) > asked);
+  assert.ok(save.indexOf("reload()") < save.lastIndexOf("settingsResult("), "the page hears the result after the refresh starts");
+  const reload = methodSource(src, "reload");
+  // A fetch reads the config when it starts, so only a fetch that starts after the save counts.
+  assert.ok(reload.indexOf("settingsChanged = false") > reload.indexOf("guard !fetchInFlight else { return }"));
+  assert.ok(reload.indexOf("settingsChanged = false") < reload.indexOf("DispatchQueue.global"));
+  // A save during a fetch: that fetch read the old config, so another runs when it ends.
+  assert.match(reload, /self\.fetchInFlight = false\n\s*if generation != self\.boardGeneration \|\| self\.settingsChanged \{ self\.reload\(\) \}/);
+});
+
+test("widget page scripts: the board page starts with hover off and can fit the window", () => {
+  const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
+  const launch = methodSource(src, "applicationDidFinishLaunching");
+  const config = launch.slice(launch.indexOf("let cfg = WKWebViewConfiguration()"), launch.indexOf("let frame = savedFrame()"));
+  assert.match(config, /for source in \[PANEL_PAGE_SCRIPT, WIDGET_PAGE_SCRIPT\] \{/);
+  assert.match(config, /addUserScript\(WKUserScript\(\n\s*source: source, injectionTime: \.atDocumentStart, forMainFrameOnly: true\)\)/);
+  assert.match(launch, /web = DragWebView\(frame: [^\n]*configuration: cfg\)/);
+});
+
 test("refresh: a fetch that ran while the account left is dropped, and the account now signed in gets its own", () => {
   const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
   assert.match(methodSource(src, "clearBoardData"), /boardGeneration \+= 1/);
@@ -3329,7 +3365,7 @@ test("refresh: a fetch that ran while the account left is dropped, and the accou
   // Every result carries the generation its fetch started in.
   assert.equal((reload.match(/self\.push\(/g) || []).length, 3);
   assert.equal((reload.match(/for: generation\)/g) || []).length, 3);
-  assert.match(reload, /self\.fetchInFlight = false\n\s*if generation != self\.boardGeneration \{ self\.reload\(\) \}/);
+  assert.match(reload, /self\.fetchInFlight = false\n\s*if generation != self\.boardGeneration \|\| self\.settingsChanged \{ self\.reload\(\) \}/);
   // Such a result reaches no board and not the icon.
   const push = methodSource(src, "push");
   assert.match(push, /if generation != self\.boardGeneration \{ return \}/);
@@ -3758,7 +3794,7 @@ function appRun(input, env = {}) {
   if (!appDriver) {
     const src = readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8");
     const consts = ["HOSTS_BLOCK_START", "HOSTS_BLOCK_END", "HOSTS_LEGACY_BLOCK_START", "HOSTS_LEGACY_BLOCK_END",
-      "HOSTS_SYSTEM_NAMES", "HOSTS_LOCAL_ADDRESSES", "HOSTS_DELETE_BACKUP_PREFIX", "HOSTS_DELETE_BACKUPS_KEPT", "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS", "JIRA_KEYCHAIN", "JIRA_OAUTH_KEYCHAIN"].map((name) => {
+      "HOSTS_SYSTEM_NAMES", "HOSTS_LOCAL_ADDRESSES", "HOSTS_DELETE_BACKUP_PREFIX", "HOSTS_DELETE_BACKUPS_KEPT", "PARTNERS_GROUP", "CHROME_INSECURE_FLAGS", "JIRA_KEYCHAIN", "JIRA_OAUTH_KEYCHAIN", "WORKER_URL"].map((name) => {
       const line = src.match(new RegExp(`^let ${name} = .*$`, "m"));
       assert.ok(line, `${name} not found in SprintBoard.swift`);
       return line[0];
@@ -3770,7 +3806,7 @@ function appRun(input, env = {}) {
       "hostsList", "hostsListJSON", "hostsApply", "hostsStatus", "hostsFileText", "hostsDeleteBackupName", "hostsDeleteBackupPath", "hostsDeleteBackupsPast", "writeHostsFile", "chromeMissingFlags",
       "partnerDomainSuffixes", "needsSetup"].map((name) => swiftSource(src, name));
     const methods = ["readHostsList", "writeHostsList", "migrateHostsList", "hostsMessage", "readHostsText", "hostsPartnerSuffixes", "scheduleChromeRefresh",
-      "openInsecureChrome", "cachedKeychainGet", "forgetCachedTokens", "tokenPayload"].map((name) => methodSource(src, name));
+      "openInsecureChrome", "cachedKeychainGet", "forgetCachedTokens", "currentJiraAccessToken", "tokenPayload"].map((name) => methodSource(src, name));
     const driver = `import Foundation
 let env = ProcessInfo.processInfo.environment
 let HOSTS_PATH = env["SB_HOSTS"] ?? ""
@@ -3781,6 +3817,8 @@ ${consts.join("\n")}
 ${decls.join("\n")}
 ${funcs.join("\n")}
 func dbg(_ s: String) {}
+// No network here: a refresh that gets this far reports an unreachable server.
+func postJSON(_ urlString: String, _ body: [String: Any]) -> (status: Int?, json: [String: Any]?) { (nil, nil) }
 
 // The keychain: items by service and account. A denied item exists but its secret is not handed
 // over (Deny in macOS's dialog). Secret reads are counted, and one can run a step while it is under way.
@@ -3798,6 +3836,7 @@ func keychainGet(service: String, account: String) -> String? {
     return value
 }
 func keychainHas(service: String, account: String) -> Bool { keychainItems[service + "\\n" + account] != nil }
+func keychainSet(service: String, account: String, value: String) { keychainItems[service + "\\n" + account] = value }
 
 final class NSRunningApplication {
     static var running: [NSRunningApplication] = []
@@ -3832,7 +3871,8 @@ final class App {
     func replyHosts(_ state: [String: Any], to body: [String: Any]) { replies.append(state) }
     func showChromeNote(_ note: String?) { notes.append(note.map { $0 as Any } ?? NSNull()) }
     func refreshChrome() { chromeRefreshes += 1 }
-    func currentJiraAccessToken(email: String) -> TokenResult { .needsLogin }
+    var jiraAccessToken: String?
+    var jiraAccessExpiry: Date?
 ${methods.join("\n")}
 }
 
@@ -4397,6 +4437,15 @@ test("token payload: a token the keychain will not hand over is told apart from 
   const reload = methodSource(readFileSync(new URL("./SprintBoard.swift", import.meta.url), "utf8"), "reload");
   assert.match(reload, /case "tokenMissing":\n\s*self\.requireLogin\("[^"]+"\)\n\s*return/);
   assert.match(reload, /case "tokenDenied":\n\s*self\.requireLogin\("[^"]+",\n\s*canGoBack: true\)\n\s*return/);
+});
+
+test("token payload: with Atlassian sign-in, a refused read keeps the session and a missing token ends it", { skip: !swiftAvailable }, () => {
+  const config = { email: "ada@example.invalid", tokensOwnedByApp: true, authMode: "oauth" };
+  const item = { service: "sprint-board-jira-oauth", account: "ada@example.invalid", value: "demo-refresh" };
+  const payload = (items) => appRun({ op: "payload", config, items }).payload;
+  assert.deepEqual(payload([{ ...item, denied: true }]), { jiraAuthState: "tokenDenied" });
+  assert.deepEqual(payload([]), { jiraAuthState: "needsLogin" });
+  assert.deepEqual(payload([item]), { jiraAuthState: "temporary" }, "a readable token goes on to the refresh");
 });
 
 test("needsSetup: tells whether someone is signed in without reading a secret", { skip: !swiftAvailable }, () => {
